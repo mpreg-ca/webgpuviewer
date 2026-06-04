@@ -2,7 +2,10 @@ package moe.grass.webgpuviewer
 
 import android.graphics.Bitmap
 import android.view.View
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.VectorConverter
 import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.exponentialDecay
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.AndroidExternalSurface
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -18,17 +21,23 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.pointer.AwaitPointerEventScope
 import androidx.compose.ui.input.pointer.PointerEvent
 import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerId
 import androidx.compose.ui.input.pointer.changedToUp
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
+import androidx.compose.ui.input.pointer.util.VelocityTracker
+import androidx.compose.ui.input.pointer.util.addPointerInputChange
 import androidx.compose.ui.platform.LocalView
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.pow
@@ -43,6 +52,7 @@ fun WebGpuImageViewer(
     val renderChannel = remember { Channel<Float>(Channel.CONFLATED) }
     val scope = rememberCoroutineScope()
     val animationJob = remember { mutableStateOf<Job?>(null) }
+    val fling = remember { Animatable(Offset.Zero, Offset.VectorConverter) }
 
     AndroidExternalSurface(
         modifier = modifier
@@ -177,103 +187,154 @@ fun WebGpuImageViewer(
                     val touchSlop = viewConfiguration.touchSlop
 
                     var moved = false
+                    var dragOnly = true
 
-                    awaitFirstDown(requireUnconsumed = true, pass = PointerEventPass.Initial)
+                    val velocityTracker = VelocityTracker()
+
+                    val firstDown =
+                        awaitFirstDown(requireUnconsumed = true, pass = PointerEventPass.Initial)
+                    velocityTracker.addPointerInputChange(firstDown)
+                    var lastMoveTime = firstDown.uptimeMillis
+                    var lastEventTime: Long
+
+                    animationJob.value?.cancel()
+
                     if (renderer.scale > renderer.min_scale) {
                         view.parent?.requestDisallowInterceptTouchEvent(true)
                     }
 
                     do {
                         val event = awaitPointerEvent(pass = PointerEventPass.Initial)
-                        val canceled = event.changes.any { it.isConsumed }
-                        if (!canceled) {
-                            if (event.changes.size > 1) {
-                                view.parent?.requestDisallowInterceptTouchEvent(true)
+                        val change = event.changes[0]
+                        lastEventTime = change.uptimeMillis
+
+                        if (event.changes.size > 1) {
+                            view.parent?.requestDisallowInterceptTouchEvent(true)
+                            dragOnly = false
+                        }
+
+
+                        if (dragOnly) {
+                            if (change.positionChanged()) {
+                                lastMoveTime = change.uptimeMillis
                             }
+                            velocityTracker.addPointerInputChange(change)
+                        }
 
-                            val zoomChange = event.calculateZoom()
-                            val panChange = event.calculatePan()
+                        val zoomChange = event.calculateZoom()
+                        val panChange = event.calculatePan()
 
-                            if (!pastTouchSlop) {
-                                zoom *= zoomChange
-                                pan += panChange
+                        if (!pastTouchSlop) {
+                            zoom *= zoomChange
+                            pan += panChange
 
-                                val centroidSize = event.calculateCentroidSize(useCurrent = false)
-                                val zoomMotion = abs(1 - zoom) * centroidSize
-                                val panMotion = pan.getDistance()
+                            val centroidSize = event.calculateCentroidSize(useCurrent = false)
+                            val zoomMotion = abs(1 - zoom) * centroidSize
+                            val panMotion = pan.getDistance()
 
-                                if (zoomMotion > touchSlop || panMotion > touchSlop) {
-                                    pastTouchSlop = true
+                            if (zoomMotion > touchSlop || panMotion > touchSlop) {
+                                pastTouchSlop = true
+                            }
+                        }
+
+                        if (moved) {
+                            event.changes.forEach {
+                                if (it.positionChanged()) {
+                                    it.consume()
                                 }
                             }
+                            view.parent?.requestDisallowInterceptTouchEvent(true)
+                        }
 
-                            if (moved) {
-                                event.changes.forEach {
-                                    if (it.positionChanged()) {
-                                        it.consume()
-                                    }
+                        if (pastTouchSlop) {
+                            val centroid = event.calculateCentroid(useCurrent = false)
+                            if (zoomChange != 1f || panChange != Offset.Zero) {
+                                val new_scale = renderer.scale * zoomChange
+                                val diff = 1 / new_scale - 1 / renderer.scale
+
+                                var x =
+                                    renderer.x + (panChange.x / renderer.width) / renderer.scale
+                                var y =
+                                    renderer.y + (panChange.y / renderer.height) / renderer.scale
+
+                                val scale = max(new_scale, renderer.min_scale)
+
+                                x += (centroid.x / renderer.width - 0.5f) * diff
+                                y += (centroid.y / renderer.height - 0.5f) * diff
+
+                                val max_x = max(
+                                    0f,
+                                    (renderer.image_width.toFloat() / renderer.width - 1 / scale) / 2
+                                )
+                                val max_y = max(
+                                    0f,
+                                    (renderer.image_height.toFloat() / renderer.height - 1 / scale) / 2
+                                )
+
+                                x = x.coerceIn(-max_x, max_x)
+                                y = y.coerceIn(-max_y, max_y)
+
+                                if (renderer.scale != scale) {
+                                    moved = true
                                 }
-                                view.parent?.requestDisallowInterceptTouchEvent(true)
+
+                                if (renderer.x != x && view.scrollable(true)) {
+                                    moved = true
+                                }
+                                if (renderer.y != y && view.scrollable(false)) {
+                                    moved = true
+                                }
+
+                                renderer.scale = scale
+                                renderer.x = x
+                                renderer.y = y
+
+                                renderChannel.trySend(0f)
                             }
 
-                            if (pastTouchSlop) {
-                                val centroid = event.calculateCentroid(useCurrent = false)
-                                if (zoomChange != 1f || panChange != Offset.Zero) {
-                                    val new_scale = renderer.scale * zoomChange
-                                    val diff = 1 / new_scale - 1 / renderer.scale
+                            if (!moved) {
+                                view.parent?.requestDisallowInterceptTouchEvent(false)
+                            }
+                        }
+                    } while (event.changes.any { it.pressed })
 
-                                    var x =
-                                        renderer.x + (panChange.x / renderer.width) / renderer.scale
-                                    var y =
-                                        renderer.y + (panChange.y / renderer.height) / renderer.scale
-
-                                    val scale = max(new_scale, renderer.min_scale)
-
-                                    x += (centroid.x / renderer.width - 0.5f) * diff
-                                    y += (centroid.y / renderer.height - 0.5f) * diff
-
+                    if (moved && dragOnly && (lastEventTime - lastMoveTime) < 100) {
+                        val velocity = velocityTracker.calculateVelocity()
+                        if (abs(velocity.x) > 400 || abs(velocity.y) > 400) {
+                            animationJob.value = scope.launch {
+                                fling.snapTo(Offset.Zero)
+                                var lastOffset = Offset.Zero
+                                fling.animateDecay(
+                                    Offset(velocity.x, velocity.y),
+                                    exponentialDecay()
+                                ) {
+                                    val delta = value - lastOffset
+                                    lastOffset = value
+                                    val dx = (delta.x / renderer.width) / renderer.scale
+                                    val dy = (delta.y / renderer.height) / renderer.scale
                                     val max_x = max(
                                         0f,
-                                        (renderer.image_width.toFloat() / renderer.width - 1 / scale) / 2
+                                        (renderer.image_width.toFloat() / renderer.width - 1 / renderer.scale) / 2
                                     )
                                     val max_y = max(
                                         0f,
-                                        (renderer.image_height.toFloat() / renderer.height - 1 / scale) / 2
+                                        (renderer.image_height.toFloat() / renderer.height - 1 / renderer.scale) / 2
                                     )
-
-                                    x = x.coerceIn(-max_x, max_x)
-                                    y = y.coerceIn(-max_y, max_y)
-
-                                    if (renderer.scale != scale) {
-                                        moved = true
-                                    }
-
-                                    if (renderer.x != x && view.scrollable(true)) {
-                                        moved = true
-                                    }
-                                    if (renderer.y != y && view.scrollable(false)) {
-                                        moved = true
-                                    }
-
-                                    renderer.scale = scale
-                                    renderer.x = x
-                                    renderer.y = y
-
+                                    renderer.x = (renderer.x + dx).coerceIn(-max_x, max_x)
+                                    renderer.y = (renderer.y + dy).coerceIn(-max_y, max_y)
                                     renderChannel.trySend(0f)
-                                }
-
-                                if (!moved) {
-                                    view.parent?.requestDisallowInterceptTouchEvent(false)
                                 }
                             }
                         }
-                    } while (!canceled && event.changes.any { it.pressed })
+                    }
                 }
             },
     ) {
         onSurface { surface, width, height ->
             try {
-                renderer.init(bitmap, surface, width, height)
+                withContext(Dispatchers.Default) {
+                    renderer.init(bitmap, surface, width, height)
+                }
 
                 renderer.render()
 
@@ -281,6 +342,7 @@ fun WebGpuImageViewer(
                     renderer.render()
                 }
             } finally {
+                animationJob.value?.cancel()
                 renderer.cleanup()
             }
         }
@@ -297,8 +359,8 @@ fun View.scrollable(horizontal: Boolean): Boolean {
     return false
 }
 
-private suspend fun androidx.compose.ui.input.pointer.AwaitPointerEventScope.waitForCleanUp(
-    pointerId: androidx.compose.ui.input.pointer.PointerId,
+private suspend fun AwaitPointerEventScope.waitForCleanUp(
+    pointerId: PointerId,
     timeout: Long,
     touchSlop: Float
 ): PointerEvent? = try {
@@ -321,7 +383,7 @@ private suspend fun androidx.compose.ui.input.pointer.AwaitPointerEventScope.wai
     null
 } as PointerEvent?
 
-private suspend fun androidx.compose.ui.input.pointer.AwaitPointerEventScope.waitForDown(timeout: Long) =
+private suspend fun AwaitPointerEventScope.waitForDown(timeout: Long) =
     try {
         withTimeout(timeout) {
             var down = awaitPointerEvent().changes.firstOrNull { it.pressed }
