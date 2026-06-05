@@ -180,7 +180,7 @@ class WebGpuRenderer {
                             (image_height * scale).toInt(),
                             1
                         ),
-                        usage = TextureUsage.TextureBinding or TextureUsage.StorageBinding or TextureUsage.RenderAttachment,
+                        usage = TextureUsage.TextureBinding or TextureUsage.RenderAttachment,
                         format = TextureFormat.RGBA8Unorm
                     )
                 )
