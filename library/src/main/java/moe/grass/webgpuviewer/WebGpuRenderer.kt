@@ -46,9 +46,7 @@ import androidx.webgpu.WebGpuRuntimeException
 import androidx.webgpu.helper.Util.windowFromSurface
 import androidx.webgpu.helper.createGpuTexture
 import androidx.webgpu.helper.initLibrary
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -63,10 +61,10 @@ object webgpu {
     var instance: GPUInstance? = null
     var adapter: GPUAdapter? = null
     var device: GPUDevice? = null
+    var pipeline: GPURenderPipeline? = null
 }
 
 class WebGpuRenderer {
-    private lateinit var pipeline: GPURenderPipeline
     private lateinit var surface: GPUSurface
 
     var tilesize = 4096
@@ -104,7 +102,10 @@ class WebGpuRenderer {
     var x: Float = 0f
     var y: Float = 0f
 
-    fun createTiles(device: GPUDevice, image: Bitmap): MutableList<MutableList<GPUTexture>> {
+    suspend fun createTiles(
+        device: GPUDevice,
+        image: Bitmap
+    ): MutableList<MutableList<GPUTexture>> {
         Log.i("webgpuviewer", "Create tiles " + image.width + " " + image.height)
         val tiles: MutableList<MutableList<GPUTexture>> = mutableListOf()
         for (y in 0 until image.height step tilesize) {
@@ -114,7 +115,9 @@ class WebGpuRenderer {
                 Log.i("webgpuviewer", "Create tile " + x + " " + y)
                 val width = min(tilesize, image.width - x)
                 val height = min(tilesize, image.height - y)
-                val cropped = Bitmap.createBitmap(image, x, y, width, height)
+                val cropped = withContext(Dispatchers.Default) {
+                    Bitmap.createBitmap(image, x, y, width, height)
+                }
                 val texture = cropped.createGpuTexture(device)
                 col.add(texture)
             }
@@ -137,14 +140,34 @@ class WebGpuRenderer {
                     uncapturedErrorCallbackExecutor = Executor(Runnable::run),
                 )
             )
-        }
 
+            val shaderModule = webgpu.device!!.createShaderModule(
+                GPUShaderModuleDescriptor(
+                    shaderSourceWGSL = GPUShaderSourceWGSL(
+                        WebGpuRendererShader.shader
+                    )
+                )
+            )
+
+            webgpu.pipeline = webgpu.device!!.createRenderPipeline(
+                GPURenderPipelineDescriptor(
+                    vertex = GPUVertexState(shaderModule, entryPoint = "vs_main"),
+                    fragment = GPUFragmentState(
+                        shaderModule,
+                        entryPoint = "fs_main",
+                        targets = arrayOf(GPUColorTargetState(format = TextureFormat.RGBA8Unorm))
+                    ),
+                    primitive = GPUPrimitiveState(topology = TriangleList),
+                )
+            )
+        }
 
         this.surface = surface.let {
             webgpu.instance!!.createSurface(
                 GPUSurfaceDescriptor(
-                    surfaceSourceAndroidNativeWindow =
-                        GPUSurfaceSourceAndroidNativeWindow(windowFromSurface(it))
+                    surfaceSourceAndroidNativeWindow = GPUSurfaceSourceAndroidNativeWindow(
+                        windowFromSurface(it)
+                    )
                 )
             )
         }
@@ -178,78 +201,53 @@ class WebGpuRenderer {
         this.image_height = image.height
         byteBuffer.order(ByteOrder.nativeOrder())
 
-        withContext(Dispatchers.Default) {
-            val shaderModule = device.createShaderModule(
-                GPUShaderModuleDescriptor(
-                    shaderSourceWGSL = GPUShaderSourceWGSL(
-                        WebGpuRendererShader.shader
-                    )
-                )
+        buffer = device.createBuffer(
+            GPUBufferDescriptor(
+                size = 32,
+                usage = BufferUsage.CopyDst or BufferUsage.Uniform
             )
-
-            pipeline = device.createRenderPipeline(
-                GPURenderPipelineDescriptor(
-                    vertex = GPUVertexState(shaderModule, entryPoint = "vs_main"),
-                    fragment = GPUFragmentState(
-                        shaderModule,
-                        entryPoint = "fs_main",
-                        targets = arrayOf(GPUColorTargetState(format = TextureFormat.RGBA8Unorm))
-                    ),
-                    primitive = GPUPrimitiveState(topology = TriangleList),
-                )
-            )
-
-            buffer = device.createBuffer(
-                GPUBufferDescriptor(
-                    size = 32,
-                    usage = BufferUsage.CopyDst or BufferUsage.Uniform
-                )
-            )
-        }
+        )
 
         mipmaps.forEach { it.tiles.flatten().forEach { it.destroy() } }
         mipmaps.clear()
         mipmaps.add(Mipmap(1f, createTiles(device, image)))
 
-        Log.i("webgpuviewer", "create mipmaps")
+        Log.i("webgpuviewer", "Create mipmaps")
         var scale = 1f
-        ready = true
-        CoroutineScope(Dispatchers.Default).launch {
-            while (image_width * scale > 4096 && image_height * scale > 4096) {
-                scale /= 2
-                val im = ImageUtil.resize(
+        while (image_width * scale > 4096 && image_height * scale > 4096) {
+            scale /= 2
+            val im = withContext(Dispatchers.Default) {
+                ImageUtil.resize(
                     image,
                     (image_width * scale).toInt(),
                     (image_height * scale).toInt()
                 )
-                mipmaps.add(Mipmap(scale, createTiles(device, im)))
             }
-
-            CoroutineScope(Dispatchers.Main).launch {
-                while (image_width * scale > 512 && image_height * scale > 512) {
-                    scale /= 2
-                    val texture = device.createTexture(
-                        GPUTextureDescriptor(
-                            size = GPUExtent3D(
-                                (image_width * scale).toInt(),
-                                (image_height * scale).toInt(),
-                                1
-                            ),
-                            usage = TextureUsage.TextureBinding or TextureUsage.RenderAttachment,
-                            format = TextureFormat.RGBA8Unorm
-                        )
-                    )
-                    render(mipmaps[mipmaps.size - 1], texture, 0f, 0f, scale)
-                    mipmaps.add(Mipmap(scale, listOf(listOf(texture))))
-                }
-
-                ready = true
-            }
+            mipmaps.add(Mipmap(scale, createTiles(device, im)))
         }
+
+        while (image_width * scale > 512 && image_height * scale > 512) {
+            scale /= 2
+            val texture = device.createTexture(
+                GPUTextureDescriptor(
+                    size = GPUExtent3D(
+                        (image_width * scale).toInt(),
+                        (image_height * scale).toInt(),
+                        1
+                    ),
+                    usage = TextureUsage.TextureBinding or TextureUsage.RenderAttachment,
+                    format = TextureFormat.RGBA8Unorm
+                )
+            )
+            render(mipmaps[mipmaps.size - 1], texture, 0f, 0f, scale)
+            mipmaps.add(Mipmap(scale, listOf(listOf(texture))))
+        }
+
+        ready = true
     }
 
     fun render() {
-        if (!ready) {
+        if (mipmaps.size == 0) {
             return
         }
 
@@ -260,10 +258,6 @@ class WebGpuRenderer {
     }
 
     fun render(mipmap: Mipmap, dst: GPUTexture, x: Float, y: Float, scale: Float) {
-        if (!ready) {
-            return
-        }
-
         val commandEncoder = webgpu.device!!.createCommandEncoder()
 
         var vx = round((-x * dst.width + 0.5 * image_width) * mipmap.scale / tilesize).toInt() - 1
@@ -312,11 +306,11 @@ class WebGpuRenderer {
             )
         )
 
-        pass.setPipeline(pipeline)
+        pass.setPipeline(webgpu.pipeline!!)
         pass.setBindGroup(
             0, webgpu.device!!.createBindGroup(
                 GPUBindGroupDescriptor(
-                    layout = pipeline.getBindGroupLayout(0),
+                    layout = webgpu.pipeline!!.getBindGroupLayout(0),
                     entries = arrayOf(
                         GPUBindGroupEntry(
                             binding = 0,
@@ -332,7 +326,6 @@ class WebGpuRenderer {
     }
 
     fun cleanup() {
-        pipeline.close()
         surface.close()
         buffer.close()
         mipmaps.forEach { it.tiles.flatten().forEach { it.destroy() } }
