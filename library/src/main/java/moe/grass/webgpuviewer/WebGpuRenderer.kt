@@ -75,7 +75,9 @@ class WebGpuRenderer {
     var image_width: Int = 0
     var image_height: Int = 0
 
-    var min_scale: Float = 0f
+    var minScale: Float = 0f
+    var ratiox: Float = 0f
+    var ratioy: Float = 0f
 
     var ready = false
 
@@ -187,14 +189,14 @@ class WebGpuRenderer {
         this.width = width
         this.height = height
 
-        val ratiox = width.toFloat() / image.width.toFloat()
-        val ratioy = height.toFloat() / image.height.toFloat()
+        ratiox = width.toFloat() / image.width.toFloat()
+        ratioy = height.toFloat() / image.height.toFloat()
 
         if (this.image_width == 0) {
             this.x = 0f
             this.y = 0f
-            this.min_scale = max(0.01f, min(ratiox, ratioy))
-            this.scale = this.min_scale
+            this.minScale = max(0.01f, min(ratiox, ratioy))
+            this.scale = this.minScale
         }
 
         this.image_width = image.width

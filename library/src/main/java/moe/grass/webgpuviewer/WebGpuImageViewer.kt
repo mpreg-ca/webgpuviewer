@@ -38,6 +38,7 @@ import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.pow
 
 @Composable
@@ -45,6 +46,9 @@ fun WebGpuImageViewer(
     bitmap: Bitmap,
     doubleTapScale: Float = LocalView.current.resources.displayMetrics.densityDpi / 200f,
     maxScale: Float = LocalView.current.resources.displayMetrics.densityDpi / 100f,
+    zoomStartPosition: Offset = Offset(0f, 0f),
+    startFitWidth: Boolean = false,
+    startFitHeight: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     val view = LocalView.current
@@ -54,13 +58,15 @@ fun WebGpuImageViewer(
     val animationJob = remember { mutableStateOf<Job?>(null) }
     val fling = remember { Animatable(Offset.Zero, Offset.VectorConverter) }
 
+    var fitScale = 1f
+
     val reset: (origin: Offset) -> Unit = { origin ->
         animationJob.value?.cancel()
         val startScale = renderer.scale
         val startX = renderer.x
         val startY = renderer.y
 
-        val targetScale = startScale.coerceIn(renderer.min_scale, maxScale)
+        val targetScale = startScale.coerceIn(renderer.minScale, maxScale)
         val max_x = max(
             0f,
             (renderer.image_width.toFloat() / renderer.width - 1 / targetScale) / 2
@@ -116,7 +122,7 @@ fun WebGpuImageViewer(
                     val firstDown = awaitFirstDown(pass = PointerEventPass.Initial)
                     reset(Offset(0.5f, 0.5f))
 
-                    if (renderer.scale > renderer.min_scale) {
+                    if (renderer.scale > renderer.minScale) {
                         view.parent?.requestDisallowInterceptTouchEvent(true)
                     }
 
@@ -132,8 +138,8 @@ fun WebGpuImageViewer(
                             val px: Float
                             val py: Float
 
-                            if (renderer.scale == renderer.min_scale) {
-                                targetScale = max(doubleTapScale, renderer.min_scale)
+                            if (renderer.scale == fitScale) {
+                                targetScale = max(doubleTapScale, fitScale)
                                 val diff = 1 / targetScale - 1 / renderer.scale
 
                                 val max_x = max(
@@ -154,7 +160,7 @@ fun WebGpuImageViewer(
                                 px = (x - startX) / diff
                                 py = (y - startY) / diff
                             } else {
-                                targetScale = renderer.min_scale
+                                targetScale = fitScale
                                 val diff = 1 / targetScale - 1 / startScale
                                 px = -startX / diff
                                 py = -startY / diff
@@ -217,7 +223,7 @@ fun WebGpuImageViewer(
                             }
 
                             val velocity = velocityTracker.calculateVelocity()
-                            if (abs(velocity.y) > 200 && renderer.scale > renderer.min_scale && renderer.scale < maxScale) {
+                            if (abs(velocity.y) > 200 && renderer.scale > fitScale && renderer.scale < maxScale) {
                                 // fling zoom
                                 animationJob.value = scope.launch {
                                     val animation = Animatable(0f)
@@ -230,7 +236,7 @@ fun WebGpuImageViewer(
                                             originalScale * 10f.pow(2 * (totalDeltaY + value) / renderer.height)
 
                                         renderer.scale =
-                                            new_scale.coerceIn(renderer.min_scale, maxScale)
+                                            new_scale.coerceIn(fitScale, maxScale)
                                         val diff = 1 / renderer.scale - 1 / originalScale
 
                                         val x = originalX + px * diff
@@ -308,7 +314,7 @@ fun WebGpuImageViewer(
                                 val pan = event.calculatePan()
                                 acc += pan
 
-                                if (acc.getDistance() > touchSlop && renderer.scale > renderer.min_scale) {
+                                if (acc.getDistance() > touchSlop && renderer.scale > fitScale) {
                                     view.parent?.requestDisallowInterceptTouchEvent(false)
                                 }
 
@@ -342,6 +348,10 @@ fun WebGpuImageViewer(
                                         ) != renderer.y)
                                     ) {
                                         renderer.scale = new_scale
+                                        if (single) {
+                                            x = x.coerceIn(-max_x, max_x)
+                                            y = y.coerceIn(-max_y, max_y)
+                                        }
                                         renderer.x = x
                                         renderer.y = y
                                         view.parent?.requestDisallowInterceptTouchEvent(true)
@@ -370,7 +380,7 @@ fun WebGpuImageViewer(
 
                         val velocity = velocityTracker.calculateVelocity()
                         if (
-                            (renderer.scale >= renderer.min_scale) &&
+                            (renderer.scale >= fitScale) &&
                             (renderer.scale <= maxScale) &&
                             (lastEventTime - lastMoveTime) < 100 &&
                             (abs(velocity.x) > 400 || abs(velocity.y) > 400) &&
@@ -408,6 +418,31 @@ fun WebGpuImageViewer(
         onSurface { surface, width, height ->
             try {
                 renderer.init(bitmap, surface, width, height)
+                fitScale = if (startFitWidth && !startFitHeight) {
+                    renderer.ratiox
+                } else if (startFitHeight && !startFitWidth) {
+                    renderer.ratioy
+                } else {
+                    max(0.01f, min(renderer.ratiox, renderer.ratioy))
+                }
+                if (!startFitWidth && !startFitHeight) {
+                    renderer.scale = 1f
+                } else {
+                    renderer.scale = fitScale
+                }
+
+                val max_x = max(
+                    0f,
+                    (renderer.image_width.toFloat() / renderer.width - 1 / renderer.scale) / 2
+                )
+                val max_y = max(
+                    0f,
+                    (renderer.image_height.toFloat() / renderer.height - 1 / renderer.scale) / 2
+                )
+
+                renderer.x = -zoomStartPosition.x * max_x
+                renderer.y = -zoomStartPosition.y * max_y
+
                 renderer.render()
 
                 renderChannel.receiveAsFlow().collect {
