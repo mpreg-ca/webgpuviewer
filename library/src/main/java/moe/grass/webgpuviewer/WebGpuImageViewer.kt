@@ -1,6 +1,7 @@
 package moe.grass.webgpuviewer
 
 import android.graphics.Bitmap
+import android.util.Log
 import android.view.View
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.VectorConverter
@@ -53,9 +54,13 @@ fun WebGpuImageViewer(
     val animationJob = remember { mutableStateOf<Job?>(null) }
     val fling = remember { Animatable(Offset.Zero, Offset.VectorConverter) }
 
-    val reset: () -> Unit = {
+    val reset: (origin: Offset) -> Unit = { origin ->
         animationJob.value?.cancel()
-        val targetScale = renderer.scale.coerceIn(renderer.min_scale, maxScale)
+        val startScale = renderer.scale
+        val startX = renderer.x
+        val startY = renderer.y
+
+        val targetScale = startScale.coerceIn(renderer.min_scale, maxScale)
         val max_x = max(
             0f,
             (renderer.image_width.toFloat() / renderer.width - 1 / targetScale) / 2
@@ -64,18 +69,33 @@ fun WebGpuImageViewer(
             0f,
             (renderer.image_height.toFloat() / renderer.height - 1 / targetScale) / 2
         )
-        val targetX = renderer.x.coerceIn(-max_x, max_x)
-        val targetY = renderer.y.coerceIn(-max_y, max_y)
 
-        val startScale = renderer.scale
-        val startX = renderer.x
-        val startY = renderer.y
+        var px: Float
+        var py: Float
+
+        if (targetScale != startScale) {
+            val diff = 1 / targetScale - 1 / renderer.scale
+            var x = renderer.x + (origin.x - 0.5f) * diff
+            var y = renderer.y + (origin.y - 0.5f) * diff
+            x = x.coerceIn(-max_x, max_x)
+            y = y.coerceIn(-max_y, max_y)
+            px = (x - startX) / diff
+            py = (y - startY) / diff
+        } else {
+            px = (renderer.x.coerceIn(-max_x, max_x) - startX)
+            py = (renderer.y.coerceIn(-max_y, max_y) - startY)
+        }
 
         animationJob.value = scope.launch {
             animate(0f, 1f, animationSpec = tween(300)) { value, _ ->
                 renderer.scale = startScale + (targetScale - startScale) * value
-                renderer.x = startX + (targetX - startX) * value
-                renderer.y = startY + (targetY - startY) * value
+                val diff = if (renderer.scale != startScale) {
+                    1 / renderer.scale - 1 / startScale
+                } else {
+                    value
+                }
+                renderer.x = startX + px * diff
+                renderer.y = startY + py * diff
                 renderChannel.trySend(0f)
             }
         }
@@ -94,7 +114,7 @@ fun WebGpuImageViewer(
 
                 awaitEachGesture {
                     val firstDown = awaitFirstDown(pass = PointerEventPass.Initial)
-                    reset()
+                    reset(Offset(0.5f, 0.5f))
 
                     if (renderer.scale > renderer.min_scale) {
                         view.parent?.requestDisallowInterceptTouchEvent(true)
@@ -197,10 +217,8 @@ fun WebGpuImageViewer(
                             }
 
                             val velocity = velocityTracker.calculateVelocity()
-                            if (abs(velocity.y) > 200 &&
-                                (velocity.y < 0 && renderer.scale > renderer.min_scale ||
-                                        velocity.y > 0 && renderer.scale < maxScale)
-                            ) { // fling zoom
+                            if (abs(velocity.y) > 200 && renderer.scale > renderer.min_scale && renderer.scale < maxScale) {
+                                // fling zoom
                                 animationJob.value = scope.launch {
                                     val animation = Animatable(0f)
                                     animation.snapTo(0f)
@@ -233,13 +251,20 @@ fun WebGpuImageViewer(
                                     }
                                 }
                             } else {
-                                reset()
+                                reset(
+                                    Offset(
+                                        secondDown.position.x / renderer.width,
+                                        secondDown.position.y / renderer.height
+                                    )
+                                )
                             }
                         }
                     } else {
                         var lastMoveTime = firstDown.uptimeMillis
                         var lastEventTime: Long = firstDown.uptimeMillis
                         var acc = Offset.Zero
+
+                        var scaleOrigin = Offset(0.5f, 0.5f)
 
                         var single = true
 
@@ -261,20 +286,24 @@ fun WebGpuImageViewer(
                                     lastMoveTime = change.uptimeMillis
                                 }
 
-                                if (event.changes.size > 1) {
+                                val centroid = event.calculateCentroid(useCurrent = true)
+
+                                if (event.changes.size > 1 && event.changes.all { it.pressed }) {
                                     view.parent?.requestDisallowInterceptTouchEvent(true)
                                     if (single) {
                                         velocityTracker.resetTracking()
                                     }
                                     velocityTracker.addPointerInputChange(change)
                                     single = false
-                                } else {
-                                    if (single) {
-                                        velocityTracker.addPointerInputChange(change)
-                                    }
+
+                                    scaleOrigin = Offset(
+                                        centroid.x / renderer.width.toFloat(),
+                                        centroid.y / renderer.height.toFloat()
+                                    )
+                                } else if (single) {
+                                    velocityTracker.addPointerInputChange(change)
                                 }
 
-                                val centroid = event.calculateCentroid(useCurrent = true)
                                 val zoom = event.calculateZoom()
                                 val pan = event.calculatePan()
                                 acc += pan
@@ -307,7 +336,7 @@ fun WebGpuImageViewer(
                                             -max_x,
                                             max_x
                                         ) != renderer.x) ||
-                                        (view.scrollable(false) && x.coerceIn(
+                                        (view.scrollable(false) && y.coerceIn(
                                             -max_y,
                                             max_y
                                         ) != renderer.y)
@@ -330,13 +359,28 @@ fun WebGpuImageViewer(
                             }
                         } while (!canceled && event.changes.any { it.pressed })
 
+                        val max_x = max(
+                            0f,
+                            (renderer.image_width.toFloat() / renderer.width - 1 / renderer.scale) / 2
+                        )
+                        val max_y = max(
+                            0f,
+                            (renderer.image_height.toFloat() / renderer.height - 1 / renderer.scale) / 2
+                        )
+
                         val velocity = velocityTracker.calculateVelocity()
                         if (
                             (renderer.scale >= renderer.min_scale) &&
                             (renderer.scale <= maxScale) &&
                             (lastEventTime - lastMoveTime) < 100 &&
-                            (abs(velocity.x) > 400 || abs(velocity.y) > 400)
-                        ) { // fling pan
+                            (abs(velocity.x) > 400 || abs(velocity.y) > 400) &&
+                            (renderer.x.coerceIn(
+                                -max_x,
+                                max_x
+                            ) == renderer.x || renderer.y.coerceIn(-max_y, max_y) == renderer.y)
+                        ) {
+                            Log.i("webgpurenderer", "fling pan")
+                            // fling pan
                             animationJob.value = scope.launch {
                                 fling.snapTo(Offset.Zero)
                                 var lastOffset = Offset.Zero
@@ -348,21 +392,14 @@ fun WebGpuImageViewer(
                                     lastOffset = value
                                     val dx = (delta.x / renderer.width) / renderer.scale
                                     val dy = (delta.y / renderer.height) / renderer.scale
-                                    val max_x = max(
-                                        0f,
-                                        (renderer.image_width.toFloat() / renderer.width - 1 / renderer.scale) / 2
-                                    )
-                                    val max_y = max(
-                                        0f,
-                                        (renderer.image_height.toFloat() / renderer.height - 1 / renderer.scale) / 2
-                                    )
                                     renderer.x = (renderer.x + dx).coerceIn(-max_x, max_x)
                                     renderer.y = (renderer.y + dy).coerceIn(-max_y, max_y)
                                     renderChannel.trySend(0f)
                                 }
                             }
                         } else {
-                            reset()
+                            Log.i("webgpurenderer", "reset")
+                            reset(scaleOrigin)
                         }
                     }
                 }
