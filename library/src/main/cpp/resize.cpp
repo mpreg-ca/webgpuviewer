@@ -8,10 +8,9 @@
 #endif
 
 float srgbToLinearLUT[256];
-uint8_t linearToSRGBLUT[4096];
 bool lutsInitialized = false;
 
-void initVectorizedLUTs() {
+void initLUTs() {
   if (lutsInitialized)
     return;
 
@@ -22,31 +21,34 @@ void initVectorizedLUTs() {
                              : std::pow((val01 + 0.055f) / 1.055f, 2.4f);
   }
 
-  for (int i = 0; i < 4096; i++) {
-    float linearVal = i / 4095.0f;
-    float srgb01 = (linearVal <= 0.0031308f)
-                       ? (linearVal * 12.92f)
-                       : (1.055f * std::pow(linearVal, 1.0f / 2.4f) - 0.055f);
-    linearToSRGBLUT[i] =
-        (uint8_t)std::max(0.0f, std::min(255.0f, srgb01 * 255.0f));
-  }
-
   lutsInitialized = true;
 }
 
-inline uint8_t fastLinearToSRGB(float linearVal) {
-  int idx = (int)(linearVal * 4095.0f);
-  if (idx < 0)
-    idx = 0;
-  if (idx > 4095)
-    idx = 4095;
-  return linearToSRGBLUT[idx];
+inline uint8_t linearToSRGBExact(float linearVal) {
+  if (linearVal <= 0.0f)
+    return 0;
+  if (linearVal >= 1.0f)
+    return 255;
+
+  float srgb01 = (linearVal <= 0.0031308f)
+                     ? (linearVal * 12.92f)
+                     : (1.055f * std::pow(linearVal, 1.0f / 2.4f) - 0.055f);
+
+  return static_cast<uint8_t>(std::roundf(srgb01 * 255.0f));
+}
+
+inline uint8_t exactLinearToAlpha(float linearAlpha) {
+  if (linearAlpha <= 0.0f)
+    return 0;
+  if (linearAlpha >= 1.0f)
+    return 255;
+  return static_cast<uint8_t>(std::roundf(linearAlpha * 255.0f));
 }
 
 extern "C" JNIEXPORT void JNICALL
 Java_moe_grass_webgpuviewer_ImageUtil_resizeLinearAreaNative(
     JNIEnv *env, jobject thiz, jobject src_bitmap, jobject dst_bitmap) {
-  initVectorizedLUTs();
+  initLUTs();
 
   AndroidBitmapInfo srcInfo;
   AndroidBitmapInfo dstInfo;
@@ -87,6 +89,11 @@ Java_moe_grass_webgpuviewer_ImageUtil_resizeLinearAreaNative(
       float32x4_t v_sum_b = vdupq_n_f32(0.0f);
       float totalWeight = 0.0f;
 
+      float sumA_scalar = 0.0f;
+      float sumR_scalar = 0.0f;
+      float sumG_scalar = 0.0f;
+      float sumB_scalar = 0.0f;
+
       for (int sy = yMin; sy <= yMax; ++sy) {
         double yWeight = std::min((double)sy + 1.0, srcYEnd) -
                          std::max((double)sy, srcYStart);
@@ -106,10 +113,12 @@ Java_moe_grass_webgpuviewer_ImageUtil_resizeLinearAreaNative(
             totalWeight += weights[i];
 
             uint32_t pixel = src[sy * srcInfo.width + (sx + i)];
-            linearA[i] = ((pixel >> 24) & 0xFF) * 0.00392156862f;
-            linearR[i] = srgbToLinearLUT[(pixel >> 16) & 0xFF];
-            linearG[i] = srgbToLinearLUT[(pixel >> 8) & 0xFF];
-            linearB[i] = srgbToLinearLUT[pixel & 0xFF];
+            float aVal = ((pixel >> 24) & 0xFF) / 255.0f;
+
+            linearA[i] = aVal;
+            linearR[i] = srgbToLinearLUT[(pixel >> 16) & 0xFF] * aVal;
+            linearG[i] = srgbToLinearLUT[(pixel >> 8) & 0xFF] * aVal;
+            linearB[i] = srgbToLinearLUT[pixel & 0xFF] * aVal;
           }
 
           float32x4_t v_w = vld1q_f32(weights);
@@ -134,41 +143,53 @@ Java_moe_grass_webgpuviewer_ImageUtil_resizeLinearAreaNative(
           totalWeight += pWeight;
 
           uint32_t pixel = src[sy * srcInfo.width + sx];
+          float aVal = ((pixel >> 24) & 0xFF) / 255.0f;
+          float rVal = srgbToLinearLUT[(pixel >> 16) & 0xFF] * aVal;
+          float gVal = srgbToLinearLUT[(pixel >> 8) & 0xFF] * aVal;
+          float bVal = srgbToLinearLUT[pixel & 0xFF] * aVal;
 
-          v_sum_a = vsetq_lane_f32(
-              vgetq_lane_f32(v_sum_a, 0) +
-                  (((pixel >> 24) & 0xFF) * 0.00392156862f) * pWeight,
-              v_sum_a, 0);
-          v_sum_r = vsetq_lane_f32(vgetq_lane_f32(v_sum_r, 0) +
-                                       srgbToLinearLUT[(pixel >> 16) & 0xFF] *
-                                           pWeight,
-                                   v_sum_r, 0);
-          v_sum_g =
-              vsetq_lane_f32(vgetq_lane_f32(v_sum_g, 0) +
-                                 srgbToLinearLUT[(pixel >> 8) & 0xFF] * pWeight,
-                             v_sum_g, 0);
-          v_sum_b = vsetq_lane_f32(vgetq_lane_f32(v_sum_b, 0) +
-                                       srgbToLinearLUT[pixel & 0xFF] * pWeight,
-                                   v_sum_b, 0);
+          sumA_scalar += aVal * pWeight;
+          sumR_scalar += rVal * pWeight;
+          sumG_scalar += gVal * pWeight;
+          sumB_scalar += bVal * pWeight;
         }
       }
 
       if (totalWeight > 0.0f) {
         float sumA = vgetq_lane_f32(v_sum_a, 0) + vgetq_lane_f32(v_sum_a, 1) +
-                     vgetq_lane_f32(v_sum_a, 2) + vgetq_lane_f32(v_sum_a, 3);
+                     vgetq_lane_f32(v_sum_a, 2) + vgetq_lane_f32(v_sum_a, 3) +
+                     sumA_scalar;
         float sumR = vgetq_lane_f32(v_sum_r, 0) + vgetq_lane_f32(v_sum_r, 1) +
-                     vgetq_lane_f32(v_sum_r, 2) + vgetq_lane_f32(v_sum_r, 3);
+                     vgetq_lane_f32(v_sum_r, 2) + vgetq_lane_f32(v_sum_r, 3) +
+                     sumR_scalar;
         float sumG = vgetq_lane_f32(v_sum_g, 0) + vgetq_lane_f32(v_sum_g, 1) +
-                     vgetq_lane_f32(v_sum_g, 2) + vgetq_lane_f32(v_sum_g, 3);
+                     vgetq_lane_f32(v_sum_g, 2) + vgetq_lane_f32(v_sum_g, 3) +
+                     sumG_scalar;
         float sumB = vgetq_lane_f32(v_sum_b, 0) + vgetq_lane_f32(v_sum_b, 1) +
-                     vgetq_lane_f32(v_sum_b, 2) + vgetq_lane_f32(v_sum_b, 3);
+                     vgetq_lane_f32(v_sum_b, 2) + vgetq_lane_f32(v_sum_b, 3) +
+                     sumB_scalar;
 
         float invWeight = 1.0f / totalWeight;
-        finalA = (uint32_t)std::max(
-            0.0f, std::min(255.0f, (sumA * invWeight) * 255.0f));
-        finalR = fastLinearToSRGB(sumR * invWeight);
-        finalG = fastLinearToSRGB(sumG * invWeight);
-        finalB = fastLinearToSRGB(sumB * invWeight);
+        float finalLinearA = sumA * invWeight;
+        float finalLinearR = sumR * invWeight;
+        float finalLinearG = sumG * invWeight;
+        float finalLinearB = sumB * invWeight;
+
+        if (finalLinearA > 0.00001f) {
+          float invAlpha = 1.0f / finalLinearA;
+          finalLinearR = std::min(1.0f, finalLinearR * invAlpha);
+          finalLinearG = std::min(1.0f, finalLinearG * invAlpha);
+          finalLinearB = std::min(1.0f, finalLinearB * invAlpha);
+        } else {
+          finalLinearR = 0.0f;
+          finalLinearG = 0.0f;
+          finalLinearB = 0.0f;
+        }
+
+        finalA = exactLinearToAlpha(finalLinearA);
+        finalR = linearToSRGBExact(finalLinearR);
+        finalG = linearToSRGBExact(finalLinearG);
+        finalB = linearToSRGBExact(finalLinearB);
       }
 #else
       float sumA = 0.0f, sumR = 0.0f, sumG = 0.0f, sumB = 0.0f;
@@ -211,10 +232,12 @@ Java_moe_grass_webgpuviewer_ImageUtil_resizeLinearAreaNative(
           uint8_t g = (pixel >> 8) & 0xFF;
           uint8_t b = pixel & 0xFF;
 
-          sumA += (a * 0.00392156862f) * pWeight;
-          sumR += srgbToLinearLUT[r] * pWeight;
-          sumG += srgbToLinearLUT[g] * pWeight;
-          sumB += srgbToLinearLUT[b] * pWeight;
+          float aVal = a / 255.0f;
+
+          sumA += aVal * pWeight;
+          sumR += srgbToLinearLUT[r] * aVal * pWeight;
+          sumG += srgbToLinearLUT[g] * aVal * pWeight;
+          sumB += srgbToLinearLUT[b] * aVal * pWeight;
 
           totalWeight += pWeight;
         }
@@ -222,12 +245,26 @@ Java_moe_grass_webgpuviewer_ImageUtil_resizeLinearAreaNative(
 
       if (totalWeight > 0.0f) {
         float invWeight = 1.0f / totalWeight;
+        float finalLinearA = sumA * invWeight;
+        float finalLinearR = sumR * invWeight;
+        float finalLinearG = sumG * invWeight;
+        float finalLinearB = sumB * invWeight;
 
-        finalA = (uint32_t)std::max(
-            0.0f, std::min(255.0f, (sumA * invWeight) * 255.0f));
-        finalR = fastLinearToSRGB(sumR * invWeight);
-        finalG = fastLinearToSRGB(sumG * invWeight);
-        finalB = fastLinearToSRGB(sumB * invWeight);
+        if (finalLinearA > 0.00001f) {
+          float invAlpha = 1.0f / finalLinearA;
+          finalLinearR = std::min(1.0f, finalLinearR * invAlpha);
+          finalLinearG = std::min(1.0f, finalLinearG * invAlpha);
+          finalLinearB = std::min(1.0f, finalLinearB * invAlpha);
+        } else {
+          finalLinearR = 0.0f;
+          finalLinearG = 0.0f;
+          finalLinearB = 0.0f;
+        }
+
+        finalA = exactLinearToAlpha(finalLinearA);
+        finalR = linearToSRGBExact(finalLinearR);
+        finalG = linearToSRGBExact(finalLinearG);
+        finalB = linearToSRGBExact(finalLinearB);
       }
 #endif
 

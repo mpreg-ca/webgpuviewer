@@ -60,7 +60,7 @@ dependencies {
 
 afterEvaluate {
     mavenPublishing {
-        coordinates("moe.grass", "webgpuviewer", "1.0.0-$gitCommitId")
+        coordinates("moe.grass", "webgpuviewer", "1.0.1-$gitCommitId")
 
         pom {
             name.set("webgpuviewer")
