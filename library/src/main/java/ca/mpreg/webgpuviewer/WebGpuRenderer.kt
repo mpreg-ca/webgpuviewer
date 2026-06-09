@@ -4,6 +4,9 @@ import android.graphics.Bitmap
 import android.graphics.Point
 import android.util.Log
 import android.view.Surface
+import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.tween
+import androidx.compose.ui.geometry.Offset
 import androidx.webgpu.BufferUsage
 import androidx.webgpu.DeviceLostCallback
 import androidx.webgpu.DeviceLostException
@@ -49,11 +52,15 @@ import androidx.webgpu.WebGpuRuntimeException
 import androidx.webgpu.helper.Util.windowFromSurface
 import androidx.webgpu.helper.createGpuTexture
 import androidx.webgpu.helper.initLibrary
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.Executor
+import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.log2
@@ -80,6 +87,16 @@ class WebGpuRenderer {
     var image_height: Int = 0
 
     var ready = false
+
+    var animationJob: Job? = null
+
+    fun maxX(scale: Float = this.scale): Float {
+        return max(0f, (image_width.toFloat() / width - 1 / scale) / 2)
+    }
+
+    fun maxY(scale: Float = this.scale): Float {
+        return max(0f, (image_height.toFloat() / height - 1 / scale) / 2)
+    }
 
     class Mipmap(
         val image_width: Int,
@@ -318,13 +335,17 @@ class WebGpuRenderer {
     var x: Float = 0f
     var y: Float = 0f
 
+    var minScale = 0.5f
+    var maxScale = 2f
+
+    var generateAllTiles: Boolean = true
+    var useMipMaps: Boolean = true
+
     suspend fun init(
         image: Bitmap,
         surface: Surface,
         width: Int,
         height: Int,
-        generateAllTiles: Boolean = true,
-        useMipMaps: Boolean = true
     ) {
         initLibrary()
 
@@ -472,14 +493,14 @@ class WebGpuRenderer {
     }
 
     fun render() {
-        if (mipmaps.size == 0) {
-            return
+        CoroutineScope(Dispatchers.Main).launch {
+            if (mipmaps.isNotEmpty()) {
+                var level = floor(log2(1 / scale)).toInt()
+                level = max(min(level, mipmaps.size - 1), 0)
+                render(mipmaps[level], surface.getCurrentTexture().texture, x, y, scale)
+                surface.present()
+            }
         }
-
-        var level = floor(log2(1 / scale)).toInt()
-        level = max(min(level, mipmaps.size - 1), 0)
-        render(mipmaps[level], surface.getCurrentTexture().texture, x, y, scale)
-        surface.present()
     }
 
     fun render(mipmap: Mipmap, dst: GPUTexture, x: Float, y: Float, scale: Float) {
@@ -546,6 +567,56 @@ class WebGpuRenderer {
         buffer.close()
         mipmaps.forEach { it.tiles.forEach { it.destroy() } }
         mipmaps.clear()
+    }
+
+    fun reset(scope: CoroutineScope, origin: Offset) {
+        animationJob?.cancel()
+
+        val startScale = scale
+        val startX = x
+        val startY = y
+
+        val targetScale = startScale.coerceIn(minScale, maxScale)
+        val max_x = maxX(targetScale)
+        val max_y = maxY(targetScale)
+
+        var px: Float
+        var py: Float
+
+        if (targetScale != startScale) {
+            val diff = 1 / targetScale - 1 / scale
+            var x = x + (origin.x - 0.5f) * diff
+            var y = y + (origin.y - 0.5f) * diff
+            x = x.coerceIn(-max_x, max_x)
+            y = y.coerceIn(-max_y, max_y)
+            px = (x - startX) / diff
+            py = (y - startY) / diff
+        } else {
+            px = (x.coerceIn(-max_x, max_x) - startX)
+            py = (y.coerceIn(-max_y, max_y) - startY)
+        }
+
+        animationJob = scope.launch {
+            animate(0f, 1f, animationSpec = tween(300)) { value, _ ->
+                scale = startScale + (targetScale - startScale) * value
+                val diff = if (scale != startScale) {
+                    1 / scale - 1 / startScale
+                } else {
+                    value
+                }
+                x = (startX + px * diff).orZero()
+                y = (startY + py * diff).orZero()
+
+                if (abs(x) < 1.0e-7) {
+                    x = 0f
+                }
+                if (abs(y) < 1.0e-7) {
+                    y = 0f
+                }
+
+                render()
+            }
+        }
     }
 }
 

@@ -46,7 +46,7 @@ inline uint8_t exactLinearToAlpha(float linearAlpha) {
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_moe_grass_webgpuviewer_ImageUtil_resizeLinearAreaNative(
+Java_ca_mpreg_webgpuviewer_ImageUtil_resizeLinearAreaNative(
     JNIEnv *env, jobject thiz, jobject src_bitmap, jobject dst_bitmap) {
   initLUTs();
 

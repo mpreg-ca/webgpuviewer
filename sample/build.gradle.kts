@@ -43,6 +43,7 @@ dependencies {
     implementation(project(":library"))
 
     implementation(libs.androidx.appcompat)
+    implementation(libs.androidx.compose.animation.core)
     implementation(libs.androidx.viewpager)
     implementation(libs.androidx.activity.compose)
     implementation(platform(libs.androidx.compose.bom))
