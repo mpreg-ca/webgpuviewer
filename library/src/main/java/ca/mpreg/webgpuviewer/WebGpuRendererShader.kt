@@ -23,22 +23,6 @@ struct VertexOutput {
     @location(0) uv: vec2<f32>,
 };
 
-@vertex
-fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
-    var pos = array<vec2<f32>, 3>(
-        vec2<f32>(-1.0, -1.0), // Bottom-left
-        vec2<f32>( 3.0, -1.0), // Far-right
-        vec2<f32>(-1.0,  3.0)  // Far-top
-    );
-
-    var out: VertexOutput;
-    let p = pos[vertex_index];
-    out.position = vec4<f32>(p, 0.0, 1.0);
-
-    out.uv = vec2<f32>(p.x * 0.5 + 0.5, 1.0 - (p.y * 0.5 + 0.5));
-    return out;
-}
-
 fn tileLoad(i: i32, pos: vec2<i32>) -> vec4<f32> {
     if (i == 0) { return textureLoad(src_tex0, pos, 0); }
     if (i == 1) { return textureLoad(src_tex1, pos, 0); }
@@ -316,23 +300,50 @@ fn downsample(src_start: vec2<f32>, scale: vec2<f32>) -> vec4<f32> {
     }
 }
 
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
+    // Generate standard UVs for a 2-triangle quad (Triangle List)
+    var uvs = array<vec2<f32>, 6>(
+        vec2<f32>(0.0, 0.0), // Top-left
+        vec2<f32>(0.0, 1.0), // Bottom-left
+        vec2<f32>(1.0, 0.0), // Top-right
+        vec2<f32>(1.0, 0.0), // Top-right
+        vec2<f32>(0.0, 1.0), // Bottom-left
+        vec2<f32>(1.0, 1.0)  // Bottom-right
+    );
+
+    let uv = uvs[vertex_index];
+
     let dst_size_f = vec2<f32>(transform.dst_width, transform.dst_height);
     let src_size_f = vec2<f32>(totalDimensions());
 
-    let frag_coord = in.position.xy;
+    // Calculate destination canvas pixel position
+    let pixel_pos = transform.scale * (transform.offset * dst_size_f + uv * src_size_f);
 
+    // Convert pixel coordinate to WebGPU NDC Space:
+    // X goes from [-1.0, 1.0] (left to right)
+    // Y goes from [1.0, -1.0] (top to bottom)
+    let ndc_x = (pixel_pos.x / dst_size_f.x) * 2.0 - 1.0;
+    let ndc_y = 1.0 - (pixel_pos.y / dst_size_f.y) * 2.0;
+
+    var out: VertexOutput;
+    out.position = vec4<f32>(ndc_x, ndc_y, 0.0, 1.0);
+    out.uv = uv;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    let src_size_f = vec2<f32>(totalDimensions());
     let scale_factor = 1.0 / transform.scale;
     let scale_vec = vec2<f32>(scale_factor);
-    let offset = transform.offset;
 
     if (scale_factor > 1.0) {
-        let src_start = frag_coord * scale_vec - (offset * dst_size_f);
+        // downsample expects src_start (position in the source image in pixels)
+        let src_start = in.uv * src_size_f;
         return downsample(src_start, scale_vec);
     } else {
-        let uv = (frag_coord * scale_vec - offset * dst_size_f) / src_size_f;
-        return textureSampleCatmullRom(uv);
+        return textureSampleCatmullRom(in.uv);
     }
 }"""
 }
