@@ -43,6 +43,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import java.util.concurrent.Executor
+import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.min
 
@@ -61,15 +62,17 @@ class WebGpuRenderer {
 
     val imageWidth: Int
         get() = if (images.isNotEmpty()) {
-            images.map { it.width - it.position.x }.max() -
-                    min(images.map { it.position.x }.min(), 0)
+            ceil(
+                images.map { it.width - it.x }.max() - min(images.map { it.x }.min(), 0f)
+            ).toInt()
         } else {
             0
         }
     val imageHeight: Int
         get() = if (images.isNotEmpty()) {
-            images.map { it.height - it.position.y }.max() -
-                    min(images.map { it.position.y }.min(), 0)
+            ceil(
+                images.map { it.height - it.y }.max() - min(images.map { it.y }.min(), 0f)
+            ).toInt()
         } else {
             0
         }
@@ -78,9 +81,9 @@ class WebGpuRenderer {
 
     var images: MutableList<Image> = mutableListOf()
 
-    var scale: Float = 1f
-    var x: Float = 0f
-    var y: Float = 0f
+        var scale: Float = 1f
+        var x: Float = 0f
+        var y: Float = 0f
 
     var minScale = 0.5f
     var maxScale = 2f

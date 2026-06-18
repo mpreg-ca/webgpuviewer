@@ -22,11 +22,8 @@ class Mipmap(
     val tilesRows: Int,
     val tilesize: Int,
 ) {
-    private var actualTextures: MutableList<GPUTexture> = mutableListOf()
+    private var textures: MutableList<GPUTexture> = mutableListOf()
     private var tiles: MutableList<GPUTexture> = mutableListOf()
-
-    var x: Int = 0
-    var y: Int = 0
 
     constructor(device: GPUDevice, bitmap: Bitmap, scale: Float, tilesize: Int) : this(
         width = bitmap.width,
@@ -69,7 +66,7 @@ class Mipmap(
                         writeSize = size,
                     )
 
-                    actualTextures.add(texture)
+                    textures.add(texture)
                 }
             }
         }
@@ -78,7 +75,7 @@ class Mipmap(
             val row = r.coerceAtMost(tilesRows - 1) * tilesCols
             for (c in 0 until 2) {
                 val i = row + c.coerceAtMost(tilesCols - 1)
-                tiles.add(actualTextures[i])
+                tiles.add(textures[i])
             }
         }
     }
@@ -91,14 +88,14 @@ class Mipmap(
         tilesRows = 1,
         tilesize = tilesize,
     ) {
-        actualTextures.add(texture)
+        textures.add(texture)
         repeat(4) {
             tiles.add(texture)
         }
     }
 
     fun cleanup() {
-        actualTextures.forEach { it.destroy() }
+        textures.forEach { it.destroy() }
     }
 
     class Quad(val tiles: List<GPUTexture>, val x: Int, val y: Int)
@@ -126,7 +123,7 @@ class Mipmap(
 
                 if (cX - (c - 0.5) * tilesize < xCenterRight - cX) c - 1 else c
             }
-        }.coerceIn(0, tilesRows - 1)
+        }.coerceIn(0, tilesCols - 1)
 
         val r = (cY / tilesize).toInt()
         val tY = when {
@@ -147,10 +144,10 @@ class Mipmap(
             val row = (tY + r).coerceAtMost(tilesRows - 1) * tilesCols
             for (c in 0 until 2) {
                 val i = row + (tX + c).coerceAtMost(tilesCols - 1)
-                tiles.add(actualTextures[i])
+                tiles.add(textures[i])
             }
         }
 
-        return Quad(tiles, x + tX * tiles[0].width, y + tY * tiles[0].height)
+        return Quad(tiles, tX * tiles[0].width, tY * tiles[0].height)
     }
 }

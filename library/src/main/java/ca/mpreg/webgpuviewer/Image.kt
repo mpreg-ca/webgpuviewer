@@ -2,7 +2,6 @@ package ca.mpreg.webgpuviewer
 
 import android.graphics.Bitmap
 import android.util.Log
-import androidx.compose.ui.unit.IntOffset
 import androidx.webgpu.BufferUsage
 import androidx.webgpu.GPUBindGroupDescriptor
 import androidx.webgpu.GPUBindGroupEntry
@@ -28,13 +27,11 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.floor
 import kotlin.math.log2
-import kotlin.math.max
-import kotlin.math.min
 import kotlin.math.round
 
 class Image(val width: Int, val height: Int) {
-    var position: IntOffset = IntOffset.Zero
-    var scale: Float = 1f
+    var x: Float = 0f
+    var y: Float = 0f
 
     var mipmaps: MutableList<Mipmap> = mutableListOf()
 
@@ -110,10 +107,10 @@ class Image(val width: Int, val height: Int) {
     }
 
     fun render(encoder: GPUCommandEncoder, dst: GPUTexture, x: Float, y: Float, scale: Float) {
-        val level = max(min(floor(log2(1 / scale)).toInt(), mipmaps.size - 1), 0)
+        val level = floor(log2(1 / scale)).toInt().coerceIn(0, mipmaps.size - 1)
 
-        val x = x + position.x.toFloat() / dst.width
-        val y = y + position.y.toFloat() / dst.height
+        val x = x + this.x / dst.width
+        val y = y + this.y / dst.height
 
         val mipmap = mipmaps[level]
 
@@ -168,6 +165,7 @@ class Image(val width: Int, val height: Int) {
                 )
             )
         )
+
         pass.draw(6)
         pass.end()
     }
