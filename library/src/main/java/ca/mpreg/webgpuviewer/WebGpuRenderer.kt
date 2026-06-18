@@ -182,7 +182,7 @@ class WebGpuRenderer {
                             view = texture.createView(),
                             loadOp = LoadOp.Clear,
                             storeOp = StoreOp.Store,
-                            clearValue = GPUColor(0.0, 0.0, 0.0, 1.0)
+                            clearValue = GPUColor(0.0, 0.0, 0.0, 0.0)
                         )
                     )
                 )
