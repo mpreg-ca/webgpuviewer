@@ -338,12 +338,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let scale_factor = 1.0 / transform.scale;
     let scale_vec = vec2<f32>(scale_factor);
 
+    var col = vec4<f32>(0.0);
+
     if (scale_factor > 1.0) {
         // downsample expects src_start (position in the source image in pixels)
         let src_start = in.uv * src_size_f;
-        return downsample(src_start, scale_vec);
+        col = downsample(src_start, scale_vec);
     } else {
-        return textureSampleCatmullRom(in.uv);
+        col = textureSampleCatmullRom(in.uv);
     }
+    
+    return vec4<f32>(col.rgb * col.a, col.a);
 }"""
 }

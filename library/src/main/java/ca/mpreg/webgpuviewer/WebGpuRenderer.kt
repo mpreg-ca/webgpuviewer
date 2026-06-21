@@ -1,8 +1,11 @@
 package ca.mpreg.webgpuviewer
 
+import android.content.res.Resources
 import android.view.Surface
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.tween
+import androidx.compose.runtime.MonotonicFrameClock
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.geometry.Offset
 import androidx.webgpu.DeviceLostCallback
 import androidx.webgpu.DeviceLostException
@@ -39,19 +42,62 @@ import androidx.webgpu.WebGpuRuntimeException
 import androidx.webgpu.helper.Util.windowFromSurface
 import androidx.webgpu.helper.initLibrary
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import java.util.concurrent.Executor
+import java.util.concurrent.Executors
 import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.min
 
 object webgpu {
-    var instance: GPUInstance? = null
-    var adapter: GPUAdapter? = null
-    var device: GPUDevice? = null
-    var pipeline: GPURenderPipeline? = null
+    var instance: GPUInstance
+    var adapter: GPUAdapter
+    var device: GPUDevice
+    var pipeline: GPURenderPipeline
+    val dispatcher = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "WebGPU-Render-Thread")
+    }.asCoroutineDispatcher()
+
+    init {
+        runBlocking {
+            initLibrary()
+
+            instance = createInstance(GPUInstanceDescriptor())
+            adapter =
+                instance.requestAdapter(GPURequestAdapterOptions(featureLevel = FeatureLevel.Compatibility))
+            device = adapter.requestDevice(
+                GPUDeviceDescriptor(
+                    deviceLostCallback = defaultDeviceLostCallback,
+                    deviceLostCallbackExecutor = Executor(Runnable::run),
+                    uncapturedErrorCallback = defaultUncapturedErrorCallback,
+                    uncapturedErrorCallbackExecutor = Executor(Runnable::run),
+                )
+            )
+
+            val shaderModule = device.createShaderModule(
+                GPUShaderModuleDescriptor(
+                    shaderSourceWGSL = GPUShaderSourceWGSL(
+                        WebGpuRendererShader.shader
+                    )
+                )
+            )
+
+            pipeline = device.createRenderPipeline(
+                GPURenderPipelineDescriptor(
+                    vertex = GPUVertexState(shaderModule, entryPoint = "vs_main"),
+                    fragment = GPUFragmentState(
+                        shaderModule,
+                        entryPoint = "fs_main",
+                        targets = arrayOf(GPUColorTargetState(format = TextureFormat.RGBA8Unorm))
+                    ),
+                    primitive = GPUPrimitiveState(topology = TriangleList),
+                )
+            )
+        }
+    }
 }
 
 class WebGpuRenderer {
@@ -81,55 +127,36 @@ class WebGpuRenderer {
 
     var images: MutableList<Image> = mutableListOf()
 
-        var scale: Float = 1f
-        var x: Float = 0f
-        var y: Float = 0f
+    var scale: Float = 1f
+    var x: Float = 0f
+    var y: Float = 0f
 
-    var minScale = 0.5f
-    var maxScale = 2f
+    var fitScale = 1f
+    var doubleTapScale = Resources.getSystem().displayMetrics.densityDpi / 100f
 
-    suspend fun init(surface: Surface, width: Int, height: Int) {
-        initLibrary()
-
-        if (webgpu.instance == null) {
-            webgpu.instance = createInstance(GPUInstanceDescriptor())
-            webgpu.adapter =
-                webgpu.instance!!.requestAdapter(GPURequestAdapterOptions(featureLevel = FeatureLevel.Compatibility))
-            webgpu.device = webgpu.adapter!!.requestDevice(
-                GPUDeviceDescriptor(
-                    deviceLostCallback = defaultDeviceLostCallback,
-                    deviceLostCallbackExecutor = Executor(Runnable::run),
-                    uncapturedErrorCallback = defaultUncapturedErrorCallback,
-                    uncapturedErrorCallbackExecutor = Executor(Runnable::run),
-                )
-            )
-
-            val shaderModule = webgpu.device!!.createShaderModule(
-                GPUShaderModuleDescriptor(
-                    shaderSourceWGSL = GPUShaderSourceWGSL(
-                        WebGpuRendererShader.shader
-                    )
-                )
-            )
-
-            webgpu.pipeline = webgpu.device!!.createRenderPipeline(
-                GPURenderPipelineDescriptor(
-                    vertex = GPUVertexState(shaderModule, entryPoint = "vs_main"),
-                    fragment = GPUFragmentState(
-                        shaderModule,
-                        entryPoint = "fs_main",
-                        targets = arrayOf(GPUColorTargetState(format = TextureFormat.RGBA8Unorm))
-                    ),
-                    primitive = GPUPrimitiveState(topology = TriangleList),
-                )
-            )
+    val minScale: Float
+        get() = if (surface == null || imageWidth == 0 || imageHeight == 0) 1f
+        else {
+            val ratioX = width.toFloat() / imageWidth.toFloat()
+            val ratioY = height.toFloat() / imageHeight.toFloat()
+            max(0.01f, min(ratioX, ratioY))
         }
+
+    var maxScale = max(doubleTapScale, 2f)
+
+    lateinit var frameClock: MonotonicFrameClock
+
+    var postInit: () -> Unit = {}
+
+    fun init(surface: Surface, width: Int, height: Int, scope: CoroutineScope) {
+        this.frameClock = scope.coroutineContext[MonotonicFrameClock]
+            ?: error("No MonotonicFrameClock found in Composable context")
 
         this.width = width
         this.height = height
 
         this.surface = surface.let {
-            webgpu.instance!!.createSurface(
+            webgpu.instance.createSurface(
                 GPUSurfaceDescriptor(
                     surfaceSourceAndroidNativeWindow = GPUSurfaceSourceAndroidNativeWindow(
                         windowFromSurface(it)
@@ -138,7 +165,7 @@ class WebGpuRenderer {
             ).apply {
                 configure(
                     GPUSurfaceConfiguration(
-                        webgpu.device!!,
+                        webgpu.device,
                         width,
                         height,
                         TextureFormat.RGBA8Unorm,
@@ -147,6 +174,8 @@ class WebGpuRenderer {
                 )
             }
         }
+
+        this.postInit()
     }
 
     fun maxX(scale: Float = this.scale): Float {
@@ -167,33 +196,33 @@ class WebGpuRenderer {
     }
 
     fun render() {
-        if (surface == null) {
-            return
-        }
+        val surface = surface ?: return
 
-        CoroutineScope(Dispatchers.Main).launch {
-            val texture = surface!!.getCurrentTexture().texture
-            val encoder = webgpu.device!!.createCommandEncoder()
+        CoroutineScope(webgpu.dispatcher + this.frameClock).launch {
+            withFrameNanos {
+                val texture = surface.getCurrentTexture().texture
+                val encoder = webgpu.device.createCommandEncoder()
 
-            encoder.beginRenderPass(
-                GPURenderPassDescriptor(
-                    colorAttachments = arrayOf(
-                        GPURenderPassColorAttachment(
-                            view = texture.createView(),
-                            loadOp = LoadOp.Clear,
-                            storeOp = StoreOp.Store,
-                            clearValue = GPUColor(0.0, 0.0, 0.0, 0.0)
+                encoder.beginRenderPass(
+                    GPURenderPassDescriptor(
+                        colorAttachments = arrayOf(
+                            GPURenderPassColorAttachment(
+                                view = texture.createView(),
+                                loadOp = LoadOp.Clear,
+                                storeOp = StoreOp.Store,
+                                clearValue = GPUColor(0.0, 0.0, 0.0, 0.0)
+                            )
                         )
                     )
-                )
-            ).end()
+                ).end()
 
-            images.forEach {
-                it.render(encoder, texture, x, y, scale)
+                images.forEach {
+                    it.render(encoder, texture, x, y, scale)
+                }
+
+                webgpu.device.queue.submit(arrayOf(encoder.finish()))
+                surface.present()
             }
-
-            webgpu.device!!.queue.submit(arrayOf(encoder.finish()))
-            surface!!.present()
         }
     }
 
@@ -209,31 +238,44 @@ class WebGpuRenderer {
         images.add(image)
     }
 
-    fun reset(scope: CoroutineScope, origin: Offset) {
+    fun reset(
+        scope: CoroutineScope, origin: Offset? = null, targetX: Float = 0f, targetY: Float = 0f,
+        targetScale: Float = scale.coerceIn(minScale, maxScale)
+    ) {
         animationJob?.cancel()
 
         val startScale = scale
         val startX = x
         val startY = y
 
-        val targetScale = startScale.coerceIn(minScale, maxScale)
         val max_x = maxX(targetScale)
         val max_y = maxY(targetScale)
 
         var px: Float
         var py: Float
 
-        if (targetScale != startScale) {
-            val diff = 1 / targetScale - 1 / scale
-            var x = x + (origin.x - 0.5f) * diff
-            var y = y + (origin.y - 0.5f) * diff
-            x = x.coerceIn(-max_x, max_x)
-            y = y.coerceIn(-max_y, max_y)
-            px = (x - startX) / diff
-            py = (y - startY) / diff
+        if (origin != null) {
+            if (targetScale != startScale) {
+                val diff = 1 / targetScale - 1 / scale
+                var x = startX + (origin.x - 0.5f) * diff
+                var y = startY + (origin.y - 0.5f) * diff
+                x = x.coerceIn(-max_x, max_x)
+                y = y.coerceIn(-max_y, max_y)
+                px = (x - startX) / diff
+                py = (y - startY) / diff
+            } else {
+                px = x.coerceIn(-max_x, max_x) - startX
+                py = y.coerceIn(-max_y, max_y) - startY
+            }
         } else {
-            px = x.coerceIn(-max_x, max_x) - startX
-            py = y.coerceIn(-max_y, max_y) - startY
+            val diff = if (targetScale != startScale) {
+                1 / targetScale - 1 / scale
+            } else {
+                1f
+            }
+
+            px = (targetX - startX) / diff
+            py = (targetY - startY) / diff
         }
 
         animationJob = scope.launch {

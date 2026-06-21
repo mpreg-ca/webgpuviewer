@@ -15,7 +15,7 @@ android {
         versionName = "1.0.0"
 
         defaultConfig {
-            packagingOptions {
+            packaging {
                 jniLibs.keepDebugSymbols.addAll(listOf("*/mips/*.so", "*/mips64/*.so"))
             }
         }
@@ -48,4 +48,5 @@ dependencies {
     implementation(libs.androidx.activity.compose)
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.ui)
+    implementation("ca.mpreg:imagedecoder:2-e2780f3")
 }

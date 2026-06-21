@@ -1,23 +1,22 @@
 package ca.mpreg.webgpuviewer
 
-import android.graphics.Bitmap
+import java.nio.ByteBuffer
 
 object ImageUtil {
     init {
         System.loadLibrary("resize")
     }
 
-    external fun resizeLinearAreaNative(srcBitmap: Bitmap, dstBitmap: Bitmap)
+    external fun resizeLinearAreaNative(
+        pixels: ByteBuffer,
+        dstPixels: ByteBuffer,
+        width: Int,
+        height: Int
+    )
 
-    fun resize(source: Bitmap, targetW: Int, targetH: Int): Bitmap {
-        val output = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
-        if (source.config != Bitmap.Config.ARGB_8888) {
-            source.copy(Bitmap.Config.ARGB_8888, false)
-        } else {
-            source
-        }.let {
-            resizeLinearAreaNative(it, output)
-        }
+    fun resize(source: ByteBuffer, width: Int, height: Int): ByteBuffer {
+        val output = ByteBuffer.allocateDirect(width * height)
+        resizeLinearAreaNative(source, output, width, height)
         return output
     }
 }

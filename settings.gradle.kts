@@ -1,12 +1,4 @@
 pluginManagement {
-    resolutionStrategy {
-        eachPlugin {
-            val regex = "com.android.(library|application)".toRegex()
-            if (regex matches requested.id.id) {
-                useModule("com.android.tools.build:gradle:${requested.version}")
-            }
-        }
-    }
     repositories {
         gradlePluginPortal()
         google {
@@ -27,11 +19,11 @@ plugins {
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
-        mavenCentral()
         google()
+        mavenCentral()
     }
 }
 
-listOf("library", "sample").forEach {
-    include(":$it")
-}
+rootProject.name = "webgpuviewer"
+include(":sample")
+include(":library")

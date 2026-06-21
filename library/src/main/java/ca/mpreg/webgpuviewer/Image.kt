@@ -1,6 +1,5 @@
 package ca.mpreg.webgpuviewer
 
-import android.graphics.Bitmap
 import android.util.Log
 import androidx.webgpu.BufferUsage
 import androidx.webgpu.GPUBindGroupDescriptor
@@ -9,7 +8,6 @@ import androidx.webgpu.GPUBuffer
 import androidx.webgpu.GPUBufferDescriptor
 import androidx.webgpu.GPUColor
 import androidx.webgpu.GPUCommandEncoder
-import androidx.webgpu.GPUDevice
 import androidx.webgpu.GPUExtent3D
 import androidx.webgpu.GPURenderPassColorAttachment
 import androidx.webgpu.GPURenderPassDescriptor
@@ -38,10 +36,10 @@ class Image(val width: Int, val height: Int) {
     var byteBuffer: ByteBuffer = ByteBuffer.allocateDirect(32)
     lateinit var buffer: GPUBuffer
 
-    constructor(device: GPUDevice, bitmap: Bitmap) : this(bitmap.width, bitmap.height) {
+    constructor(pixels: ByteBuffer, width: Int, height: Int) : this(width, height) {
         byteBuffer.order(ByteOrder.nativeOrder())
 
-        buffer = webgpu.device!!.createBuffer(
+        buffer = webgpu.device.createBuffer(
             GPUBufferDescriptor(
                 size = 32,
                 usage = BufferUsage.CopyDst or BufferUsage.Uniform
@@ -52,11 +50,11 @@ class Image(val width: Int, val height: Int) {
         val maxWidth = 1024
         val maxHeight = 1024
 
-        mipmaps.add(Mipmap(device, bitmap, 1f, tilesize))
+        mipmaps.add(Mipmap(pixels, width, height, 1f, tilesize))
 
         var scale = 1f
 
-        CoroutineScope(Dispatchers.Main).launch {
+        CoroutineScope(webgpu.dispatcher).launch {
             Log.i("Renderer", "Creating mipmaps")
 
             while (width * scale > tilesize || height * scale > tilesize) {
@@ -67,12 +65,20 @@ class Image(val width: Int, val height: Int) {
                 )
                 val im = withContext(Dispatchers.Default) {
                     ImageUtil.resize(
-                        bitmap,
+                        pixels,
                         (width * scale).toInt(),
                         (height * scale).toInt()
                     )
                 }
-                mipmaps.add(Mipmap(device, im, scale, tilesize))
+                mipmaps.add(
+                    Mipmap(
+                        im,
+                        (width * scale).toInt(),
+                        (height * scale).toInt(),
+                        scale,
+                        tilesize
+                    )
+                )
             }
 
             while (width * scale > maxWidth && height * scale > maxHeight) {
@@ -82,23 +88,27 @@ class Image(val width: Int, val height: Int) {
                     "Create mipmap using shader ${scale} ${width * scale} ${height * scale}"
                 )
                 val size = GPUExtent3D((width * scale).toInt(), (height * scale).toInt())
-                val texture = device.createTexture(
+                val texture = webgpu.device.createTexture(
                     GPUTextureDescriptor(
                         size = size,
                         usage = TextureUsage.TextureBinding or TextureUsage.RenderAttachment,
                         format = TextureFormat.RGBA8Unorm
                     )
                 )
-                val encoder = webgpu.device!!.createCommandEncoder()
+                val encoder = webgpu.device.createCommandEncoder()
 
                 render(encoder, texture, 0f, 0f, scale)
-                webgpu.device!!.queue.submit(arrayOf(encoder.finish()))
+                webgpu.device.queue.submit(arrayOf(encoder.finish()))
 
                 mipmaps.add(Mipmap(texture, scale, tilesize))
             }
 
             Log.i("Renderer", "Finished create mipmaps")
         }
+    }
+
+    fun update(pixels: ByteBuffer) {
+        mipmaps[0].update(pixels)
     }
 
     fun cleanup() {
@@ -133,7 +143,7 @@ class Image(val width: Int, val height: Int) {
         byteBuffer.putFloat(20, mipmap.tilesRows.toFloat())
         byteBuffer.putFloat(24, dst.width.toFloat())
         byteBuffer.putFloat(28, dst.height.toFloat())
-        webgpu.device!!.queue.writeBuffer(buffer, 0, byteBuffer)
+        webgpu.device.queue.writeBuffer(buffer, 0, byteBuffer)
 
         val pass = encoder.beginRenderPass(
             GPURenderPassDescriptor(
@@ -146,11 +156,11 @@ class Image(val width: Int, val height: Int) {
             )
         )
 
-        pass.setPipeline(webgpu.pipeline!!)
+        pass.setPipeline(webgpu.pipeline)
         pass.setBindGroup(
-            0, webgpu.device!!.createBindGroup(
+            0, webgpu.device.createBindGroup(
                 GPUBindGroupDescriptor(
-                    layout = webgpu.pipeline!!.getBindGroupLayout(0),
+                    layout = webgpu.pipeline.getBindGroupLayout(0),
                     entries = arrayOf(
                         GPUBindGroupEntry(
                             binding = 0,

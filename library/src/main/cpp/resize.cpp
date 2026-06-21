@@ -1,5 +1,4 @@
 #include <algorithm>
-#include <android/bitmap.h>
 #include <cmath>
 #include <jni.h>
 
@@ -47,38 +46,34 @@ inline uint8_t exactLinearToAlpha(float linearAlpha) {
 
 extern "C" JNIEXPORT void JNICALL
 Java_ca_mpreg_webgpuviewer_ImageUtil_resizeLinearAreaNative(
-    JNIEnv *env, jobject thiz, jobject src_bitmap, jobject dst_bitmap) {
+    JNIEnv *env, jobject thiz, jobject src_buffer, jobject dst_buffer,
+    jint srcWidth, jint srcHeight) {
   initLUTs();
 
-  AndroidBitmapInfo srcInfo;
-  AndroidBitmapInfo dstInfo;
-  void *srcPixels;
-  void *dstPixels;
-
-  if (AndroidBitmap_getInfo(env, src_bitmap, &srcInfo) < 0 ||
-      AndroidBitmap_getInfo(env, dst_bitmap, &dstInfo) < 0)
-    return;
-  if (AndroidBitmap_lockPixels(env, src_bitmap, &srcPixels) < 0 ||
-      AndroidBitmap_lockPixels(env, dst_bitmap, &dstPixels) < 0)
+  uint32_t *src = (uint32_t *)env->GetDirectBufferAddress(src_buffer);
+  uint32_t *dst = (uint32_t *)env->GetDirectBufferAddress(dst_buffer);
+  if (!src || !dst)
     return;
 
-  uint32_t *src = (uint32_t *)srcPixels;
-  uint32_t *dst = (uint32_t *)dstPixels;
+  int dstWidth = srcWidth / 2;
+  int dstHeight = srcHeight / 2;
+  if (dstWidth <= 0 || dstHeight <= 0)
+    return;
 
-  double scaleX = (double)srcInfo.width / dstInfo.width;
-  double scaleY = (double)srcInfo.height / dstInfo.height;
+  double scaleX = (double)srcWidth / dstWidth;
+  double scaleY = (double)srcHeight / dstHeight;
 
-  for (uint32_t y = 0; y < dstInfo.height; ++y) {
+  for (int y = 0; y < dstHeight; ++y) {
     double srcYStart = y * scaleY;
     double srcYEnd = srcYStart + scaleY;
     int yMin = std::max(0, (int)srcYStart);
-    int yMax = std::min((int)srcInfo.height - 1, (int)srcYEnd);
+    int yMax = std::min(srcHeight - 1, (int)srcYEnd);
 
-    for (uint32_t x = 0; x < dstInfo.width; ++x) {
+    for (int x = 0; x < dstWidth; ++x) {
       double srcXStart = x * scaleX;
       double srcXEnd = srcXStart + scaleX;
       int xMin = std::max(0, (int)srcXStart);
-      int xMax = std::min((int)srcInfo.width - 1, (int)srcXEnd);
+      int xMax = std::min(srcWidth - 1, (int)srcXEnd);
 
       uint32_t finalA = 0, finalR = 0, finalG = 0, finalB = 0;
 
@@ -112,7 +107,7 @@ Java_ca_mpreg_webgpuviewer_ImageUtil_resizeLinearAreaNative(
             weights[i] = (xWeight > 0) ? (float)(xWeight * yWeight) : 0.0f;
             totalWeight += weights[i];
 
-            uint32_t pixel = src[sy * srcInfo.width + (sx + i)];
+            uint32_t pixel = src[sy * srcWidth + (sx + i)];
             float aVal = ((pixel >> 24) & 0xFF) / 255.0f;
 
             linearA[i] = aVal;
@@ -142,7 +137,7 @@ Java_ca_mpreg_webgpuviewer_ImageUtil_resizeLinearAreaNative(
           float pWeight = (float)(xWeight * yWeight);
           totalWeight += pWeight;
 
-          uint32_t pixel = src[sy * srcInfo.width + sx];
+          uint32_t pixel = src[sy * srcWidth + sx];
           float aVal = ((pixel >> 24) & 0xFF) / 255.0f;
           float rVal = srgbToLinearLUT[(pixel >> 16) & 0xFF] * aVal;
           float gVal = srgbToLinearLUT[(pixel >> 8) & 0xFF] * aVal;
@@ -214,7 +209,7 @@ Java_ca_mpreg_webgpuviewer_ImageUtil_resizeLinearAreaNative(
           continue;
 
         float yWeightF = (float)yWeight;
-        int srcRowOffset = sy * srcInfo.width;
+        int srcRowOffset = sy * srcWidth;
 
         for (int sx = xMin; sx <= xMax; ++sx) {
           int cacheIdx = sx - xMin;
@@ -268,11 +263,8 @@ Java_ca_mpreg_webgpuviewer_ImageUtil_resizeLinearAreaNative(
       }
 #endif
 
-      dst[y * dstInfo.width + x] =
+      dst[y * dstWidth + x] =
           (finalA << 24) | (finalR << 16) | (finalG << 8) | finalB;
     }
   }
-
-  AndroidBitmap_unlockPixels(env, src_bitmap);
-  AndroidBitmap_unlockPixels(env, dst_bitmap);
 }

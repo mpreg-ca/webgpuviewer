@@ -1,8 +1,6 @@
 package ca.mpreg.webgpuviewer
 
-import android.graphics.Bitmap
 import android.util.Log
-import androidx.webgpu.GPUDevice
 import androidx.webgpu.GPUExtent3D
 import androidx.webgpu.GPUTexelCopyBufferLayout
 import androidx.webgpu.GPUTexelCopyTextureInfo
@@ -25,57 +23,53 @@ class Mipmap(
     private var textures: MutableList<GPUTexture> = mutableListOf()
     private var tiles: MutableList<GPUTexture> = mutableListOf()
 
-    constructor(device: GPUDevice, bitmap: Bitmap, scale: Float, tilesize: Int) : this(
-        width = bitmap.width,
-        height = bitmap.height,
+    constructor(pixels: ByteBuffer, width: Int, height: Int, scale: Float, tilesize: Int) : this(
+        width = width,
+        height = height,
         scale = scale,
-        tilesCols = ceil(bitmap.width.toFloat() / tilesize).toInt(),
-        tilesRows = ceil(bitmap.height.toFloat() / tilesize).toInt(),
+        tilesCols = ceil(width.toFloat() / tilesize).toInt(),
+        tilesRows = ceil(height.toFloat() / tilesize).toInt(),
         tilesize = tilesize,
     ) {
-        ByteBuffer.allocateDirect(bitmap.byteCount).let { pixels ->
-            bitmap.copyPixelsToBuffer(pixels)
+        for (r in 0 until tilesRows) {
+            val tileHeight = min((r + 1) * tilesize, height) - (r * tilesize)
+            val y = r * tilesize
+            for (c in 0 until tilesCols) {
+                val x = c * tilesize
+                val tileWidth = min((c + 1) * tilesize, width) - (c * tilesize)
 
-            for (r in 0 until tilesRows) {
-                val height = min((r + 1) * tilesize, height) - (r * tilesize)
-                val y = r * tilesize
-                for (c in 0 until tilesCols) {
-                    val x = c * tilesize
-                    val width = min((c + 1) * tilesize, width) - (c * tilesize)
+                Log.i("Renderer", "Create tile " + c + " " + r)
+                val size = GPUExtent3D(tileWidth, tileHeight)
 
-                    Log.i("Renderer", "Create tile " + c + " " + r)
-                    val size = GPUExtent3D(width, height)
-
-                    val texture = device.createTexture(
-                        GPUTextureDescriptor(
-                            size = size,
-                            format = TextureFormat.RGBA8Unorm,
-                            usage = TextureUsage.TextureBinding or TextureUsage.CopyDst or TextureUsage.RenderAttachment,
-                        )
+                val texture = webgpu.device.createTexture(
+                    GPUTextureDescriptor(
+                        size = size,
+                        format = TextureFormat.RGBA8Unorm,
+                        usage = TextureUsage.TextureBinding or TextureUsage.CopyDst or TextureUsage.RenderAttachment,
                     )
+                )
 
-                    device.queue.writeTexture(
-                        dataLayout =
-                            GPUTexelCopyBufferLayout(
-                                offset = (y * bitmap.width + x) * 4L,
-                                bytesPerRow = bitmap.width * Int.SIZE_BYTES,
-                                rowsPerImage = height,
-                            ),
-                        data = pixels,
-                        destination = GPUTexelCopyTextureInfo(texture = texture),
-                        writeSize = size,
-                    )
+                webgpu.device.queue.writeTexture(
+                    dataLayout =
+                        GPUTexelCopyBufferLayout(
+                            offset = (y * width + x) * 4L,
+                            bytesPerRow = width * Int.SIZE_BYTES,
+                            rowsPerImage = height,
+                        ),
+                    data = pixels,
+                    destination = GPUTexelCopyTextureInfo(texture = texture),
+                    writeSize = size,
+                )
 
-                    textures.add(texture)
-                }
+                textures.add(texture)
             }
-        }
 
-        for (r in 0 until 2) {
-            val row = r.coerceAtMost(tilesRows - 1) * tilesCols
-            for (c in 0 until 2) {
-                val i = row + c.coerceAtMost(tilesCols - 1)
-                tiles.add(textures[i])
+            for (r in 0 until 2) {
+                val row = r.coerceAtMost(tilesRows - 1) * tilesCols
+                for (c in 0 until 2) {
+                    val i = row + c.coerceAtMost(tilesCols - 1)
+                    tiles.add(textures[i])
+                }
             }
         }
     }
@@ -96,6 +90,34 @@ class Mipmap(
 
     fun cleanup() {
         textures.forEach { it.destroy() }
+    }
+
+    fun update(pixels: ByteBuffer) {
+        var i = 0
+
+        for (r in 0 until tilesRows) {
+            val tileHeight = min((r + 1) * tilesize, height) - (r * tilesize)
+            val y = r * tilesize
+            for (c in 0 until tilesCols) {
+                val x = c * tilesize
+                val tileWidth = min((c + 1) * tilesize, width) - (c * tilesize)
+
+                Log.i("Renderer", "Update tile " + c + " " + r)
+                val size = GPUExtent3D(tileWidth, tileHeight)
+
+                webgpu.device.queue.writeTexture(
+                    dataLayout =
+                        GPUTexelCopyBufferLayout(
+                            offset = (y * width + x) * 4L,
+                            bytesPerRow = width * Int.SIZE_BYTES,
+                            rowsPerImage = height,
+                        ),
+                    data = pixels,
+                    destination = GPUTexelCopyTextureInfo(texture = textures[i++]),
+                    writeSize = size,
+                )
+            }
+        }
     }
 
     class Quad(val tiles: List<GPUTexture>, val x: Int, val y: Int)

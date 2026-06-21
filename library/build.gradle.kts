@@ -8,18 +8,13 @@ val gitCommitId = providers.exec {
     commandLine("git", "rev-parse", "--short", "HEAD")
 }.standardOutput.asText.map { it.trim() }.getOrElse("unknown")
 
-val baseVersion = "1.0.4-$gitCommitId"
+val baseVersion = "2-$gitCommitId"
 
 val isTag = System.getenv("GITHUB_REF_TYPE") == "tag"
 
 android {
     namespace = "ca.mpreg.webgpuviewer"
-
-    compileSdk {
-        version = release(37) {
-            minorApiLevel = 0
-        }
-    }
+    compileSdk = 37
 
     defaultConfig {
         minSdk = 24
@@ -28,7 +23,6 @@ android {
         externalNativeBuild {
             cmake {
                 cppFlags("-O3 -flto")
-                arguments("-DANDROID_ARM_NEON=TRUE")
             }
         }
     }
