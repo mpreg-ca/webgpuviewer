@@ -38,7 +38,7 @@ class Mipmap(
                 val x = c * tilesize
                 val tileWidth = min((c + 1) * tilesize, width) - (c * tilesize)
 
-                Log.i("Renderer", "Create tile " + c + " " + r)
+                Log.i("Renderer", "Create tile $c $r $tileWidth $tileHeight $x $y")
                 val size = GPUExtent3D(tileWidth, tileHeight)
 
                 val texture = webgpu.device.createTexture(
@@ -63,13 +63,13 @@ class Mipmap(
 
                 textures.add(texture)
             }
+        }
 
-            for (r in 0 until 2) {
-                val row = r.coerceAtMost(tilesRows - 1) * tilesCols
-                for (c in 0 until 2) {
-                    val i = row + c.coerceAtMost(tilesCols - 1)
-                    tiles.add(textures[i])
-                }
+        for (r in 0 until 2) {
+            val row = r.coerceAtMost(tilesRows - 1) * tilesCols
+            for (c in 0 until 2) {
+                val i = row + c.coerceAtMost(tilesCols - 1)
+                tiles.add(textures[i])
             }
         }
     }
@@ -88,7 +88,7 @@ class Mipmap(
         }
     }
 
-    fun cleanup() {
+    protected fun finalize() {
         textures.forEach { it.destroy() }
     }
 

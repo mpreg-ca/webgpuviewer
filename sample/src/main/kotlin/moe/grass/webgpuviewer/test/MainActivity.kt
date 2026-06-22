@@ -20,25 +20,29 @@ class MainActivity : AppCompatActivity() {
 
         val stream = assets.open("ref.png")
         val dec = ImageDecoder.new(stream)
-        val frames = mutableListOf<Image>()
-        val durations = mutableListOf<Long>()
-        do {
-            val res = dec.decodeNext()
-            val image = Image(res.image, res.width, res.height)
-            frames.add(image)
-            durations.add(res.duration.toLong())
-        } while (dec.page != 0)
+        val res = dec.decodeNext(getTrim = true)
+        val image = Image(res.image, res.width, res.height)
 
         binding.composeView1.apply {
             layoutParams.width = width
             layoutParams.height = height
-            renderer.postInit = {
-                renderer.addImage(frames[0])
-                renderer.fitScale = renderer.minScale
-                renderer.scale = renderer.fitScale
+            renderer.dpi = resources.displayMetrics.densityDpi / 100f
+            renderer.post {
+                renderer.images.add(image)
+
+                renderer.homeScale = renderer.getMinScale(res.trim_width, res.trim_height)
+                renderer.homeX = renderer.getHomeX(
+                    -((res.trim_left.toFloat() - 0.5f * res.width) / res.trim_width.toFloat() + 0.5f),
+                    renderer.homeScale
+                )
+                renderer.homeY = renderer.getHomeY(
+                    -((res.trim_top.toFloat() - 0.5f * res.height) / res.trim_height.toFloat() + 0.5f),
+                    renderer.homeScale
+                )
+
                 renderer.render()
+                renderer.home()
             }
-            renderer.postInit()
         }
 
 //        CoroutineScope(Dispatchers.Default).launch {

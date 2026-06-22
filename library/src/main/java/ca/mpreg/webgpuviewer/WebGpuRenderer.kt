@@ -44,11 +44,13 @@ import androidx.webgpu.helper.initLibrary
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 import kotlin.math.ceil
+import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 
@@ -106,52 +108,99 @@ class WebGpuRenderer {
     var width: Int = 0
     var height: Int = 0
 
-    val imageWidth: Int
-        get() = if (images.isNotEmpty()) {
-            ceil(
-                images.map { it.width - it.x }.max() - min(images.map { it.x }.min(), 0f)
-            ).toInt()
-        } else {
-            0
-        }
-    val imageHeight: Int
-        get() = if (images.isNotEmpty()) {
-            ceil(
-                images.map { it.height - it.y }.max() - min(images.map { it.y }.min(), 0f)
-            ).toInt()
-        } else {
-            0
-        }
+    var scale: Float = 1f
+    var x: Float = 0f
+    var y: Float = 0f
 
     var animationJob: Job? = null
 
     var images: MutableList<Image> = mutableListOf()
 
-    var scale: Float = 1f
-    var x: Float = 0f
-    var y: Float = 0f
+    val imageLeft: Int
+        get() = images.map { floor(it.x - it.width / 2.0) }.minOrNull()?.toInt() ?: 0
 
-    var fitScale = 1f
-    var doubleTapScale = Resources.getSystem().displayMetrics.densityDpi / 100f
+    val imageRight: Int
+        get() = images.map { ceil(it.x + it.width / 2.0) }.minOrNull()?.toInt() ?: 0
+
+    val imageTop: Int
+        get() = images.map { floor(it.y - it.height / 2.0) }.minOrNull()?.toInt() ?: 0
+
+    val imageBottom: Int
+        get() = images.map { ceil(it.y + it.height / 2.0) }.minOrNull()?.toInt() ?: 0
+
+    val imageWidth: Int
+        get() = imageRight - imageLeft
+
+    val imageHeight: Int
+        get() = imageBottom - imageTop
+
+    var homeScale = 1f
+    var homeX = 0f
+    var homeY = 0f
+
+    val atHome: Boolean
+        get() = x == homeX && y == homeY && scale == homeScale
+
+    fun getHomeX(left: Float, scale: Float): Float {
+        val maxX = maxX(scale)
+        return (left / scale).coerceIn(-maxX, maxX)
+    }
+
+    fun getHomeY(top: Float, scale: Float): Float {
+        val maxY = maxY(scale)
+        return (top / scale).coerceIn(-maxY, maxY)
+    }
 
     val minScale: Float
-        get() = if (surface == null || imageWidth == 0 || imageHeight == 0) 1f
-        else {
-            val ratioX = width.toFloat() / imageWidth.toFloat()
-            val ratioY = height.toFloat() / imageHeight.toFloat()
-            max(0.01f, min(ratioX, ratioY))
+        get() = if (surface == null || imageWidth == 0 || imageHeight == 0) {
+            1f
+        } else {
+            getMinScale(imageWidth, imageHeight)
         }
 
-    var maxScale = max(doubleTapScale, 2f)
+    var dpi = Resources.getSystem().displayMetrics.densityDpi / 100f
 
-    lateinit var frameClock: MonotonicFrameClock
+    val doubleTapScale: Float
+        get() = max(dpi, minScale * 2)
 
-    var postInit: () -> Unit = {}
+    val maxScale: Float
+        get() = max(doubleTapScale * 2, 2f)
 
-    fun init(surface: Surface, width: Int, height: Int, scope: CoroutineScope) {
+    fun getMinScale(width: Int, height: Int): Float {
+        val ratioX = this.width.toFloat() / width.toFloat()
+        val ratioY = this.height.toFloat() / height.toFloat()
+        return max(0.01f, min(ratioX, ratioY))
+    }
+
+    fun maxX(scale: Float = this.scale): Float {
+        return max(0f, (imageWidth.toFloat() / width - 1 / scale) / 2)
+    }
+
+    fun maxY(scale: Float = this.scale): Float {
+        return max(0f, (imageHeight.toFloat() / height - 1 / scale) / 2)
+    }
+
+    private lateinit var frameClock: MonotonicFrameClock
+
+    private var scope: CoroutineScope? = null
+
+    private val _postInit = mutableListOf<(() -> Unit)>()
+
+    @Synchronized
+    fun post(fn: () -> Unit) {
+        if (scope?.isActive == true) {
+            fn()
+        } else {
+            _postInit.add(fn)
+        }
+    }
+
+    @Synchronized
+    fun init(scope: CoroutineScope, surface: Surface, width: Int, height: Int) {
         this.frameClock = scope.coroutineContext[MonotonicFrameClock]
             ?: error("No MonotonicFrameClock found in Composable context")
 
+        this.scope = scope
         this.width = width
         this.height = height
 
@@ -175,23 +224,16 @@ class WebGpuRenderer {
             }
         }
 
-        this.postInit()
+        this._postInit.forEach { it() }
     }
 
-    fun maxX(scale: Float = this.scale): Float {
-        return max(0f, (imageWidth.toFloat() / width - 1 / scale) / 2)
-    }
-
-    fun maxY(scale: Float = this.scale): Float {
-        return max(0f, (imageHeight.toFloat() / height - 1 / scale) / 2)
-    }
-
-    fun setPos(x: Float, y: Float) {
-        if (this.x == x && this.y == y) {
+    fun setPos(x: Float = this.x, y: Float = this.y, scale: Float = this.scale) {
+        if (this.x == x && this.y == y && this.scale == scale) {
             return
         }
         this.x = x
         this.y = y
+        this.scale = scale
         render()
     }
 
@@ -226,21 +268,20 @@ class WebGpuRenderer {
         }
     }
 
-
     fun cleanup() {
         animationJob?.cancel()
         surface?.close()
-        images.forEach { it.cleanup() }
-        images.clear()
     }
 
-    fun addImage(image: Image) {
-        images.add(image)
+    fun home() {
+        animateTo(targetScale = homeScale)
     }
 
-    fun reset(
-        scope: CoroutineScope, origin: Offset? = null, targetX: Float = 0f, targetY: Float = 0f,
-        targetScale: Float = scale.coerceIn(minScale, maxScale)
+    fun animateTo(
+        origin: Offset? = null,
+        targetX: Float = homeX,
+        targetY: Float = homeY,
+        targetScale: Float = scale
     ) {
         animationJob?.cancel()
 
@@ -248,48 +289,51 @@ class WebGpuRenderer {
         val startX = x
         val startY = y
 
+        val targetScale = targetScale.coerceIn(minScale, maxScale)
+
         val max_x = maxX(targetScale)
         val max_y = maxY(targetScale)
 
-        var px: Float
-        var py: Float
-
-        if (origin != null) {
-            if (targetScale != startScale) {
-                val diff = 1 / targetScale - 1 / scale
-                var x = startX + (origin.x - 0.5f) * diff
-                var y = startY + (origin.y - 0.5f) * diff
-                x = x.coerceIn(-max_x, max_x)
-                y = y.coerceIn(-max_y, max_y)
-                px = (x - startX) / diff
-                py = (y - startY) / diff
-            } else {
-                px = x.coerceIn(-max_x, max_x) - startX
-                py = y.coerceIn(-max_y, max_y) - startY
-            }
+        val diffEnd = if (targetScale != startScale) {
+            1 / targetScale - 1 / scale
         } else {
-            val diff = if (targetScale != startScale) {
-                1 / targetScale - 1 / scale
-            } else {
-                1f
-            }
-
-            px = (targetX - startX) / diff
-            py = (targetY - startY) / diff
+            1f
         }
 
-        animationJob = scope.launch {
+        val endX = if (origin != null) {
+            if (targetScale != startScale) {
+                (startX + (origin.x - 0.5f) * diffEnd).coerceIn(-max_x, max_x)
+            } else {
+                x.coerceIn(-max_x, max_x)
+            }
+        } else {
+            targetX
+        }
+
+        val endY = if (origin != null) {
+            if (targetScale != startScale) {
+                (startY + (origin.y - 0.5f) * diffEnd).coerceIn(-max_y, max_y)
+            } else {
+                y.coerceIn(-max_y, max_y)
+            }
+        } else {
+            targetY
+        }
+
+        animationJob = scope?.launch {
             animate(0f, 1f, animationSpec = tween(300)) { value, _ ->
-                scale = startScale * (1 - value) + targetScale * value
-                val diff = if (scale != startScale) {
-                    1 / scale - 1 / startScale
+                val scale = startScale * (1 - value) + targetScale * value
+                val c = if (startScale != targetScale) {
+                    val diff = 1 / scale - 1 / startScale
+                    (diff / diffEnd).coerceIn(0f, 1f)
                 } else {
                     value
                 }
 
                 setPos(
-                    (startX + px * diff).orZero(),
-                    (startY + py * diff).orZero()
+                    (startX * (1 - c) + endX * c).orZero(),
+                    (startY * (1 - c) + endY * c).orZero(),
+                    scale
                 )
             }
         }

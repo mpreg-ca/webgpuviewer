@@ -52,7 +52,7 @@ fun WebGpuImageViewer(
 
                 awaitEachGesture {
                     val firstDown = awaitFirstDown(pass = PointerEventPass.Initial)
-                    renderer.reset(scope, Offset(0.5f, 0.5f))
+                    renderer.animateTo(Offset(0.5f, 0.5f))
 
                     if (renderer.scale > renderer.minScale) {
                         view.parent?.requestDisallowInterceptTouchEvent(true)
@@ -62,22 +62,14 @@ fun WebGpuImageViewer(
                         val secondDown = waitForDown(doubleTapTimeout) ?: return@awaitEachGesture
                         if (waitForCleanUp(secondDown.id, doubleTapTimeout, touchSlop) != null) {
                             // double tap
-                            // TODO: change renderer.fitScale to renderer.homeScale
-                            // TODO: add renderer.homeX renderer.homeY
-                            // TODO: add renderer.atHome()
-                            if (renderer.scale == renderer.fitScale && renderer.x == 0f && renderer.y == 0f) {
+                            if (renderer.atHome) {
                                 val origin = Offset(
                                     secondDown.position.x / renderer.width,
                                     secondDown.position.y / renderer.height
                                 )
-                                renderer.reset(scope, origin, targetScale = renderer.doubleTapScale)
+                                renderer.animateTo(origin, targetScale = renderer.doubleTapScale)
                             } else {
-                                renderer.reset(
-                                    scope,
-                                    targetX = 0f,
-                                    targetY = 0f,
-                                    targetScale = renderer.fitScale
-                                )
+                                renderer.home()
                             }
                         } else {
                             // double tap drag
@@ -128,7 +120,7 @@ fun WebGpuImageViewer(
                             }
 
                             val velocity = velocityTracker.calculateVelocity()
-                            if (abs(velocity.y) > 200 && renderer.scale > renderer.fitScale && renderer.scale < renderer.maxScale) {
+                            if (abs(velocity.y) > 200 && renderer.scale > renderer.homeScale && renderer.scale < renderer.maxScale) {
                                 // fling zoom
                                 renderer.animationJob = scope.launch {
                                     val animation = Animatable(0f)
@@ -141,7 +133,10 @@ fun WebGpuImageViewer(
                                             originalScale * 10f.pow(2 * (totalDeltaY + value) / renderer.height)
 
                                         renderer.scale =
-                                            new_scale.coerceIn(renderer.fitScale, renderer.maxScale)
+                                            new_scale.coerceIn(
+                                                renderer.homeScale,
+                                                renderer.maxScale
+                                            )
                                         val diff = 1 / renderer.scale - 1 / originalScale
 
                                         val x = (originalX + px * diff).orZero()
@@ -157,8 +152,7 @@ fun WebGpuImageViewer(
                                     }
                                 }
                             } else {
-                                renderer.reset(
-                                    scope,
+                                renderer.animateTo(
                                     Offset(
                                         secondDown.position.x / renderer.width,
                                         secondDown.position.y / renderer.height
@@ -216,7 +210,7 @@ fun WebGpuImageViewer(
                                 val pan = event.calculatePan()
                                 acc += pan
 
-                                if (acc.getDistance() > touchSlop && renderer.scale > renderer.fitScale) {
+                                if (acc.getDistance() > touchSlop && renderer.scale > renderer.homeScale) {
                                     view.parent?.requestDisallowInterceptTouchEvent(false)
                                 }
 
@@ -271,7 +265,7 @@ fun WebGpuImageViewer(
 
                         val velocity = velocityTracker.calculateVelocity()
                         if (
-                            (renderer.scale >= renderer.fitScale) &&
+                            (renderer.scale >= renderer.homeScale) &&
                             (renderer.scale <= renderer.maxScale) &&
                             (lastEventTime - lastMoveTime) < 100 &&
                             (abs(velocity.x) > 400 || abs(velocity.y) > 400) &&
@@ -297,7 +291,7 @@ fun WebGpuImageViewer(
                                 }
                             }
                         } else {
-                            renderer.reset(scope, scaleOrigin)
+                            renderer.animateTo(scaleOrigin)
                         }
                     }
                 }
@@ -306,8 +300,7 @@ fun WebGpuImageViewer(
     ) {
         onSurface { surface, width, height ->
             try {
-                renderer.init(surface, width, height, scope)
-                renderer.render()
+                renderer.init(scope, surface, width, height)
                 awaitCancellation()
             } finally {
                 renderer.cleanup()

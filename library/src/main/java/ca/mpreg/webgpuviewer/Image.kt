@@ -59,26 +59,13 @@ class Image(val width: Int, val height: Int) {
 
             while (width * scale > tilesize || height * scale > tilesize) {
                 scale /= 2
-                Log.i(
-                    "Renderer",
-                    "Create mipmap using CPU ${scale} ${width * scale} ${height * scale}"
-                )
+                val newWidth = floor(width * scale).toInt()
+                val newHeight = floor(height * scale).toInt()
+                Log.i("Renderer", "Create mipmap using CPU ${scale} ${newWidth} ${newHeight}")
                 val im = withContext(Dispatchers.Default) {
-                    ImageUtil.resize(
-                        pixels,
-                        (width * scale).toInt(),
-                        (height * scale).toInt()
-                    )
+                    ImageUtil.resize(pixels, width, height)
                 }
-                mipmaps.add(
-                    Mipmap(
-                        im,
-                        (width * scale).toInt(),
-                        (height * scale).toInt(),
-                        scale,
-                        tilesize
-                    )
-                )
+                mipmaps.add(Mipmap(im, newWidth, newHeight, scale, tilesize))
             }
 
             while (width * scale > maxWidth && height * scale > maxHeight) {
@@ -111,8 +98,7 @@ class Image(val width: Int, val height: Int) {
         mipmaps[0].update(pixels)
     }
 
-    fun cleanup() {
-        mipmaps.forEach { it.cleanup() }
+    protected fun finalize() {
         buffer.close()
     }
 
