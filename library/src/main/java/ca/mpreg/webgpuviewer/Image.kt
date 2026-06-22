@@ -17,9 +17,8 @@ import androidx.webgpu.LoadOp
 import androidx.webgpu.StoreOp
 import androidx.webgpu.TextureFormat
 import androidx.webgpu.TextureUsage
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -50,11 +49,11 @@ class Image(val width: Int, val height: Int) {
         val maxWidth = 1024
         val maxHeight = 1024
 
-        mipmaps.add(Mipmap(pixels, width, height, 1f, tilesize))
+        runBlocking(webgpu.dispatcher) {
+            mipmaps.add(Mipmap(pixels, width, height, 1f, tilesize))
 
-        var scale = 1f
+            var scale = 1f
 
-        CoroutineScope(webgpu.dispatcher).launch {
             Log.i("Renderer", "Creating mipmaps")
 
             while (width * scale > tilesize || height * scale > tilesize) {

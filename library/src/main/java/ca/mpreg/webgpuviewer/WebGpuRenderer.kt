@@ -4,8 +4,6 @@ import android.content.res.Resources
 import android.view.Surface
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.tween
-import androidx.compose.runtime.MonotonicFrameClock
-import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.geometry.Offset
 import androidx.webgpu.DeviceLostCallback
 import androidx.webgpu.DeviceLostException
@@ -103,6 +101,7 @@ object webgpu {
 }
 
 class WebGpuRenderer {
+    @Volatile
     private var surface: GPUSurface? = null
 
     var width: Int = 0
@@ -180,8 +179,6 @@ class WebGpuRenderer {
         return max(0f, (imageHeight.toFloat() / height - 1 / scale) / 2)
     }
 
-    private lateinit var frameClock: MonotonicFrameClock
-
     private var scope: CoroutineScope? = null
 
     private val _postInit = mutableListOf<(() -> Unit)>()
@@ -197,34 +194,35 @@ class WebGpuRenderer {
 
     @Synchronized
     fun init(scope: CoroutineScope, surface: Surface, width: Int, height: Int) {
-        this.frameClock = scope.coroutineContext[MonotonicFrameClock]
-            ?: error("No MonotonicFrameClock found in Composable context")
-
         this.scope = scope
         this.width = width
         this.height = height
 
-        this.surface = surface.let {
-            webgpu.instance.createSurface(
-                GPUSurfaceDescriptor(
-                    surfaceSourceAndroidNativeWindow = GPUSurfaceSourceAndroidNativeWindow(
-                        windowFromSurface(it)
+        runBlocking(webgpu.dispatcher) {
+            this@WebGpuRenderer.surface = surface.let {
+                webgpu.instance.createSurface(
+                    GPUSurfaceDescriptor(
+                        surfaceSourceAndroidNativeWindow = GPUSurfaceSourceAndroidNativeWindow(
+                            windowFromSurface(it)
+                        )
                     )
-                )
-            ).apply {
-                configure(
-                    GPUSurfaceConfiguration(
-                        webgpu.device,
-                        width,
-                        height,
-                        TextureFormat.RGBA8Unorm,
-                        TextureUsage.RenderAttachment
+                ).apply {
+                    configure(
+                        GPUSurfaceConfiguration(
+                            webgpu.device,
+                            width,
+                            height,
+                            TextureFormat.RGBA8Unorm,
+                            TextureUsage.RenderAttachment
+                        )
                     )
-                )
+                }
             }
         }
 
-        this._postInit.forEach { it() }
+        scope.launch(webgpu.dispatcher) {
+            _postInit.forEach { it() }
+        }
     }
 
     fun setPos(x: Float = this.x, y: Float = this.y, scale: Float = this.scale) {
@@ -238,39 +236,41 @@ class WebGpuRenderer {
     }
 
     fun render() {
-        val surface = surface ?: return
+        val scope = scope ?: return
+        scope.launch(webgpu.dispatcher) {
+            val surface = surface ?: return@launch
+            val texture = surface.getCurrentTexture().texture
+            val encoder = webgpu.device.createCommandEncoder()
 
-        CoroutineScope(webgpu.dispatcher + this.frameClock).launch {
-            withFrameNanos {
-                val texture = surface.getCurrentTexture().texture
-                val encoder = webgpu.device.createCommandEncoder()
-
-                encoder.beginRenderPass(
-                    GPURenderPassDescriptor(
-                        colorAttachments = arrayOf(
-                            GPURenderPassColorAttachment(
-                                view = texture.createView(),
-                                loadOp = LoadOp.Clear,
-                                storeOp = StoreOp.Store,
-                                clearValue = GPUColor(0.0, 0.0, 0.0, 0.0)
-                            )
+            encoder.beginRenderPass(
+                GPURenderPassDescriptor(
+                    colorAttachments = arrayOf(
+                        GPURenderPassColorAttachment(
+                            view = texture.createView(),
+                            loadOp = LoadOp.Clear,
+                            storeOp = StoreOp.Store,
+                            clearValue = GPUColor(0.0, 0.0, 0.0, 0.0)
                         )
                     )
-                ).end()
+                )
+            ).end()
 
-                images.forEach {
-                    it.render(encoder, texture, x, y, scale)
-                }
-
-                webgpu.device.queue.submit(arrayOf(encoder.finish()))
-                surface.present()
+            images.forEach {
+                it.render(encoder, texture, x, y, scale)
             }
+
+            webgpu.device.queue.submit(arrayOf(encoder.finish()))
+            surface.present()
         }
     }
 
     fun cleanup() {
         animationJob?.cancel()
-        surface?.close()
+
+        runBlocking(webgpu.dispatcher) {
+            surface?.close()
+            surface = null
+        }
     }
 
     fun home() {
