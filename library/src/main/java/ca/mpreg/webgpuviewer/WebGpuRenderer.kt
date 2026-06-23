@@ -11,27 +11,18 @@ import androidx.webgpu.FeatureLevel
 import androidx.webgpu.GPU.createInstance
 import androidx.webgpu.GPUAdapter
 import androidx.webgpu.GPUColor
-import androidx.webgpu.GPUColorTargetState
 import androidx.webgpu.GPUDevice
 import androidx.webgpu.GPUDeviceDescriptor
-import androidx.webgpu.GPUFragmentState
 import androidx.webgpu.GPUInstance
 import androidx.webgpu.GPUInstanceDescriptor
-import androidx.webgpu.GPUPrimitiveState
 import androidx.webgpu.GPURenderPassColorAttachment
 import androidx.webgpu.GPURenderPassDescriptor
-import androidx.webgpu.GPURenderPipeline
-import androidx.webgpu.GPURenderPipelineDescriptor
 import androidx.webgpu.GPURequestAdapterOptions
-import androidx.webgpu.GPUShaderModuleDescriptor
-import androidx.webgpu.GPUShaderSourceWGSL
 import androidx.webgpu.GPUSurface
 import androidx.webgpu.GPUSurfaceConfiguration
 import androidx.webgpu.GPUSurfaceDescriptor
 import androidx.webgpu.GPUSurfaceSourceAndroidNativeWindow
-import androidx.webgpu.GPUVertexState
 import androidx.webgpu.LoadOp
-import androidx.webgpu.PrimitiveTopology.Companion.TriangleList
 import androidx.webgpu.StoreOp
 import androidx.webgpu.TextureFormat
 import androidx.webgpu.TextureUsage
@@ -40,6 +31,7 @@ import androidx.webgpu.WebGpuRuntimeException
 import androidx.webgpu.helper.Util.windowFromSurface
 import androidx.webgpu.helper.initLibrary
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.isActive
@@ -52,55 +44,37 @@ import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 
-object webgpu {
-    var instance: GPUInstance
-    var adapter: GPUAdapter
-    var device: GPUDevice
-    var pipeline: GPURenderPipeline
-    val dispatcher = Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, "WebGPU-Render-Thread")
-    }.asCoroutineDispatcher()
+class WebGpuRenderer {
+    companion object {
+        var instance: GPUInstance
+        var adapter: GPUAdapter
+        var device: GPUDevice
 
-    init {
-        runBlocking {
-            initLibrary()
+        val dispatcher = Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "WebGPU-Render-Thread")
+        }.asCoroutineDispatcher()
 
-            instance = createInstance(GPUInstanceDescriptor())
-            adapter =
-                instance.requestAdapter(GPURequestAdapterOptions(featureLevel = FeatureLevel.Compatibility))
-            device = adapter.requestDevice(
-                GPUDeviceDescriptor(
-                    deviceLostCallback = defaultDeviceLostCallback,
-                    deviceLostCallbackExecutor = Executor(Runnable::run),
-                    uncapturedErrorCallback = defaultUncapturedErrorCallback,
-                    uncapturedErrorCallbackExecutor = Executor(Runnable::run),
-                )
-            )
+        init {
+            runBlocking {
+                initLibrary()
 
-            val shaderModule = device.createShaderModule(
-                GPUShaderModuleDescriptor(
-                    shaderSourceWGSL = GPUShaderSourceWGSL(
-                        WebGpuRendererShader.shader
+                instance = createInstance(GPUInstanceDescriptor())
+
+                adapter =
+                    instance.requestAdapter(GPURequestAdapterOptions(featureLevel = FeatureLevel.Compatibility))
+
+                device = adapter.requestDevice(
+                    GPUDeviceDescriptor(
+                        deviceLostCallback = defaultDeviceLostCallback,
+                        deviceLostCallbackExecutor = Executor(Runnable::run),
+                        uncapturedErrorCallback = defaultUncapturedErrorCallback,
+                        uncapturedErrorCallbackExecutor = Executor(Runnable::run),
                     )
                 )
-            )
-
-            pipeline = device.createRenderPipeline(
-                GPURenderPipelineDescriptor(
-                    vertex = GPUVertexState(shaderModule, entryPoint = "vs_main"),
-                    fragment = GPUFragmentState(
-                        shaderModule,
-                        entryPoint = "fs_main",
-                        targets = arrayOf(GPUColorTargetState(format = TextureFormat.RGBA8Unorm))
-                    ),
-                    primitive = GPUPrimitiveState(topology = TriangleList),
-                )
-            )
+            }
         }
     }
-}
 
-class WebGpuRenderer {
     @Volatile
     private var surface: GPUSurface? = null
 
@@ -181,12 +155,14 @@ class WebGpuRenderer {
 
     private var scope: CoroutineScope? = null
 
-    private val _postInit = mutableListOf<(() -> Unit)>()
+    private val _postInit = mutableListOf<(suspend () -> Unit)>()
 
     @Synchronized
-    fun post(fn: () -> Unit) {
+    fun post(fn: suspend () -> Unit) {
         if (scope?.isActive == true) {
-            fn()
+            CoroutineScope(Dispatchers.Default).launch {
+                fn()
+            }
         } else {
             _postInit.add(fn)
         }
@@ -198,9 +174,9 @@ class WebGpuRenderer {
         this.width = width
         this.height = height
 
-        runBlocking(webgpu.dispatcher) {
+        runBlocking(dispatcher) {
             this@WebGpuRenderer.surface = surface.let {
-                webgpu.instance.createSurface(
+                instance.createSurface(
                     GPUSurfaceDescriptor(
                         surfaceSourceAndroidNativeWindow = GPUSurfaceSourceAndroidNativeWindow(
                             windowFromSurface(it)
@@ -209,7 +185,7 @@ class WebGpuRenderer {
                 ).apply {
                     configure(
                         GPUSurfaceConfiguration(
-                            webgpu.device,
+                            device,
                             width,
                             height,
                             TextureFormat.RGBA8Unorm,
@@ -220,8 +196,9 @@ class WebGpuRenderer {
             }
         }
 
-        scope.launch(webgpu.dispatcher) {
+        scope.launch {
             _postInit.forEach { it() }
+            _postInit.clear()
         }
     }
 
@@ -236,11 +213,10 @@ class WebGpuRenderer {
     }
 
     fun render() {
-        val scope = scope ?: return
-        scope.launch(webgpu.dispatcher) {
+        scope?.launch(dispatcher) {
             val surface = surface ?: return@launch
             val texture = surface.getCurrentTexture().texture
-            val encoder = webgpu.device.createCommandEncoder()
+            val encoder = device.createCommandEncoder()
 
             encoder.beginRenderPass(
                 GPURenderPassDescriptor(
@@ -259,7 +235,7 @@ class WebGpuRenderer {
                 it.render(encoder, texture, x, y, scale)
             }
 
-            webgpu.device.queue.submit(arrayOf(encoder.finish()))
+            device.queue.submit(arrayOf(encoder.finish()))
             surface.present()
         }
     }
@@ -267,7 +243,7 @@ class WebGpuRenderer {
     fun cleanup() {
         animationJob?.cancel()
 
-        runBlocking(webgpu.dispatcher) {
+        runBlocking(dispatcher) {
             surface?.close()
             surface = null
         }

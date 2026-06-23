@@ -132,11 +132,9 @@ fun WebGpuImageViewer(
                                         val new_scale =
                                             originalScale * 10f.pow(2 * (totalDeltaY + value) / renderer.height)
 
-                                        renderer.scale =
-                                            new_scale.coerceIn(
-                                                renderer.homeScale,
-                                                renderer.maxScale
-                                            )
+                                        renderer.scale = new_scale.coerceIn(
+                                            renderer.homeScale, renderer.maxScale
+                                        )
                                         val diff = 1 / renderer.scale - 1 / originalScale
 
                                         val x = (originalX + px * diff).orZero()
@@ -146,8 +144,7 @@ fun WebGpuImageViewer(
                                         val max_y = renderer.maxY()
 
                                         renderer.setPos(
-                                            x.coerceIn(-max_x, max_x),
-                                            y.coerceIn(-max_y, max_y)
+                                            x.coerceIn(-max_x, max_x), y.coerceIn(-max_y, max_y)
                                         )
                                     }
                                 }
@@ -194,13 +191,13 @@ fun WebGpuImageViewer(
                                     view.parent?.requestDisallowInterceptTouchEvent(true)
                                     if (single) {
                                         velocityTracker.resetTracking()
+                                        acc = Offset.Zero
                                     }
                                     velocityTracker.addPointerInputChange(change)
                                     single = false
 
                                     scaleOrigin = Offset(
-                                        centroid.x / renderer.width,
-                                        centroid.y / renderer.height
+                                        centroid.x / renderer.width, centroid.y / renderer.height
                                     )
                                 } else if (single) {
                                     velocityTracker.addPointerInputChange(change)
@@ -209,10 +206,6 @@ fun WebGpuImageViewer(
                                 val zoom = event.calculateZoom()
                                 val pan = event.calculatePan()
                                 acc += pan
-
-                                if (acc.getDistance() > touchSlop && renderer.scale > renderer.homeScale) {
-                                    view.parent?.requestDisallowInterceptTouchEvent(false)
-                                }
 
                                 if (zoom != 1f || pan != Offset.Zero) {
                                     val new_scale = renderer.scale * zoom
@@ -227,15 +220,12 @@ fun WebGpuImageViewer(
                                     val max_x = renderer.maxX(new_scale)
                                     val max_y = renderer.maxY(new_scale)
 
-                                    if (renderer.scale != new_scale ||
-                                        (!view.scrollable(true) && !view.scrollable(false)) ||
-                                        (view.scrollable(true) && x.coerceIn(
-                                            -max_x,
-                                            max_x
-                                        ) != renderer.x) ||
-                                        (view.scrollable(false) && y.coerceIn(
-                                            -max_y,
-                                            max_y
+                                    if (renderer.scale != new_scale || (!view.scrollable(true) && !view.scrollable(
+                                            false
+                                        )) || (view.scrollable(true) && x.coerceIn(
+                                            -max_x, max_x
+                                        ) != renderer.x) || (view.scrollable(false) && y.coerceIn(
+                                            -max_y, max_y
                                         ) != renderer.y)
                                     ) {
                                         renderer.scale = new_scale
@@ -253,7 +243,7 @@ fun WebGpuImageViewer(
                                                 it.consume()
                                             }
                                         }
-                                    } else {
+                                    } else if (single) {
                                         view.parent?.requestDisallowInterceptTouchEvent(false)
                                     }
                                 }
@@ -264,21 +254,18 @@ fun WebGpuImageViewer(
                         val max_y = renderer.maxY()
 
                         val velocity = velocityTracker.calculateVelocity()
-                        if (
-                            (renderer.scale >= renderer.homeScale) &&
-                            (renderer.scale <= renderer.maxScale) &&
-                            (lastEventTime - lastMoveTime) < 100 &&
-                            (abs(velocity.x) > 400 || abs(velocity.y) > 400) &&
-                            (renderer.x.coerceIn(-max_x, max_x) == renderer.x
-                                    || renderer.y.coerceIn(-max_y, max_y) == renderer.y)
+                        if ((renderer.scale >= renderer.homeScale) && (renderer.scale <= renderer.maxScale) && (lastEventTime - lastMoveTime) < 100 && (abs(
+                                velocity.x
+                            ) > 400 || abs(velocity.y) > 400) && (renderer.x.coerceIn(
+                                -max_x, max_x
+                            ) == renderer.x || renderer.y.coerceIn(-max_y, max_y) == renderer.y)
                         ) {
                             // fling pan
                             renderer.animationJob = scope.launch {
                                 fling.snapTo(Offset.Zero)
                                 var lastOffset = Offset.Zero
                                 fling.animateDecay(
-                                    Offset(velocity.x, velocity.y),
-                                    exponentialDecay()
+                                    Offset(velocity.x, velocity.y), exponentialDecay()
                                 ) {
                                     val delta = value - lastOffset
                                     lastOffset = value
@@ -295,12 +282,12 @@ fun WebGpuImageViewer(
                         }
                     }
                 }
-            },
-        isOpaque = false
+            }, isOpaque = false
     ) {
         onSurface { surface, width, height ->
             try {
                 renderer.init(scope, surface, width, height)
+                renderer.render()
                 awaitCancellation()
             } finally {
                 renderer.cleanup()
@@ -320,9 +307,7 @@ fun View.scrollable(horizontal: Boolean): Boolean {
 }
 
 private suspend fun AwaitPointerEventScope.waitForCleanUp(
-    pointerId: PointerId,
-    timeout: Long,
-    touchSlop: Float
+    pointerId: PointerId, timeout: Long, touchSlop: Float
 ): PointerEvent? = try {
     withTimeout(timeout) {
         var acc = Offset.Zero
@@ -343,17 +328,16 @@ private suspend fun AwaitPointerEventScope.waitForCleanUp(
     null
 } as PointerEvent?
 
-private suspend fun AwaitPointerEventScope.waitForDown(timeout: Long) =
-    try {
-        withTimeout(timeout) {
-            var down = awaitPointerEvent().changes.firstOrNull { it.pressed }
-            while (down == null) {
-                down = awaitPointerEvent().changes.firstOrNull { it.pressed }
-            }
-            down
+private suspend fun AwaitPointerEventScope.waitForDown(timeout: Long) = try {
+    withTimeout(timeout) {
+        var down = awaitPointerEvent().changes.firstOrNull { it.pressed }
+        while (down == null) {
+            down = awaitPointerEvent().changes.firstOrNull { it.pressed }
         }
-    } catch (e: TimeoutCancellationException) {
-        null
+        down
     }
+} catch (e: TimeoutCancellationException) {
+    null
+}
 
 fun Float.orZero(): Float = if (this.isNaN()) 0f else this

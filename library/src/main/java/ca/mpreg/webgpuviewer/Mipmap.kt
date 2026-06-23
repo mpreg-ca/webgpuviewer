@@ -20,7 +20,11 @@ class Mipmap(
     val tilesRows: Int,
     val tilesize: Int,
 ) {
-    private var textures: MutableList<GPUTexture> = mutableListOf()
+    companion object {
+        val device = WebGpuRenderer.device
+    }
+
+    var textures: MutableList<GPUTexture> = mutableListOf()
     private var tiles: MutableList<GPUTexture> = mutableListOf()
 
     constructor(pixels: ByteBuffer, width: Int, height: Int, scale: Float, tilesize: Int) : this(
@@ -41,7 +45,7 @@ class Mipmap(
                 Log.i("Renderer", "Create tile $c $r $tileWidth $tileHeight $x $y")
                 val size = GPUExtent3D(tileWidth, tileHeight)
 
-                val texture = webgpu.device.createTexture(
+                val texture = device.createTexture(
                     GPUTextureDescriptor(
                         size = size,
                         format = TextureFormat.RGBA8Unorm,
@@ -49,7 +53,7 @@ class Mipmap(
                     )
                 )
 
-                webgpu.device.queue.writeTexture(
+                device.queue.writeTexture(
                     dataLayout =
                         GPUTexelCopyBufferLayout(
                             offset = (y * width + x) * 4L,
@@ -74,14 +78,8 @@ class Mipmap(
         }
     }
 
-    constructor(texture: GPUTexture, scale: Float, tilesize: Int) : this(
-        width = texture.width,
-        height = texture.height,
-        scale = scale,
-        tilesCols = 1,
-        tilesRows = 1,
-        tilesize = tilesize,
-    ) {
+    constructor(texture: GPUTexture, scale: Float, tilesize: Int) :
+            this(texture.width, texture.height, scale, 1, 1, tilesize) {
         textures.add(texture)
         repeat(4) {
             tiles.add(texture)
@@ -105,7 +103,7 @@ class Mipmap(
                 Log.i("Renderer", "Update tile " + c + " " + r)
                 val size = GPUExtent3D(tileWidth, tileHeight)
 
-                webgpu.device.queue.writeTexture(
+                device.queue.writeTexture(
                     dataLayout =
                         GPUTexelCopyBufferLayout(
                             offset = (y * width + x) * 4L,

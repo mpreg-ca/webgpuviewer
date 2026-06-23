@@ -1,7 +1,6 @@
 package ca.mpreg.webgpuviewer
 
-object WebGpuRendererShaderSingle {
-    val shader = """
+val ImageShaderSingle = """
 struct Uniforms {
     offset: vec2<f32>,
     scale: f32,
@@ -197,4 +196,3 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         return textureSampleCatmullRom(uv);
     }
 }"""
-}

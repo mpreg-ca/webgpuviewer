@@ -1,7 +1,6 @@
 package ca.mpreg.webgpuviewer
 
-object WebGpuRendererShader {
-    val shader = """
+val ImageShader = """
 struct Uniforms {
     offset: vec2<f32>,
     scale: f32,
@@ -350,4 +349,3 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     
     return vec4<f32>(col.rgb * col.a, col.a);
 }"""
-}
