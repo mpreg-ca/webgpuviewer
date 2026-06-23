@@ -4,13 +4,14 @@ plugins {
     id("com.vanniktech.maven.publish") version "0.36.0"
 }
 
-val gitCommitId = providers.exec {
-    commandLine("git", "rev-parse", "--short", "HEAD")
-}.standardOutput.asText.map { it.trim() }.getOrElse("unknown")
-
-val baseVersion = "2-$gitCommitId"
-
-val isTag = System.getenv("GITHUB_REF_TYPE") == "tag"
+val tag: String = if (System.getenv("GITHUB_REF_TYPE") == "tag") {
+    System.getenv("GITHUB_REF_NAME")
+} else {
+    val baseVersion = providers.exec {
+        commandLine("git", "rev-parse", "--short", "HEAD")
+    }.standardOutput.asText.map { it.trim() }.getOrElse("unknown")
+    "$baseVersion-SNAPSHOT"
+}
 
 android {
     namespace = "ca.mpreg.webgpuviewer"
@@ -59,8 +60,7 @@ dependencies {
 
 afterEvaluate {
     mavenPublishing {
-        val version = if (isTag) baseVersion else "$baseVersion-SNAPSHOT"
-        coordinates("ca.mpreg", "webgpuviewer", version)
+        coordinates("ca.mpreg", "webgpuviewer", tag)
 
         pom {
             name.set("webgpuviewer")

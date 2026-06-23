@@ -31,7 +31,6 @@ import androidx.webgpu.WebGpuRuntimeException
 import androidx.webgpu.helper.Util.windowFromSurface
 import androidx.webgpu.helper.initLibrary
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.isActive
@@ -160,7 +159,7 @@ class WebGpuRenderer {
     @Synchronized
     fun post(fn: suspend () -> Unit) {
         if (scope?.isActive == true) {
-            CoroutineScope(Dispatchers.Default).launch {
+            CoroutineScope(dispatcher).launch {
                 fn()
             }
         } else {

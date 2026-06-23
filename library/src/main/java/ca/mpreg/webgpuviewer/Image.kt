@@ -36,8 +36,8 @@ import kotlin.math.round
 
 class Image private constructor(val width: Int, val height: Int) {
     companion object {
-        val device = WebGpuRenderer.device
-        val dispatcher = WebGpuRenderer.dispatcher
+        val device get() = WebGpuRenderer.device
+        val dispatcher get() = WebGpuRenderer.dispatcher
         var pipeline: GPURenderPipeline
 
         init {
@@ -67,6 +67,12 @@ class Image private constructor(val width: Int, val height: Int) {
                 var pixels = pixels
 
                 withContext(dispatcher) {
+                    buffer = device.createBuffer(
+                        GPUBufferDescriptor(
+                            size = 32, usage = BufferUsage.CopyDst or BufferUsage.Uniform
+                        )
+                    )
+
                     mipmaps.add(Mipmap(pixels, width, height, 1f, tilesize))
 
                     var scale = 1f
@@ -81,7 +87,7 @@ class Image private constructor(val width: Int, val height: Int) {
                         val newWidth = floor(width * scale).toInt()
                         val newHeight = floor(height * scale).toInt()
                         Log.i(
-                            "Renderer", "Create mipmap using CPU ${scale} ${textureWidth} ${textureHeight} ${newWidth} ${newHeight} ${pixels.capacity()} ${textureWidth * textureHeight * 4}"
+                            "Renderer", "Create mipmap using CPU ${scale} ${newWidth} ${newHeight}"
                         )
                         pixels = withContext(Dispatchers.Default) {
                             ImageUtil.resize(pixels, textureWidth, textureHeight)
@@ -95,11 +101,13 @@ class Image private constructor(val width: Int, val height: Int) {
 
                     while (width * scale > maxWidth && height * scale > maxHeight) {
                         scale /= 2
+                        val newWidth = floor(width * scale).toInt()
+                        val newHeight = floor(height * scale).toInt()
                         Log.i(
                             "Renderer",
-                            "Create mipmap using shader ${scale} ${width * scale} ${height * scale}"
+                            "Create mipmap using shader ${scale} ${newWidth} ${newHeight}"
                         )
-                        val size = GPUExtent3D((width * scale).toInt(), (height * scale).toInt())
+                        val size = GPUExtent3D(newWidth, newHeight)
                         val texture = device.createTexture(
                             GPUTextureDescriptor(
                                 size = size,
@@ -130,20 +138,19 @@ class Image private constructor(val width: Int, val height: Int) {
         order(ByteOrder.nativeOrder())
     }
 
-    val buffer: GPUBuffer = device.createBuffer(
-        GPUBufferDescriptor(size = 32, usage = BufferUsage.CopyDst or BufferUsage.Uniform)
-    )
+    var buffer: GPUBuffer? = null
 
     fun update(pixels: ByteBuffer) {
         mipmaps[0].update(pixels)
     }
 
     protected fun finalize() {
-        buffer.close()
+        buffer?.close()
     }
 
     fun render(encoder: GPUCommandEncoder, dst: GPUTexture, x: Float, y: Float, scale: Float) {
         if (mipmaps.isEmpty()) return
+        val buffer = buffer ?: return
 
         val level = floor(log2(1 / scale)).toInt().coerceIn(0, mipmaps.size - 1)
 

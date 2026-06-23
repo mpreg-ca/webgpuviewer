@@ -48,5 +48,5 @@ dependencies {
     implementation(libs.androidx.activity.compose)
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.ui)
-    implementation("ca.mpreg:imagedecoder:3-22bb5c3")
+    implementation("ca.mpreg:imagedecoder:6")
 }

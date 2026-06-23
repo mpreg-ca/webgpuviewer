@@ -1,11 +1,15 @@
 package ca.mpreg.webgpuviewer.test
 
 import android.os.Bundle
+import android.util.Log
 import androidx.appcompat.app.AppCompatActivity
 import ca.mpreg.imagedecoder.ImageDecoder
 import ca.mpreg.webgpuviewer.Image
 import ca.mpreg.webgpuviewer.Trim
 import ca.mpreg.webgpuviewer.test.databinding.MainActivityBinding
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 class MainActivity : AppCompatActivity() {
     private lateinit var binding: MainActivityBinding
@@ -19,36 +23,41 @@ class MainActivity : AppCompatActivity() {
         val width = resources.displayMetrics.widthPixels
         val height = resources.displayMetrics.heightPixels
 
-        val stream = assets.open("ref.png")
-        val dec = ImageDecoder.new(stream)
-        val res = dec.decodeNext(getTrim = false)
-
         binding.composeView1.apply {
             layoutParams.width = width
             layoutParams.height = height
-            renderer.dpi = resources.displayMetrics.densityDpi / 100f
-            renderer.post {
-                val image = Image(res.image, res.width, res.height)
-                renderer.images.add(image)
+        }
 
-                renderer.homeScale = renderer.minScale
-                renderer.homeX = 0f
-                renderer.homeY = 0f
+        CoroutineScope(Dispatchers.Default).launch {
+            val stream = assets.open("ref.png")
+            val dec = ImageDecoder.new(stream)
+            Log.i("start", "start ${dec.pages}")
+            val res = dec.decodeNext()
 
-                val trim = Trim.find(image, 1f, 1f, 1f, 10f / 255)
+            binding.composeView1.apply {
+                renderer.dpi = resources.displayMetrics.densityDpi / 100f
+                renderer.post {
+                    val image = Image(res.image, res.width, res.height)
+                    val trim = Trim.find(image, 1f, 1f, 1f, 10f / 255)
+                    renderer.images.add(image)
 
-                renderer.homeScale = renderer.getMinScale(trim.width(), trim.height())
-                renderer.homeX = renderer.getHomeX(
-                    -((trim.left.toFloat() - 0.5f * res.width) / trim.width().toFloat() + 0.5f),
-                    renderer.homeScale
-                )
-                renderer.homeY = renderer.getHomeY(
-                    -((trim.top.toFloat() - 0.5f * res.height) / trim.height().toFloat() + 0.5f),
-                    renderer.homeScale
-                )
+                    renderer.homeScale = renderer.minScale
+                    renderer.homeX = 0f
+                    renderer.homeY = 0f
 
-                renderer.render()
-                renderer.home()
+                    renderer.homeScale = renderer.getMinScale(trim.width(), trim.height())
+                    renderer.homeX = renderer.getHomeX(
+                        -((trim.left.toFloat() - 0.5f * res.width) / trim.width().toFloat() + 0.5f),
+                        renderer.homeScale
+                    )
+                    renderer.homeY = renderer.getHomeY(
+                        -((trim.top.toFloat() - 0.5f * res.height) / trim.height()
+                            .toFloat() + 0.5f), renderer.homeScale
+                    )
+
+                    renderer.render()
+                    renderer.home()
+                }
             }
         }
 

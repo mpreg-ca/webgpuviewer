@@ -15,11 +15,11 @@ import androidx.webgpu.GPUShaderSourceWGSL
 import androidx.webgpu.GPUTexture
 import androidx.webgpu.MapMode
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.ceil
@@ -27,7 +27,9 @@ import kotlin.time.Duration.Companion.milliseconds
 
 class Trim {
     companion object {
-        val device = WebGpuRenderer.device
+        val device get() = WebGpuRenderer.device
+        val dispatcher get() = WebGpuRenderer.dispatcher
+        val instance get() = WebGpuRenderer.instance
 
         var pipelineAll: GPUComputePipeline
         var pipelineLeft: GPUComputePipeline
@@ -80,81 +82,87 @@ class Trim {
         }
 
         suspend fun find(image: Image, r: Float, g: Float, b: Float, threshold: Float): Rect {
-            val mipmap = image.mipmaps[0]
-            if (mipmap.tilesCols == 1 && mipmap.tilesRows == 1) {
-                val res = find(mipmap.textures[0], pipelineAll, r, g, b, threshold)
+            return withContext(dispatcher) {
+                val mipmap = image.mipmaps[0]
 
-                val job = CoroutineScope(WebGpuRenderer.dispatcher).launch {
+                if (mipmap.tilesCols == 1 && mipmap.tilesRows == 1) {
+                    val res = find(mipmap.textures[0], pipelineAll, r, g, b, threshold)
+
+                    val job = launch {
+                        while (true) {
+                            instance.processEvents()
+                            delay(1.milliseconds)
+                        }
+                    }
+
+                    try {
+                        return@withContext res.await()
+                    } finally {
+                        job.cancel()
+                    }
+                }
+
+                val left = mutableListOf<Deferred<Rect>>()
+                val right = mutableListOf<Deferred<Rect>>()
+                val top = mutableListOf<Deferred<Rect>>()
+                val bottom = mutableListOf<Deferred<Rect>>()
+
+                for (row in 0 until mipmap.tilesRows) {
+                    left.add(
+                        find(
+                            mipmap.textures[row * mipmap.tilesCols],
+                            pipelineLeft,
+                            r,
+                            g,
+                            b,
+                            threshold
+                        )
+                    )
+                    right.add(
+                        find(
+                            mipmap.textures[row * mipmap.tilesCols + mipmap.tilesCols - 1],
+                            pipelineRight,
+                            r,
+                            g,
+                            b,
+                            threshold
+                        )
+                    )
+                }
+
+                for (col in 0 until mipmap.tilesCols) {
+                    top.add(find(mipmap.textures[col], pipelineTop, r, g, b, threshold))
+                    bottom.add(
+                        find(
+                            mipmap.textures[col + (mipmap.tilesCols - 1) * mipmap.tilesRows],
+                            pipelineBottom,
+                            r,
+                            g,
+                            b,
+                            threshold
+                        )
+                    )
+                }
+
+                val job = launch {
                     while (true) {
-                        WebGpuRenderer.instance.processEvents()
+                        instance.processEvents()
                         delay(1.milliseconds)
                     }
                 }
 
                 try {
-                    return res.await()
+                    return@withContext Rect(
+                        left.awaitAll().map({ it.left }).min(),
+                        top.awaitAll().map({ it.top }).min(),
+                        right.awaitAll()
+                            .map({ it.right + mipmap.tilesize * (mipmap.tilesCols - 1) }).max(),
+                        bottom.awaitAll()
+                            .map({ it.bottom + mipmap.tilesize * (mipmap.tilesRows - 1) }).max(),
+                    )
                 } finally {
                     job.cancel()
                 }
-            }
-
-            val left = mutableListOf<Deferred<Rect>>()
-            val right = mutableListOf<Deferred<Rect>>()
-            val top = mutableListOf<Deferred<Rect>>()
-            val bottom = mutableListOf<Deferred<Rect>>()
-
-            for (row in 0 until mipmap.tilesRows) {
-                left.add(
-                    find(
-                        mipmap.textures[row * mipmap.tilesCols], pipelineLeft, r, g, b, threshold
-                    )
-                )
-                right.add(
-                    find(
-                        mipmap.textures[row * mipmap.tilesCols + mipmap.tilesCols - 1],
-                        pipelineRight,
-                        r,
-                        g,
-                        b,
-                        threshold
-                    )
-                )
-            }
-
-            for (col in 0 until mipmap.tilesCols) {
-                top.add(find(mipmap.textures[col], pipelineTop, r, g, b, threshold))
-                bottom.add(
-                    find(
-                        mipmap.textures[col + (mipmap.tilesCols - 1) * mipmap.tilesRows],
-                        pipelineBottom,
-                        r,
-                        g,
-                        b,
-                        threshold
-                    )
-                )
-            }
-
-            val job = CoroutineScope(WebGpuRenderer.dispatcher).launch {
-                while (true) {
-                    WebGpuRenderer.instance.processEvents()
-                    delay(1.milliseconds)
-                }
-            }
-
-            Log.i("WebGpuRenderer", "Trim ${left.size} ${right.size} ${top.size} ${bottom.size}")
-
-            try {
-                return Rect(
-                    left.awaitAll().map({ it.left }).min(),
-                    top.awaitAll().map({ it.top }).min(),
-                    right.awaitAll().map({ it.right + mipmap.tilesize * (mipmap.tilesCols - 1) })
-                        .max(),
-                    bottom.awaitAll().map({ it.bottom + mipmap.tilesize * (mipmap.tilesRows - 1) })
-                        .max(),
-                )
-            } finally {
-                job.cancel()
             }
         }
 
