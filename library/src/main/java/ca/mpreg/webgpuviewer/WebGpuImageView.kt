@@ -7,10 +7,10 @@ import androidx.compose.ui.platform.AbstractComposeView
 
 class WebGpuImageView(context: Context, attrs: AttributeSet? = null) :
     AbstractComposeView(context, attrs) {
-    var renderer: WebGpuRenderer = WebGpuRenderer()
+    var state: WebGpuImageViewerState = WebGpuImageViewerState()
 
     @Composable
     override fun Content() {
-        WebGpuImageViewer(renderer = renderer)
+        WebGpuImageViewer(state = state)
     }
 }

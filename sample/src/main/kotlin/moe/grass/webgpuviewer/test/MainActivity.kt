@@ -6,10 +6,13 @@ import androidx.appcompat.app.AppCompatActivity
 import ca.mpreg.imagedecoder.ImageDecoder
 import ca.mpreg.webgpuviewer.Image
 import ca.mpreg.webgpuviewer.Trim
+import ca.mpreg.webgpuviewer.WebGpuImageViewerPage
+import ca.mpreg.webgpuviewer.WebGpuRenderer
 import ca.mpreg.webgpuviewer.test.databinding.MainActivityBinding
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class MainActivity : AppCompatActivity() {
     private lateinit var binding: MainActivityBinding
@@ -34,29 +37,20 @@ class MainActivity : AppCompatActivity() {
             Log.i("start", "start ${dec.pages}")
             val res = dec.decodeNext()
 
+            val page = withContext(WebGpuRenderer.dispatcher) {
+                val image = Image(res.image, res.width, res.height)
+                WebGpuImageViewerPage(image).apply {
+                    trim = Trim.find(image, 1f, 1f, 1f, 10f / 255)
+                }
+            }
+
             binding.composeView1.apply {
-                renderer.dpi = resources.displayMetrics.densityDpi / 100f
-                renderer.post {
-                    val image = Image(res.image, res.width, res.height)
-                    val trim = Trim.find(image, 1f, 1f, 1f, 10f / 255)
-                    renderer.images.add(image)
+                state.dpi = resources.displayMetrics.densityDpi / 100f
+                state.post {
+                    state.currentPage = page
+                    page.home()
 
-                    renderer.homeScale = renderer.minScale
-                    renderer.homeX = 0f
-                    renderer.homeY = 0f
-
-                    renderer.homeScale = renderer.getMinScale(trim.width(), trim.height())
-                    renderer.homeX = renderer.getHomeX(
-                        -((trim.left.toFloat() - 0.5f * res.width) / trim.width().toFloat() + 0.5f),
-                        renderer.homeScale
-                    )
-                    renderer.homeY = renderer.getHomeY(
-                        -((trim.top.toFloat() - 0.5f * res.height) / trim.height()
-                            .toFloat() + 0.5f), renderer.homeScale
-                    )
-
-                    renderer.render()
-                    renderer.home()
+                    state.render()
                 }
             }
         }
