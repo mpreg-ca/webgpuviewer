@@ -252,8 +252,8 @@ class Trim {
                             Rect(
                                 output.getInt(0),
                                 output.getInt(4),
-                                output.getInt(8),
-                                output.getInt(12),
+                                (output.getInt(8) + 1).coerceAtMost(texture.width),
+                                (output.getInt(12) + 1).coerceAtMost(texture.height),
                             )
                         )
 
