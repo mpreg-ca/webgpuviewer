@@ -59,8 +59,7 @@ class WebGpuImageViewerSingleState {
 
     var trim: Rect? = null
 
-    val homeScale
-        get() = getMinScale(trim?.width() ?: width, trim?.height() ?: height)
+    val homeScale get() = trim?.let { getMinScale(it.width(), it.height()) } ?: minScale
 
     val homeX: Float
         get() {
