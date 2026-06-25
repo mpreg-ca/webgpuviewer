@@ -49,6 +49,8 @@ class WebGpuImageViewerPage(val image: Image) {
     val width get() = image.width
     val height get() = image.height
 
+    var trim: Rect? = null
+
     val homeScale
         get() = parent?.getMinScale(trim?.width() ?: width, trim?.height() ?: height) ?: 1f
 
@@ -75,8 +77,6 @@ class WebGpuImageViewerPage(val image: Image) {
     var onInvalidate: (() -> Unit)? = null
 
     var parent: WebGpuImageViewerState? = null
-
-    var trim: Rect? = null
 
     val minScale get() = parent?.getMinScale(width, height) ?: 1f
 

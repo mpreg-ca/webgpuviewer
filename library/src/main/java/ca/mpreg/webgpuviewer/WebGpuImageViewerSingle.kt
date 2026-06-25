@@ -1,6 +1,7 @@
 package ca.mpreg.webgpuviewer
 
 import android.content.res.Resources
+import android.graphics.Rect
 import android.view.View
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.VectorConverter
@@ -37,8 +38,6 @@ import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.math.abs
-import kotlin.math.ceil
-import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
@@ -50,34 +49,36 @@ class WebGpuImageViewerSingleState {
 
     var animationJob: Job? = null
 
-    var images: MutableList<Image> = mutableListOf()
+    var image: Image? = null
 
     val width get() = renderer?.width ?: 0
     val height get() = renderer?.height ?: 0
 
-    val imageLeft get() = images.map { floor(it.x - it.width / 2.0) }.minOrNull()?.toInt() ?: 0
-    val imageRight get() = images.map { ceil(it.x + it.width / 2.0) }.minOrNull()?.toInt() ?: 0
-    val imageTop get() = images.map { floor(it.y - it.height / 2.0) }.minOrNull()?.toInt() ?: 0
-    val imageBottom get() = images.map { ceil(it.y + it.height / 2.0) }.minOrNull()?.toInt() ?: 0
+    val imageWidth get() = image?.width ?: 0
+    val imageHeight get() = image?.height ?: 0
 
-    val imageWidth get() = imageRight - imageLeft
-    val imageHeight get() = imageBottom - imageTop
+    var trim: Rect? = null
 
-    var homeScale = 1f
-    var homeX = 0f
-    var homeY = 0f
+    val homeScale
+        get() = getMinScale(trim?.width() ?: width, trim?.height() ?: height)
+
+    val homeX: Float
+        get() {
+            val trim = trim ?: return 0f
+            val left = -((trim.left - 0.5f * imageWidth) / trim.width() + 0.5f)
+            val maxX = maxX(homeScale)
+            return (left / homeScale).coerceIn(-maxX, maxX)
+        }
+
+    val homeY: Float
+        get() {
+            val trim = trim ?: return 0f
+            val top = -((trim.top - 0.5f * imageHeight) / trim.height() + 0.5f)
+            val maxY = maxY(homeScale)
+            return (top / homeScale).coerceIn(-maxY, maxY)
+        }
 
     val atHome get() = x == homeX && y == homeY && scale == homeScale
-
-    fun getHomeX(left: Float, scale: Float): Float {
-        val maxX = maxX(scale)
-        return (left / scale).coerceIn(-maxX, maxX)
-    }
-
-    fun getHomeY(top: Float, scale: Float): Float {
-        val maxY = maxY(scale)
-        return (top / scale).coerceIn(-maxY, maxY)
-    }
 
     val minScale
         get() = if (imageWidth == 0 || imageHeight == 0) {
@@ -133,9 +134,7 @@ class WebGpuImageViewerSingleState {
 
     fun render() {
         renderer?.render { encoder, texture ->
-            images.forEach {
-                it.render(encoder, texture, x, y, scale)
-            }
+            image?.render(encoder, texture, x, y, scale)
         }
     }
 
