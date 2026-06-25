@@ -1,1 +1,4 @@
 -keep class ca.mpreg.webgpuviewer.** { *; }
+
+-keep interface androidx.webgpu.** { *; }
+-keep class androidx.webgpu.** { *; }
