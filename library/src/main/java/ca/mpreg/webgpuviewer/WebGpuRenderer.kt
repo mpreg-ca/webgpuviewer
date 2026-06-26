@@ -104,7 +104,7 @@ class WebGpuRenderer {
         }
     }
 
-    fun render(fn: (GPUCommandEncoder, GPUTexture) -> Unit) {
+    fun render(fn: suspend (GPUCommandEncoder, GPUTexture) -> Unit) {
         scope?.launch(dispatcher) {
             val surface = surface ?: return@launch
             val texture = surface.getCurrentTexture().texture

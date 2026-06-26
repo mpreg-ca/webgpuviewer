@@ -38,19 +38,20 @@ class MainActivity : AppCompatActivity() {
             val res = dec.decodeNext()
 
             val page = withContext(WebGpuRenderer.dispatcher) {
-                val image = Image(res.image, res.width, res.height)
-                WebGpuImageViewerPage(image).apply {
-                    trim = Trim.find(image, 1f, 1f, 1f, 10f / 255)
-                }
             }
 
-            binding.composeView1.apply {
-                state.dpi = resources.displayMetrics.densityDpi / 100f
-                state.post {
-                    state.currentPage = page
-                    page.home()
-
-                    state.render()
+            binding.composeView1.state.apply {
+                pageCount = 2
+                currentPageIndex = 0
+                fetchPage = { index ->
+                    val image = Image(res.image, res.width, res.height)
+                    WebGpuImageViewerPage(image).apply {
+                        trim = Trim.find(image, 1f, 1f, 1f, 10f / 255)
+                    }
+                }
+                dpi = resources.displayMetrics.densityDpi / 100f
+                post {
+                    render()
                 }
             }
         }

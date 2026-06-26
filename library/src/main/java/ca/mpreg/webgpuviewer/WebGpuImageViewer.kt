@@ -26,6 +26,9 @@ import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.input.pointer.util.addPointerInputChange
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.util.fastCoerceAtLeast
+import androidx.compose.ui.util.fastCoerceAtMost
+import androidx.compose.ui.util.fastCoerceIn
 import androidx.webgpu.GPUCommandEncoder
 import androidx.webgpu.GPUTexture
 import ca.mpreg.webgpuviewer.WebGpuRenderer.Companion.dispatcher
@@ -34,6 +37,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -59,7 +63,7 @@ class WebGpuImageViewerPage(val image: Image) {
             val parent = parent ?: return 0f
             val left = -((trim.left - 0.5f * width) / trim.width() + 0.5f)
             val maxX = parent.maxX(width, homeScale)
-            return (left / homeScale).coerceIn(-maxX, maxX)
+            return (left / homeScale).fastCoerceIn(-maxX, maxX)
         }
 
     val homeY: Float
@@ -68,7 +72,7 @@ class WebGpuImageViewerPage(val image: Image) {
             val parent = parent ?: return 0f
             val top = -((trim.top - 0.5f * height) / trim.height() + 0.5f)
             val maxY = parent.maxY(height, homeScale)
-            return (top / homeScale).coerceIn(-maxY, maxY)
+            return (top / homeScale).fastCoerceIn(-maxY, maxY)
         }
 
     val atHome get() = x == homeX && y == homeY && scale == homeScale
@@ -115,7 +119,7 @@ class WebGpuImageViewerPage(val image: Image) {
         val startX = x
         val startY = y
 
-        val targetScale = targetScale.coerceIn(minScale, maxScale)
+        val targetScale = targetScale.fastCoerceIn(minScale, maxScale)
 
         val maxX = parent?.maxX(width, targetScale) ?: 0f
         val maxY = parent?.maxY(height, targetScale) ?: 0f
@@ -128,9 +132,9 @@ class WebGpuImageViewerPage(val image: Image) {
 
         val endX = if (origin != null) {
             if (targetScale != startScale) {
-                (startX + (origin.x - 0.5f) * diffEnd).coerceIn(-maxX, maxX)
+                (startX + (origin.x - 0.5f) * diffEnd).fastCoerceIn(-maxX, maxX)
             } else {
-                x.coerceIn(-maxX, maxX)
+                x.fastCoerceIn(-maxX, maxX)
             }
         } else {
             targetX
@@ -138,9 +142,9 @@ class WebGpuImageViewerPage(val image: Image) {
 
         val endY = if (origin != null) {
             if (targetScale != startScale) {
-                (startY + (origin.y - 0.5f) * diffEnd).coerceIn(-maxY, maxY)
+                (startY + (origin.y - 0.5f) * diffEnd).fastCoerceIn(-maxY, maxY)
             } else {
-                y.coerceIn(-maxY, maxY)
+                y.fastCoerceIn(-maxY, maxY)
             }
         } else {
             targetY
@@ -151,7 +155,7 @@ class WebGpuImageViewerPage(val image: Image) {
                 val scale = startScale * (1 - value) + targetScale * value
                 val c = if (startScale != targetScale) {
                     val diff = 1 / scale - 1 / startScale
-                    (diff / diffEnd).coerceIn(0f, 1f)
+                    (diff / diffEnd).fastCoerceIn(0f, 1f)
                 } else {
                     value
                 }
@@ -195,25 +199,34 @@ class WebGpuImageViewerState {
         return max(0f, (height.toFloat() / this.height - 1 / scale) / 2)
     }
 
-    var currentPage: WebGpuImageViewerPage? = null
-        set(page) {
-            page?.parent = this
-            page?.scope = scope
-            page?.onInvalidate = {
-                render()
-            }
-            field = page
+    var pageCount = 0
+    var currentPageIndex = 0
+        set(value) {
+            field = value.fastCoerceAtMost(pageCount - 1).fastCoerceAtLeast(0)
         }
 
-    var nextPage: WebGpuImageViewerPage? = null
-        set(page) {
-            page?.onInvalidate = {
-                render()
-            }
-            field = page
-        }
+    var fetchPage: (suspend (Int) -> WebGpuImageViewerPage)? = null
 
-    var currentZ = 1
+    val pages = mutableMapOf<Int, WebGpuImageViewerPage?>()
+
+    private suspend fun getPage(index: Int): WebGpuImageViewerPage? {
+        if (index >= pageCount) return null
+        if (index < 0) return null
+
+        pages[index] = pages[index] ?: fetchPage?.invoke(index)
+        pages[index]?.apply {
+            parent = this@WebGpuImageViewerState
+            scope = this@WebGpuImageViewerState.scope
+            onInvalidate = {
+                this@WebGpuImageViewerState.render()
+            }
+        }
+        return pages[index]
+    }
+
+    suspend fun getCurrentPage(): WebGpuImageViewerPage? = getPage(currentPageIndex)
+
+    var pageTurn = 0f
 
     @Synchronized
     fun init(scope: CoroutineScope, renderer: WebGpuRenderer) {
@@ -228,12 +241,27 @@ class WebGpuImageViewerState {
 
     fun render() {
         renderer?.render { encoder, texture ->
-            if (currentZ == 1) {
-                nextPage?.render(encoder, texture, 0f, 0f, 1f)
-                currentPage?.render(encoder, texture, 0f, 0f, 1f)
-            } else {
-                currentPage?.render(encoder, texture, 0f, 0f, 1f)
-                nextPage?.render(encoder, texture, 0f, 0f, 1f)
+            val currentPage = getCurrentPage()
+            currentPage?.let {
+                currentPage.render(encoder, texture, 0f, 0f, 1f)
+
+                val nextPage = getPage(currentPageIndex + 1)
+                nextPage?.let {
+//                    val right =
+//                        currentPage.scale * (currentPage.x + (0.5f * currentPage.width) / width)
+                    it.render(
+                        encoder, texture, -(1 - pageTurn) * it.width * it.scale / width, 0f, 1f
+                    )
+                }
+
+//                val prevPage = getPage(currentPageIndex - 1)
+//                prevPage?.let {
+//                    val right =
+//                        currentPage.scale * (currentPage.x - (0.5f * currentPage.width) / width)
+//                    it.render(
+//                        encoder, texture, right - (0.5f * it.width * it.scale) / width, 0f, 1f
+//                    )
+//                }
             }
         }
     }
@@ -276,9 +304,9 @@ fun WebGpuImageViewer(
                 val doubleTapTimeout = viewConfiguration.doubleTapTimeoutMillis
                 val touchSlop = viewConfiguration.touchSlop
 
-                val page = state.currentPage ?: return@pointerInput
-
                 awaitEachGesture {
+                    val page = runBlocking(dispatcher) { state.getCurrentPage() }
+                        ?: return@awaitEachGesture
                     val firstDown = awaitFirstDown(pass = PointerEventPass.Initial)
                     page.animateTo(Offset(0.5f, 0.5f))
 
@@ -358,7 +386,7 @@ fun WebGpuImageViewer(
                                             originalScale * 10f.pow(2 * (totalDeltaY + value) / state.height)
 
                                         page.scale =
-                                            newScale.coerceIn(page.homeScale, page.maxScale)
+                                            newScale.fastCoerceIn(page.homeScale, page.maxScale)
                                         val diff = 1 / page.scale - 1 / originalScale
 
                                         val x = (originalX + px * diff).orZero()
@@ -368,7 +396,7 @@ fun WebGpuImageViewer(
                                         val maxY = state.maxY(page.height, page.scale)
 
                                         page.setPos(
-                                            x.coerceIn(-maxX, maxX), y.coerceIn(-maxY, maxY)
+                                            x.fastCoerceIn(-maxX, maxX), y.fastCoerceIn(-maxY, maxY)
                                         )
                                     }
                                 }
@@ -445,15 +473,15 @@ fun WebGpuImageViewer(
                                     val maxX = state.maxX(page.width, newScale)
                                     val maxY = state.maxY(page.height, newScale)
 
-                                    if (page.scale != newScale || x.coerceIn(
+                                    if (page.scale != newScale || x.fastCoerceIn(
                                             -maxX, maxX
-                                        ) != page.x || y.coerceIn(-maxY, maxY) != page.y
+                                        ) != page.x || y.fastCoerceIn(-maxY, maxY) != page.y
                                     ) {
                                         page.scale = newScale
 
                                         if (single) {
-                                            x = x.coerceIn(-maxX, maxX)
-                                            y = y.coerceIn(-maxY, maxY)
+                                            x = x.fastCoerceIn(-maxX, maxX)
+                                            y = y.fastCoerceIn(-maxY, maxY)
                                         }
 
                                         page.setPos(x.orZero(), y.orZero())
@@ -474,9 +502,9 @@ fun WebGpuImageViewer(
                         val velocity = velocityTracker.calculateVelocity()
                         if ((page.scale >= page.homeScale) && (page.scale <= page.maxScale) && (lastEventTime - lastMoveTime) < 100 && (abs(
                                 velocity.x
-                            ) > 400 || abs(velocity.y) > 400) && (page.x.coerceIn(
+                            ) > 400 || abs(velocity.y) > 400) && (page.x.fastCoerceIn(
                                 -maxX, maxX
-                            ) == page.x || page.y.coerceIn(-maxY, maxY) == page.y)
+                            ) == page.x || page.y.fastCoerceIn(-maxY, maxY) == page.y)
                         ) {
                             // fling pan
                             page.animationJob = scope.launch {
@@ -490,8 +518,8 @@ fun WebGpuImageViewer(
                                     val dx = (delta.x / state.width) / page.scale
                                     val dy = (delta.y / state.height) / page.scale
                                     page.setPos(
-                                        (page.x + dx).coerceIn(-maxX, maxX).orZero(),
-                                        (page.y + dy).coerceIn(-maxY, maxY).orZero()
+                                        (page.x + dx).fastCoerceIn(-maxX, maxX).orZero(),
+                                        (page.y + dy).fastCoerceIn(-maxY, maxY).orZero()
                                     )
                                 }
                             }

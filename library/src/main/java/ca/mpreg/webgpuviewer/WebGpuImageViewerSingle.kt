@@ -30,6 +30,7 @@ import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.input.pointer.util.addPointerInputChange
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.util.fastCoerceIn
 import ca.mpreg.webgpuviewer.WebGpuRenderer.Companion.dispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -66,7 +67,7 @@ class WebGpuImageViewerSingleState {
             val trim = trim ?: return 0f
             val left = -((trim.left - 0.5f * imageWidth) / trim.width() + 0.5f)
             val maxX = maxX(homeScale)
-            return (left / homeScale).coerceIn(-maxX, maxX)
+            return (left / homeScale).fastCoerceIn(-maxX, maxX)
         }
 
     val homeY: Float
@@ -74,7 +75,7 @@ class WebGpuImageViewerSingleState {
             val trim = trim ?: return 0f
             val top = -((trim.top - 0.5f * imageHeight) / trim.height() + 0.5f)
             val maxY = maxY(homeScale)
-            return (top / homeScale).coerceIn(-maxY, maxY)
+            return (top / homeScale).fastCoerceIn(-maxY, maxY)
         }
 
     val atHome get() = x == homeX && y == homeY && scale == homeScale
@@ -153,7 +154,7 @@ class WebGpuImageViewerSingleState {
         val startX = x
         val startY = y
 
-        val targetScale = targetScale.coerceIn(minScale, maxScale)
+        val targetScale = targetScale.fastCoerceIn(minScale, maxScale)
 
         val maxX = maxX(targetScale)
         val maxY = maxY(targetScale)
@@ -166,9 +167,9 @@ class WebGpuImageViewerSingleState {
 
         val endX = if (origin != null) {
             if (targetScale != startScale) {
-                (startX + (origin.x - 0.5f) * diffEnd).coerceIn(-maxX, maxX)
+                (startX + (origin.x - 0.5f) * diffEnd).fastCoerceIn(-maxX, maxX)
             } else {
-                x.coerceIn(-maxX, maxX)
+                x.fastCoerceIn(-maxX, maxX)
             }
         } else {
             targetX
@@ -176,9 +177,9 @@ class WebGpuImageViewerSingleState {
 
         val endY = if (origin != null) {
             if (targetScale != startScale) {
-                (startY + (origin.y - 0.5f) * diffEnd).coerceIn(-maxY, maxY)
+                (startY + (origin.y - 0.5f) * diffEnd).fastCoerceIn(-maxY, maxY)
             } else {
-                y.coerceIn(-maxY, maxY)
+                y.fastCoerceIn(-maxY, maxY)
             }
         } else {
             targetY
@@ -189,7 +190,7 @@ class WebGpuImageViewerSingleState {
                 val scale = startScale * (1 - value) + targetScale * value
                 val c = if (startScale != targetScale) {
                     val diff = 1 / scale - 1 / startScale
-                    (diff / diffEnd).coerceIn(0f, 1f)
+                    (diff / diffEnd).fastCoerceIn(0f, 1f)
                 } else {
                     value
                 }
@@ -324,7 +325,7 @@ fun WebGpuImageViewerSingle(
                                             originalScale * 10f.pow(2 * (totalDeltaY + value) / state.height)
 
                                         state.scale =
-                                            newScale.coerceIn(state.homeScale, state.maxScale)
+                                            newScale.fastCoerceIn(state.homeScale, state.maxScale)
                                         val diff = 1 / state.scale - 1 / originalScale
 
                                         val x = (originalX + px * diff).orZero()
@@ -334,7 +335,7 @@ fun WebGpuImageViewerSingle(
                                         val maxY = state.maxY()
 
                                         state.setPos(
-                                            x.coerceIn(-maxX, maxX), y.coerceIn(-maxY, maxY)
+                                            x.fastCoerceIn(-maxX, maxX), y.fastCoerceIn(-maxY, maxY)
                                         )
                                     }
                                 }
@@ -412,17 +413,17 @@ fun WebGpuImageViewerSingle(
 
                                     if (state.scale != newScale || (!view.scrollable(true) && !view.scrollable(
                                             false
-                                        )) || (view.scrollable(true) && x.coerceIn(
+                                        )) || (view.scrollable(true) && x.fastCoerceIn(
                                             -maxX, maxX
-                                        ) != state.x) || (view.scrollable(false) && y.coerceIn(
+                                        ) != state.x) || (view.scrollable(false) && y.fastCoerceIn(
                                             -maxY, maxY
                                         ) != state.y)
                                     ) {
                                         state.scale = newScale
 
                                         if (single) {
-                                            x = x.coerceIn(-maxX, maxX)
-                                            y = y.coerceIn(-maxY, maxY)
+                                            x = x.fastCoerceIn(-maxX, maxX)
+                                            y = y.fastCoerceIn(-maxY, maxY)
                                         }
 
                                         state.setPos(x.orZero(), y.orZero())
@@ -446,9 +447,9 @@ fun WebGpuImageViewerSingle(
                         val velocity = velocityTracker.calculateVelocity()
                         if ((state.scale >= state.homeScale) && (state.scale <= state.maxScale) && (lastEventTime - lastMoveTime) < 100 && (abs(
                                 velocity.x
-                            ) > 400 || abs(velocity.y) > 400) && (state.x.coerceIn(
+                            ) > 400 || abs(velocity.y) > 400) && (state.x.fastCoerceIn(
                                 -maxX, maxX
-                            ) == state.x || state.y.coerceIn(-maxY, maxY) == state.y)
+                            ) == state.x || state.y.fastCoerceIn(-maxY, maxY) == state.y)
                         ) {
                             // fling pan
                             state.animationJob = scope.launch {
@@ -462,8 +463,8 @@ fun WebGpuImageViewerSingle(
                                     val dx = (delta.x / state.width) / state.scale
                                     val dy = (delta.y / state.height) / state.scale
                                     state.setPos(
-                                        (state.x + dx).coerceIn(-maxX, maxX).orZero(),
-                                        (state.y + dy).coerceIn(-maxY, maxY).orZero()
+                                        (state.x + dx).fastCoerceIn(-maxX, maxX).orZero(),
+                                        (state.y + dy).fastCoerceIn(-maxY, maxY).orZero()
                                     )
                                 }
                             }
