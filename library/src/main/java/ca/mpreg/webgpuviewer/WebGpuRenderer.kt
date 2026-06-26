@@ -29,10 +29,13 @@ import androidx.webgpu.WebGpuRuntimeException
 import androidx.webgpu.helper.Util.windowFromSurface
 import androidx.webgpu.helper.initLibrary
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.asCoroutineDispatcher
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 
@@ -104,29 +107,53 @@ class WebGpuRenderer {
         }
     }
 
+    private var renderJob: Job? = null
+    private var nextRenderJob: (suspend CoroutineScope.() -> Unit)? = null
+
+    private val mutex = Mutex()
+
     fun render(fn: suspend (GPUCommandEncoder, GPUTexture) -> Unit) {
-        scope?.launch(dispatcher) {
-            val surface = surface ?: return@launch
-            val texture = surface.getCurrentTexture().texture
-            val encoder = device.createCommandEncoder()
+        runBlocking {
+            mutex.withLock {
+                this@WebGpuRenderer.nextRenderJob = f@{
+                    val surface = surface ?: return@f
 
-            encoder.beginRenderPass(
-                GPURenderPassDescriptor(
-                    colorAttachments = arrayOf(
-                        GPURenderPassColorAttachment(
-                            view = texture.createView(),
-                            loadOp = LoadOp.Clear,
-                            storeOp = StoreOp.Store,
-                            clearValue = GPUColor(0.0, 0.0, 0.0, 0.0)
+                    val texture = surface.getCurrentTexture().texture
+                    val encoder = device.createCommandEncoder()
+
+                    encoder.beginRenderPass(
+                        GPURenderPassDescriptor(
+                            colorAttachments = arrayOf(
+                                GPURenderPassColorAttachment(
+                                    view = texture.createView(),
+                                    loadOp = LoadOp.Clear,
+                                    storeOp = StoreOp.Store,
+                                    clearValue = GPUColor(0.0, 0.0, 0.0, 0.0)
+                                )
+                            )
                         )
-                    )
-                )
-            ).end()
+                    ).end()
 
-            fn(encoder, texture)
+                    fn(encoder, texture)
 
-            device.queue.submit(arrayOf(encoder.finish()))
-            surface.present()
+                    device.queue.submit(arrayOf(encoder.finish()))
+                    surface.present()
+
+                    mutex.withLock {
+                        renderJob = this@WebGpuRenderer.nextRenderJob?.let {
+                            scope?.launch(dispatcher, CoroutineStart.DEFAULT, it)
+                        }
+                        this@WebGpuRenderer.nextRenderJob = null
+                    }
+                }
+
+                if (renderJob == null) {
+                    this@WebGpuRenderer.nextRenderJob?.let {
+                        renderJob = scope?.launch(dispatcher, CoroutineStart.DEFAULT, it)
+                        this@WebGpuRenderer.nextRenderJob = null
+                    }
+                }
+            }
         }
     }
 

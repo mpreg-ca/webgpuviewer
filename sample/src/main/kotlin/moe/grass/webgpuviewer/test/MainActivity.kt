@@ -7,12 +7,10 @@ import ca.mpreg.imagedecoder.ImageDecoder
 import ca.mpreg.webgpuviewer.Image
 import ca.mpreg.webgpuviewer.Trim
 import ca.mpreg.webgpuviewer.WebGpuImageViewerPage
-import ca.mpreg.webgpuviewer.WebGpuRenderer
 import ca.mpreg.webgpuviewer.test.databinding.MainActivityBinding
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 class MainActivity : AppCompatActivity() {
     private lateinit var binding: MainActivityBinding
@@ -37,19 +35,23 @@ class MainActivity : AppCompatActivity() {
             Log.i("start", "start ${dec.pages}")
             val res = dec.decodeNext()
 
-            val page = withContext(WebGpuRenderer.dispatcher) {
-            }
-
             binding.composeView1.state.apply {
-                pageCount = 2
-                currentPageIndex = 0
+                dpi = resources.displayMetrics.densityDpi / 100f
+                pageCount = 4
+                currentPageIndex = 1
+
+                val state = this
                 fetchPage = { index ->
-                    val image = Image(res.image, res.width, res.height)
-                    WebGpuImageViewerPage(image).apply {
+                    WebGpuImageViewerPage(Image(res.image, res.width, res.height)).apply {
                         trim = Trim.find(image, 1f, 1f, 1f, 10f / 255)
+
+                        parent = state
+                        x = homeX
+                        y = homeY
+                        scale = homeScale
                     }
                 }
-                dpi = resources.displayMetrics.densityDpi / 100f
+
                 post {
                     render()
                 }
