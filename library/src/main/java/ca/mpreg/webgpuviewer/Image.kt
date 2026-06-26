@@ -69,7 +69,7 @@ class Image private constructor(val width: Int, val height: Int) {
                 withContext(dispatcher) {
                     buffer = device.createBuffer(
                         GPUBufferDescriptor(
-                            size = 32, usage = BufferUsage.CopyDst or BufferUsage.Uniform
+                            size = 48, usage = BufferUsage.CopyDst or BufferUsage.Uniform
                         )
                     )
 
@@ -134,7 +134,7 @@ class Image private constructor(val width: Int, val height: Int) {
 
     val mipmaps: MutableList<Mipmap> = mutableListOf()
 
-    val byteBuffer: ByteBuffer = ByteBuffer.allocateDirect(32).apply {
+    val byteBuffer: ByteBuffer = ByteBuffer.allocateDirect(48).apply {
         order(ByteOrder.nativeOrder())
     }
 
@@ -148,7 +148,7 @@ class Image private constructor(val width: Int, val height: Int) {
         buffer?.close()
     }
 
-    fun render(encoder: GPUCommandEncoder, dst: GPUTexture, x: Float, y: Float, scale: Float) {
+    fun render(encoder: GPUCommandEncoder, dst: GPUTexture, x: Float, y: Float, scale: Float, pageFlip: Float = 0f, foldAngle: Float = 0f) {
         if (mipmaps.isEmpty()) return
         val buffer = buffer ?: return
 
@@ -176,6 +176,8 @@ class Image private constructor(val width: Int, val height: Int) {
         byteBuffer.putFloat(20, mipmap.tilesRows.toFloat())
         byteBuffer.putFloat(24, dst.width.toFloat())
         byteBuffer.putFloat(28, dst.height.toFloat())
+        byteBuffer.putFloat(32, pageFlip)
+        byteBuffer.putFloat(36, foldAngle)
         device.queue.writeBuffer(buffer, 0, byteBuffer)
 
         val pass = encoder.beginRenderPass(
@@ -204,7 +206,7 @@ class Image private constructor(val width: Int, val height: Int) {
             )
         )
 
-        pass.draw(6)
+        pass.draw(3072)
         pass.end()
     }
 }

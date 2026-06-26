@@ -9,6 +9,8 @@ struct Uniforms {
     tiles_height: f32,
     dst_width: f32,
     dst_height: f32,
+    page_flip: f32,
+    fold_angle: f32,
 }
 
 @group(0) @binding(0) var<uniform> transform: Uniforms;
@@ -301,17 +303,28 @@ fn downsample(src_start: vec2<f32>, scale: vec2<f32>) -> vec4<f32> {
 
 @vertex
 fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
-    // Generate standard UVs for a 2-triangle quad (Triangle List)
-    var uvs = array<vec2<f32>, 6>(
-        vec2<f32>(0.0, 0.0), // Top-left
-        vec2<f32>(0.0, 1.0), // Bottom-left
-        vec2<f32>(1.0, 0.0), // Top-right
-        vec2<f32>(1.0, 0.0), // Top-right
-        vec2<f32>(0.0, 1.0), // Bottom-left
-        vec2<f32>(1.0, 1.0)  // Bottom-right
-    );
+    // Tessellated quad: 32x16 grid for angled fold
+    const COLS: u32 = 32u;
+    const ROWS: u32 = 16u;
+    let quad_index = vertex_index / 6u;
+    let vert_in_quad = vertex_index % 6u;
+    let col = quad_index % COLS;
+    let row = quad_index / COLS;
 
-    let uv = uvs[vertex_index];
+    let x0 = f32(col) / f32(COLS);
+    let x1 = f32(col + 1u) / f32(COLS);
+    let y0 = f32(row) / f32(ROWS);
+    let y1 = f32(row + 1u) / f32(ROWS);
+
+    var uv: vec2<f32>;
+    switch (vert_in_quad) {
+        case 0u: { uv = vec2<f32>(x0, y0); }
+        case 1u: { uv = vec2<f32>(x0, y1); }
+        case 2u: { uv = vec2<f32>(x1, y0); }
+        case 3u: { uv = vec2<f32>(x1, y0); }
+        case 4u: { uv = vec2<f32>(x0, y1); }
+        default: { uv = vec2<f32>(x1, y1); }
+    }
 
     let dst_size_f = vec2<f32>(transform.dst_width, transform.dst_height);
     let src_size_f = vec2<f32>(totalDimensions());
@@ -322,8 +335,52 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     // Convert pixel coordinate to WebGPU NDC Space:
     // X goes from [-1.0, 1.0] (left to right)
     // Y goes from [1.0, -1.0] (top to bottom)
-    let ndc_x = (pixel_pos.x / dst_size_f.x) * 2.0 - 1.0;
-    let ndc_y = 1.0 - (pixel_pos.y / dst_size_f.y) * 2.0;
+    var ndc_x = (pixel_pos.x / dst_size_f.x) * 2.0 - 1.0;
+    var ndc_y = 1.0 - (pixel_pos.y / dst_size_f.y) * 2.0;
+
+    // Page fold effect: page folds back at an angled crease    
+    if (transform.page_flip != 0.0) {
+        let flip = transform.page_flip;
+        let norm_x = uv.x;
+        let norm_y = uv.y;
+        
+        // Angled fold line: normal direction
+        let fold_angle = transform.fold_angle;
+        let nx = cos(fold_angle);
+        let ny = sin(fold_angle);
+        
+        // Distance along fold normal from origin
+        let max_dist = nx + abs(ny);
+        let fold_pos = (1.0 - flip) * max_dist;
+        let dist = norm_x * nx + norm_y * ny;
+        
+        let page_left = (pixel_pos.x - norm_x * src_size_f.x * transform.scale) / dst_size_f.x * 2.0 - 1.0;
+        let page_width_ndc = src_size_f.x * transform.scale / dst_size_f.x * 2.0;
+        let page_top = 1.0 - (pixel_pos.y - norm_y * src_size_f.y * transform.scale) / dst_size_f.y * 2.0;
+        let page_height_ndc = src_size_f.y * transform.scale / dst_size_f.y * 2.0;
+        
+        if (dist > fold_pos) {
+            let arc_len = dist - fold_pos;
+            let radius = 0.03;
+            let fold_len = 3.14159265 * radius;
+            
+            var folded_dist: f32;
+            if (arc_len < fold_len) {
+                let theta = arc_len / radius;
+                folded_dist = fold_pos + radius * sin(theta);
+            } else {
+                folded_dist = fold_pos - (arc_len - fold_len);
+            }
+            
+            // Reflect position across fold line
+            let delta = folded_dist - dist;
+            let new_norm_x = norm_x + delta * nx;
+            let new_norm_y = norm_y + delta * ny;
+            
+            ndc_x = page_left + new_norm_x * page_width_ndc;
+            ndc_y = page_top - new_norm_y * page_height_ndc;
+        }
+    }
 
     var out: VertexOutput;
     out.position = vec4<f32>(ndc_x, ndc_y, 0.0, 1.0);

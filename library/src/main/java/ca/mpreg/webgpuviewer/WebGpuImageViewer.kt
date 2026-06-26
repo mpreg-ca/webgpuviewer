@@ -2,6 +2,7 @@ package ca.mpreg.webgpuviewer
 
 import android.content.res.Resources
 import android.graphics.Rect
+import android.util.Log
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.VectorConverter
 import androidx.compose.animation.core.animate
@@ -172,8 +173,8 @@ class WebGpuImageViewerPage(val image: Image) {
         }
     }
 
-    fun render(encoder: GPUCommandEncoder, dst: GPUTexture, x: Float, y: Float, scale: Float) {
-        image.render(encoder, dst, this.x + x, this.y + y, this.scale * scale)
+    fun render(encoder: GPUCommandEncoder, dst: GPUTexture, x: Float, y: Float, scale: Float, pageFlip: Float = 0f, foldAngle: Float = 0f) {
+        image.render(encoder, dst, this.x + x, this.y + y, this.scale * scale, pageFlip, foldAngle)
     }
 }
 
@@ -209,6 +210,8 @@ class WebGpuImageViewerState {
             field = value.fastCoerceIn(0f, (pageCount - 1).toFloat().fastCoerceAtLeast(0f))
         }
 
+    var foldAngle = 0f
+
     var currentPageIndex: Int
         get() = kotlin.math.round(pageOffset).toInt()
             .fastCoerceIn(0, (pageCount - 1).fastCoerceAtLeast(0))
@@ -231,7 +234,7 @@ class WebGpuImageViewerState {
                 parent = this@WebGpuImageViewerState
                 scope = this@WebGpuImageViewerState.scope
                 onInvalidate = {
-                    this@WebGpuImageViewerState.render()
+                    render()
                 }
                 setPos(homeX, homeY, homeScale)
             }
@@ -261,10 +264,9 @@ class WebGpuImageViewerState {
             if (frac == 0f) {
                 currentPage.render(encoder, texture, 0f, 0f, 1f)
             } else {
-                currentPage.render(encoder, texture, -frac / currentPage.scale, 0f, 1f)
-                getPage(idx + 1)?.let {
-                    it.render(encoder, texture, (1f - frac) / it.scale, 0f, 1f)
-                }
+                getPage(idx + 1)?.render(encoder, texture, 0f, 0f, 1f, 0f, foldAngle)
+                Log.i("render", "$frac $foldAngle")
+                currentPage.render(encoder, texture, 0f, 0f, 1f, frac, foldAngle)
             }
         }
     }
@@ -490,6 +492,7 @@ fun WebGpuImageViewer(
                                             val overflow = x - clampedX
                                             if (overflow != 0f && abs(acc.x) > abs(acc.y)) {
                                                 pageTurning = true
+                                                state.foldAngle = (firstDown.position.y / state.height - 0.5f) * 0.6f
                                                 state.pageOffset += -overflow * page.scale
                                                 state.render()
                                             }
