@@ -261,13 +261,9 @@ class WebGpuImageViewerState {
             if (frac == 0f) {
                 currentPage.render(encoder, texture, 0f, 0f, 1f)
             } else {
-                currentPage.render(
-                    encoder, texture, -frac * currentPage.width.toFloat() / width, 0f, 1f
-                )
+                currentPage.render(encoder, texture, -frac / currentPage.scale, 0f, 1f)
                 getPage(idx + 1)?.let {
-                    it.render(
-                        encoder, texture, (1f - frac) * it.width.toFloat() / width, 0f, 1f
-                    )
+                    it.render(encoder, texture, (1f - frac) / it.scale, 0f, 1f)
                 }
             }
         }
@@ -492,10 +488,7 @@ fun WebGpuImageViewer(
                                         if (single) {
                                             val clampedX = x.fastCoerceIn(-maxX, maxX)
                                             val overflow = x - clampedX
-                                            if (overflow != 0f && abs(overflow) * page.scale * state.width > touchSlop && abs(
-                                                    acc.x
-                                                ) > abs(acc.y)
-                                            ) {
+                                            if (overflow != 0f && abs(acc.x) > abs(acc.y)) {
                                                 pageTurning = true
                                                 state.pageOffset += -overflow * page.scale
                                                 state.render()
