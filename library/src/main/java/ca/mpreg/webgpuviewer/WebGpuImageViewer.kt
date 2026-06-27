@@ -494,6 +494,7 @@ fun WebGpuImageViewer(
                                             val clampedX = x.fastCoerceIn(-maxX, maxX)
                                             val overflow = x - clampedX
                                             if (overflow != 0f && abs(acc.x) > abs(acc.y)) {
+                                                page.animateTo(Offset(0.5f, 0.5f))
                                                 pageTurning = true
                                                 state.firstDownPos = firstDown.position
                                                 state.pageOffset += -overflow * page.scale
