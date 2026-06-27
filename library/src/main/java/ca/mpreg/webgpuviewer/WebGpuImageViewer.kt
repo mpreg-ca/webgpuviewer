@@ -259,12 +259,12 @@ class WebGpuImageViewerState {
                 ImageShaderBasic.render(currentPage, encoder, texture, 0f, 0f, 1f)
             } else {
                 getPage(idx + 1)?.let {
-//                    ImageShaderBasic.render(
-//                        currentPage, it, encoder, texture, frac, firstDownPos, currentTouchPos
-//                    )
-                    ImageShaderFlipRight.render(
+                    ImageShaderBasic.render(
                         currentPage, it, encoder, texture, frac, firstDownPos, currentTouchPos
                     )
+//                    ImageShaderFlipRight.render(
+//                        currentPage, it, encoder, texture, frac, firstDownPos, currentTouchPos
+//                    )
 //                    ImageShaderFlipLeft.render(
 //                        currentPage, it, encoder, texture, frac, firstDownPos, currentTouchPos
 //                    )
