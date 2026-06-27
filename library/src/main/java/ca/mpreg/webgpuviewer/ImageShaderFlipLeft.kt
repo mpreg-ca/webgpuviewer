@@ -438,8 +438,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         val dx = pos2.x - pos1.x
         val sign = if (dx < 0f) -1f else 1f
         val foldAngle = (sign * (atan2(dy, abs(dx)) / 2)).fastCoerceAtLeast(0f)
-        render(page1, encoder, dst, 0f, 0f, 1f, 0f, foldAngle)
-        render(page2, encoder, dst, 0f, 0f, 1f, frac, foldAngle)
+        render(page2, encoder, dst, 0f, 0f, 1f, 0f, foldAngle)
+        render(page1, encoder, dst, 0f, 0f, 1f, frac, foldAngle)
     }
 
     fun render(

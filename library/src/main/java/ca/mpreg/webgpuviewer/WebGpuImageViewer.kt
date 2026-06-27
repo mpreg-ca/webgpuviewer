@@ -30,8 +30,11 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.util.fastCoerceAtLeast
 import androidx.compose.ui.util.fastCoerceAtMost
 import androidx.compose.ui.util.fastCoerceIn
+import androidx.webgpu.GPUCommandEncoder
+import androidx.webgpu.GPUTexture
 import ca.mpreg.webgpuviewer.WebGpuRenderer.Companion.dispatcher
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.isActive
@@ -203,6 +206,7 @@ class WebGpuImageViewerState {
             field = value.fastCoerceIn(0f, (pageCount - 1).toFloat().fastCoerceAtLeast(0f))
         }
 
+    var lastCurrentPageIndex: Int = -1
     var currentPageIndex: Int
         get() = kotlin.math.round(pageOffset).toInt()
             .fastCoerceIn(0, (pageCount - 1).fastCoerceAtLeast(0))
@@ -210,7 +214,9 @@ class WebGpuImageViewerState {
             pageOffset = value.toFloat()
         }
 
-    var fetchPage: (suspend (Int) -> WebGpuImageViewerPage)? = null
+    var fetchPage: (suspend (Int) -> WebGpuImageViewerPage?)? = null
+
+    var onPageChange: ((Int) -> Unit)? = null
 
     val pages = mutableMapOf<Int, WebGpuImageViewerPage?>()
 
@@ -248,7 +254,19 @@ class WebGpuImageViewerState {
     var firstDownPos = Offset.Zero
     var currentTouchPos = Offset.Zero
 
+    var transition: ((WebGpuImageViewerPage, WebGpuImageViewerPage, GPUCommandEncoder, GPUTexture, Float, Offset, Offset) -> Unit) =
+        ImageShaderBasic::render
+
     fun render() {
+        CoroutineScope(Dispatchers.Default).launch {
+            mutex.withLock {
+                if (currentPageIndex != lastCurrentPageIndex) {
+                    lastCurrentPageIndex = currentPageIndex
+                    onPageChange?.invoke(currentPageIndex)
+                }
+            }
+        }
+
         renderer?.render { encoder, texture ->
             val idx = kotlin.math.floor(pageOffset).toInt()
             val frac = pageOffset - idx
@@ -259,9 +277,12 @@ class WebGpuImageViewerState {
                 ImageShaderBasic.render(currentPage, encoder, texture, 0f, 0f, 1f)
             } else {
                 getPage(idx + 1)?.let {
-                    ImageShaderBasic.render(
+                    transition(
                         currentPage, it, encoder, texture, frac, firstDownPos, currentTouchPos
                     )
+//                    ImageShaderBasic.render(
+//                        currentPage, it, encoder, texture, frac, firstDownPos, currentTouchPos
+//                    )
 //                    ImageShaderFlipRight.render(
 //                        currentPage, it, encoder, texture, frac, firstDownPos, currentTouchPos
 //                    )
