@@ -134,7 +134,9 @@ class WebGpuImageViewerSingleState {
 
     fun render() {
         renderer?.render { encoder, texture ->
-            image?.render(encoder, texture, x, y, scale)
+            image?.let {
+                ImageShaderBasic.render(it, encoder, texture, x, y, scale)
+            }
         }
     }
 
