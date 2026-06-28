@@ -34,14 +34,12 @@ import androidx.webgpu.GPUCommandEncoder
 import androidx.webgpu.GPUTexture
 import ca.mpreg.webgpuviewer.WebGpuRenderer.Companion.dispatcher
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -199,44 +197,40 @@ class WebGpuImageViewerState {
         return max(0f, (height.toFloat() / this.height - 1 / scale) / 2)
     }
 
-    var pageCount = 0
-
     var pageOffset = 0f
         set(value) {
-            field = value.fastCoerceIn(0f, (pageCount - 1).toFloat().fastCoerceAtLeast(0f))
+            var v = value
+
+            while (v >= 1f && haveNext) {
+                onPageChange?.invoke(1)
+                v -= 1f
+            }
+            while (v <= -1f && havePrev) {
+                onPageChange?.invoke(-1)
+                v += 1f
+            }
+
+            if (!haveNext) v = v.fastCoerceAtMost(0f)
+            if (!havePrev) v = v.fastCoerceAtLeast(0f)
+            field = v
         }
 
-    var lastCurrentPageIndex: Int = -1
-    var currentPageIndex: Int
-        get() = kotlin.math.round(pageOffset).toInt()
-            .fastCoerceIn(0, (pageCount - 1).fastCoerceAtLeast(0))
-        set(value) {
-            pageOffset = value.toFloat()
-        }
+    var haveNext = false
+    var havePrev = false
 
     var fetchPage: (suspend (Int) -> WebGpuImageViewerPage?)? = null
 
     var onPageChange: ((Int) -> Unit)? = null
 
-    val pages = mutableMapOf<Int, WebGpuImageViewerPage?>()
-
     private val mutex = Mutex()
 
     suspend fun getPage(index: Int): WebGpuImageViewerPage? {
-        if (index >= pageCount) return null
-        if (index < 0) return null
-
-        mutex.withLock {
-            pages[index] = pages[index] ?: fetchPage?.invoke(index)?.apply {
-                parent = this@WebGpuImageViewerState
-                scope = this@WebGpuImageViewerState.scope
-                onInvalidate = {
-                    render()
-                }
-                setPos(homeX, homeY, homeScale)
+        return fetchPage?.invoke(index)?.apply {
+            parent = this@WebGpuImageViewerState
+            scope = this@WebGpuImageViewerState.scope
+            onInvalidate = {
+                render()
             }
-
-            return pages[index]
         }
     }
 
@@ -251,44 +245,29 @@ class WebGpuImageViewerState {
         }
     }
 
-    var firstDownPos = Offset.Zero
-    var currentTouchPos = Offset.Zero
+    var firstPos = Offset.Zero
+    var currentPos = Offset.Zero
 
     var transition: ((WebGpuImageViewerPage, WebGpuImageViewerPage, GPUCommandEncoder, GPUTexture, Float, Offset, Offset) -> Unit) =
         ImageShaderBasic::render
 
     fun render() {
-        CoroutineScope(Dispatchers.Default).launch {
-            mutex.withLock {
-                if (currentPageIndex != lastCurrentPageIndex) {
-                    lastCurrentPageIndex = currentPageIndex
-                    onPageChange?.invoke(currentPageIndex)
-                }
-            }
-        }
-
         renderer?.render { encoder, texture ->
-            val idx = kotlin.math.floor(pageOffset).toInt()
-            val frac = pageOffset - idx
+            val currentPage = getPage(0) ?: return@render
 
-            val currentPage = getPage(idx) ?: return@render
-
-            if (frac == 0f) {
+            if (pageOffset == 0f) {
                 ImageShaderBasic.render(currentPage, encoder, texture, 0f, 0f, 1f)
-            } else {
-                getPage(idx + 1)?.let {
+            } else if (pageOffset > 0f) {
+                getPage(1)?.let {
                     transition(
-                        currentPage, it, encoder, texture, frac, firstDownPos, currentTouchPos
+                        currentPage, it, encoder, texture, pageOffset, firstPos, currentPos,
                     )
-//                    ImageShaderBasic.render(
-//                        currentPage, it, encoder, texture, frac, firstDownPos, currentTouchPos
-//                    )
-//                    ImageShaderFlipRight.render(
-//                        currentPage, it, encoder, texture, frac, firstDownPos, currentTouchPos
-//                    )
-//                    ImageShaderFlipLeft.render(
-//                        currentPage, it, encoder, texture, frac, firstDownPos, currentTouchPos
-//                    )
+                } ?: ImageShaderBasic.render(currentPage, encoder, texture, 0f, 0f, 1f)
+            } else {
+                getPage(-1)?.let {
+                    transition(
+                        it, currentPage, encoder, texture, 1f + pageOffset, firstPos, currentPos
+                    )
                 } ?: ImageShaderBasic.render(currentPage, encoder, texture, 0f, 0f, 1f)
             }
         }
@@ -335,9 +314,8 @@ fun WebGpuImageViewer(
                 awaitEachGesture {
                     val firstDown = awaitFirstDown(pass = PointerEventPass.Initial)
                     state.animationJob?.cancel()
-                    state.pageOffset = state.currentPageIndex.toFloat()
-                    val page = runBlocking(dispatcher) { state.getPage(state.currentPageIndex) }
-                        ?: return@awaitEachGesture
+                    val page =
+                        runBlocking(dispatcher) { state.getPage(0) } ?: return@awaitEachGesture
                     page.animateTo(Offset(0.5f, 0.5f))
 
                     view.parent?.requestDisallowInterceptTouchEvent(true)
@@ -492,7 +470,7 @@ fun WebGpuImageViewer(
 
                                 if (pageTurning) {
                                     state.pageOffset += -pan.x / state.width
-                                    state.currentTouchPos = event.changes[0].position
+                                    state.currentPos = event.changes[0].position
                                     state.render()
                                     event.changes.forEach { if (it.positionChanged()) it.consume() }
                                 } else {
@@ -517,7 +495,7 @@ fun WebGpuImageViewer(
                                             if (overflow != 0f && abs(acc.x) > abs(acc.y)) {
                                                 page.animateTo(Offset(0.5f, 0.5f))
                                                 pageTurning = true
-                                                state.firstDownPos = firstDown.position
+                                                state.firstPos = firstDown.position
                                                 state.pageOffset += -overflow * page.scale
                                                 state.render()
                                             }
@@ -537,20 +515,18 @@ fun WebGpuImageViewer(
                         if (pageTurning) {
                             val velocity = velocityTracker.calculateVelocity()
                             val initialVelocity = -velocity.x / state.width
-                            val nearest = kotlin.math.round(state.pageOffset)
 
                             val target = when {
-                                initialVelocity > 1f -> kotlin.math.floor(state.pageOffset + 1f)
-                                    .fastCoerceAtMost((state.pageCount - 1).toFloat())
-
-                                initialVelocity < -1f -> kotlin.math.ceil(state.pageOffset - 1f)
-                                    .fastCoerceAtLeast(0f)
-
-                                else -> nearest
+                                initialVelocity > 1f && state.haveNext -> 1f
+                                initialVelocity < -1f && state.havePrev -> -1f
+                                state.pageOffset > 0.5f && state.haveNext -> 1f
+                                state.pageOffset < -0.5f && state.havePrev -> -1f
+                                else -> 0f
                             }
 
                             state.animationJob = scope.launch {
                                 val anim = Animatable(state.pageOffset)
+                                anim.updateBounds(lowerBound = -1f, upperBound = 1f)
                                 anim.animateTo(
                                     target,
                                     spring(dampingRatio = 1f, stiffness = 400f),

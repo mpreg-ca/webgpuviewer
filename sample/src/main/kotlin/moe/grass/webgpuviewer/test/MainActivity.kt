@@ -37,8 +37,6 @@ class MainActivity : AppCompatActivity() {
 
             binding.composeView1.state.apply {
                 dpi = resources.displayMetrics.densityDpi / 100f
-                pageCount = 4
-                currentPageIndex = 1
 
                 val state = this
                 fetchPage = { index ->
