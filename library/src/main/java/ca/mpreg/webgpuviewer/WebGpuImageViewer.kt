@@ -200,19 +200,24 @@ class WebGpuImageViewerState {
     var pageOffset = 0f
         set(value) {
             var v = value
+            var pageDelta = 0
 
             while (v >= 1f && haveNext) {
-                onPageChange?.invoke(1)
+                pageDelta += 1
                 v -= 1f
             }
             while (v <= -1f && havePrev) {
-                onPageChange?.invoke(-1)
+                pageDelta -= 1
                 v += 1f
             }
 
             if (!haveNext) v = v.fastCoerceAtMost(0f)
             if (!havePrev) v = v.fastCoerceAtLeast(0f)
             field = v
+
+            if (pageDelta != 0) {
+                onPageChange?.invoke(pageDelta)
+            }
         }
 
     var haveNext = false
