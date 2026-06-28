@@ -213,6 +213,7 @@ class WebGpuImageViewerState {
 
             if (!haveNext) v = v.fastCoerceAtMost(0f)
             if (!havePrev) v = v.fastCoerceAtLeast(0f)
+
             field = v
 
             if (pageDelta != 0) {
@@ -474,7 +475,13 @@ fun WebGpuImageViewer(
                                 acc += pan
 
                                 if (pageTurning) {
+                                    val prev = state.pageOffset
                                     state.pageOffset += -pan.x / state.width
+                                    if ((prev > 0f && state.pageOffset <= 0f) || (prev < 0f && state.pageOffset >= 0f)) {
+                                        state.pageOffset = 0f
+                                        pageTurning = false
+                                        acc = Offset.Zero
+                                    }
                                     state.currentPos = event.changes[0].position
                                     state.render()
                                     event.changes.forEach { if (it.positionChanged()) it.consume() }
