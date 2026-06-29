@@ -4,10 +4,10 @@ import android.os.Bundle
 import androidx.appcompat.app.AppCompatActivity
 import ca.mpreg.imagedecoder.ImageDecoder
 import ca.mpreg.webgpuviewer.Image
-import ca.mpreg.webgpuviewer.transitions.TransitionSphere
 import ca.mpreg.webgpuviewer.WebGpuImageViewerPage
 import ca.mpreg.webgpuviewer.WebGpuRenderer
 import ca.mpreg.webgpuviewer.test.databinding.MainActivityBinding
+import ca.mpreg.webgpuviewer.transitions.TransitionBasic
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -64,7 +64,8 @@ class MainActivity : AppCompatActivity() {
             binding.composeView1.state.apply {
                 dpi = resources.displayMetrics.densityDpi / 100f
 
-                transition = TransitionSphere::render
+                isVertical = true
+                transition = TransitionBasic.Vertical::render
 
                 haveNext = true
                 havePrev = true

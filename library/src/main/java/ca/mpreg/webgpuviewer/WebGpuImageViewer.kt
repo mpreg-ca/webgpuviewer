@@ -2,6 +2,7 @@ package ca.mpreg.webgpuviewer
 
 import android.content.res.Resources
 import android.graphics.Rect
+import android.view.Surface
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.VectorConverter
 import androidx.compose.animation.core.animate
@@ -30,9 +31,8 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.util.fastCoerceAtLeast
 import androidx.compose.ui.util.fastCoerceAtMost
 import androidx.compose.ui.util.fastCoerceIn
-import androidx.webgpu.GPUCommandEncoder
-import androidx.webgpu.GPUTexture
 import ca.mpreg.webgpuviewer.WebGpuRenderer.Companion.dispatcher
+import ca.mpreg.webgpuviewer.transitions.Transition
 import ca.mpreg.webgpuviewer.transitions.TransitionBasic
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -175,15 +175,16 @@ class WebGpuImageViewerPage(val image: Image) {
     }
 }
 
-class WebGpuImageViewerState {
+class WebGpuImageViewerState(var isVertical: Boolean = false) {
+    val renderer = WebGpuRenderer()
+
     var animationJob: Job? = null
 
-    val width get() = renderer?.width ?: 0
-    val height get() = renderer?.height ?: 0
+    val width get() = renderer.width
+    val height get() = renderer.height
 
     var dpi = Resources.getSystem().displayMetrics.densityDpi / 100f
 
-    var renderer: WebGpuRenderer? = null
     var scope: CoroutineScope? = null
 
     fun getMinScale(width: Int, height: Int): Float {
@@ -246,9 +247,9 @@ class WebGpuImageViewerState {
     }
 
     @Synchronized
-    fun init(scope: CoroutineScope, renderer: WebGpuRenderer) {
+    fun init(scope: CoroutineScope, surface: Surface, width: Int, height: Int) {
+        this.renderer.init(scope, surface, width, height)
         this.scope = scope
-        this.renderer = renderer
 
         scope.launch {
             _postInit.forEach { it() }
@@ -259,24 +260,23 @@ class WebGpuImageViewerState {
     var firstPos = Offset.Zero
     var currentPos = Offset.Zero
 
-    var transition: ((WebGpuImageViewerPage, WebGpuImageViewerPage, GPUCommandEncoder, GPUTexture, Float, Offset, Offset) -> Unit) =
-        TransitionBasic::render
+    var transition: Transition = if (isVertical) TransitionBasic.Vertical else TransitionBasic
 
     fun render() {
-        renderer?.render { encoder, texture ->
+        renderer.render { encoder, texture ->
             val currentPage = getPage(0) ?: return@render
 
             if (pageOffset == 0f) {
                 TransitionBasic.render(currentPage, encoder, texture, 0f, 0f, 1f)
             } else if (pageOffset > 0f) {
                 getPage(1)?.let {
-                    transition(
+                    transition.render(
                         currentPage, it, encoder, texture, pageOffset, firstPos, currentPos,
                     )
                 } ?: TransitionBasic.render(currentPage, encoder, texture, 0f, 0f, 1f)
             } else {
                 getPage(-1)?.let {
-                    transition(
+                    transition.render(
                         currentPage, it, encoder, texture, pageOffset, firstPos, currentPos
                     )
                 } ?: TransitionBasic.render(currentPage, encoder, texture, 0f, 0f, 1f)
@@ -299,6 +299,7 @@ class WebGpuImageViewerState {
 
     fun cleanup() {
         animationJob?.cancel()
+        renderer.cleanup()
     }
 }
 
@@ -310,8 +311,6 @@ fun WebGpuImageViewer(
     val scope = rememberCoroutineScope()
 
     val fling = remember { Animatable(Offset.Zero, Offset.VectorConverter) }
-
-    val renderer = remember { WebGpuRenderer() }
 
     val view = LocalView.current
 
@@ -504,7 +503,9 @@ fun WebGpuImageViewer(
 
                                 if (pageTurning) {
                                     val prev = state.pageOffset
-                                    state.pageOffset += -pan.x / state.width
+                                    val panAmount =
+                                        if (state.isVertical) -pan.y / state.height else -pan.x / state.width
+                                    state.pageOffset += panAmount
                                     if ((prev > 0f && state.pageOffset <= 0f) || (prev < 0f && state.pageOffset >= 0f)) {
                                         state.pageOffset = 0f
                                         pageTurning = false
@@ -531,8 +532,18 @@ fun WebGpuImageViewer(
 
                                         if (single) {
                                             val clampedX = x.fastCoerceIn(-maxX, maxX)
-                                            val overflow = x - clampedX
-                                            if (overflow != 0f && abs(acc.x) > abs(acc.y)) {
+                                            val clampedY = y.fastCoerceIn(-maxY, maxY)
+                                            val overflow = if (state.isVertical) {
+                                                y - clampedY
+                                            } else {
+                                                x - clampedX
+                                            }
+                                            val isBiased = if (state.isVertical) {
+                                                abs(acc.y) > abs(acc.x)
+                                            } else {
+                                                abs(acc.x) > abs(acc.y)
+                                            }
+                                            if (overflow != 0f && isBiased) {
                                                 page.animateTo(Offset(0.5f, 0.5f))
                                                 pageTurning = true
                                                 state.firstPos = firstDown.position
@@ -540,7 +551,7 @@ fun WebGpuImageViewer(
                                                 state.render()
                                             }
                                             x = clampedX
-                                            y = y.fastCoerceIn(-maxY, maxY)
+                                            y = clampedY
                                         }
 
                                         page.scale = newScale
@@ -557,7 +568,8 @@ fun WebGpuImageViewer(
 
                         if (pageTurning) {
                             val velocity = velocityTracker.calculateVelocity()
-                            val initialVelocity = -velocity.x / state.width
+                            val initialVelocity =
+                                if (state.isVertical) -velocity.y / state.height else -velocity.x / state.width
 
                             val target = when {
                                 initialVelocity > 1f && state.haveNext -> 1f
@@ -617,14 +629,12 @@ fun WebGpuImageViewer(
     ) {
         onSurface { surface, width, height ->
             try {
-                renderer.init(scope, surface, width, height)
-                state.init(scope, renderer)
+                state.init(scope, surface, width, height)
 
                 state.render()
                 awaitCancellation()
             } finally {
                 state.cleanup()
-                renderer.cleanup()
             }
         }
     }

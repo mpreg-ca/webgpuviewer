@@ -367,19 +367,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     return vec4<f32>(col.rgb * col.a, col.a);
 }"""
 
-    override fun render(
-        page1: WebGpuImageViewerPage,
-        page2: WebGpuImageViewerPage,
-        encoder: GPUCommandEncoder,
-        dst: GPUTexture,
-        frac: Float,
-        pos1: Offset,
-        pos2: Offset,
-    ) {
-        render(page1, encoder, dst, -frac / page1.scale, 0f, 1f)
-        render(page2, encoder, dst, (1f - frac) / page2.scale, 0f, 1f)
-    }
-
     fun render(
         page: WebGpuImageViewerPage,
         encoder: GPUCommandEncoder,
@@ -439,5 +426,45 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
         pass.draw(6)
         pass.end()
+    }
+
+    override fun render(
+        page1: WebGpuImageViewerPage,
+        page2: WebGpuImageViewerPage,
+        encoder: GPUCommandEncoder,
+        dst: GPUTexture,
+        frac: Float,
+        pos1: Offset,
+        pos2: Offset,
+    ) {
+        if (frac > 0f) {
+            render(page1, encoder, dst, -frac / page1.scale, 0f, 1f)
+            render(page2, encoder, dst, (1f - frac) / page2.scale, 0f, 1f)
+        } else {
+            render(page2, encoder, dst, -(frac + 1f) / page1.scale, 0f, 1f)
+            render(page1, encoder, dst, -frac / page2.scale, 0f, 1f)
+        }
+    }
+
+    object Vertical : Transition() {
+        override val pipeline = TransitionBasic.pipeline
+
+        override fun render(
+            page1: WebGpuImageViewerPage,
+            page2: WebGpuImageViewerPage,
+            encoder: GPUCommandEncoder,
+            dst: GPUTexture,
+            frac: Float,
+            pos1: Offset,
+            pos2: Offset,
+        ) {
+            if (frac > 0f) {
+                render(page1, encoder, dst, 0f, -frac / page1.scale, 1f)
+                render(page2, encoder, dst, 0f, (1f - frac) / page2.scale, 1f)
+            } else {
+                render(page2, encoder, dst, 0f, -(frac + 1f) / page1.scale, 1f)
+                render(page1, encoder, dst, 0f, -frac / page2.scale, 1f)
+            }
+        }
     }
 }
