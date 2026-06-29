@@ -33,6 +33,7 @@ import androidx.compose.ui.util.fastCoerceIn
 import androidx.webgpu.GPUCommandEncoder
 import androidx.webgpu.GPUTexture
 import ca.mpreg.webgpuviewer.WebGpuRenderer.Companion.dispatcher
+import ca.mpreg.webgpuviewer.transitions.TransitionBasic
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.awaitCancellation
@@ -259,26 +260,26 @@ class WebGpuImageViewerState {
     var currentPos = Offset.Zero
 
     var transition: ((WebGpuImageViewerPage, WebGpuImageViewerPage, GPUCommandEncoder, GPUTexture, Float, Offset, Offset) -> Unit) =
-        ImageShaderBasic::render
+        TransitionBasic::render
 
     fun render() {
         renderer?.render { encoder, texture ->
             val currentPage = getPage(0) ?: return@render
 
             if (pageOffset == 0f) {
-                ImageShaderBasic.render(currentPage, encoder, texture, 0f, 0f, 1f)
+                TransitionBasic.render(currentPage, encoder, texture, 0f, 0f, 1f)
             } else if (pageOffset > 0f) {
                 getPage(1)?.let {
                     transition(
                         currentPage, it, encoder, texture, pageOffset, firstPos, currentPos,
                     )
-                } ?: ImageShaderBasic.render(currentPage, encoder, texture, 0f, 0f, 1f)
+                } ?: TransitionBasic.render(currentPage, encoder, texture, 0f, 0f, 1f)
             } else {
                 getPage(-1)?.let {
                     transition(
-                        it, currentPage, encoder, texture, 1f + pageOffset, firstPos, currentPos
+                        currentPage, it, encoder, texture, pageOffset, firstPos, currentPos
                     )
-                } ?: ImageShaderBasic.render(currentPage, encoder, texture, 0f, 0f, 1f)
+                } ?: TransitionBasic.render(currentPage, encoder, texture, 0f, 0f, 1f)
             }
         }
     }
@@ -323,10 +324,11 @@ fun WebGpuImageViewer(
 
                 awaitEachGesture {
                     val firstDown = awaitFirstDown(pass = PointerEventPass.Initial)
+                    val wasScrolling = state.pageOffset != 0f
                     state.animationJob?.cancel()
                     val page =
                         runBlocking(dispatcher) { state.getPage(0) } ?: return@awaitEachGesture
-                    page.animateTo(Offset(0.5f, 0.5f))
+                    if (!wasScrolling) page.animateTo(Offset(0.5f, 0.5f))
 
                     view.parent?.requestDisallowInterceptTouchEvent(true)
 
@@ -444,7 +446,7 @@ fun WebGpuImageViewer(
                         var scaleOrigin = Offset(0.5f, 0.5f)
 
                         var single = true
-                        var pageTurning = false
+                        var pageTurning = wasScrolling
 
                         val velocityTracker = VelocityTracker()
                         velocityTracker.addPointerInputChange(firstDown)

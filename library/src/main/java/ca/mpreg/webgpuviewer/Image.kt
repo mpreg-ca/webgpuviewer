@@ -9,6 +9,7 @@ import androidx.webgpu.GPUTexture
 import androidx.webgpu.GPUTextureDescriptor
 import androidx.webgpu.TextureFormat
 import androidx.webgpu.TextureUsage
+import ca.mpreg.webgpuviewer.transitions.TransitionBasic
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
@@ -84,7 +85,7 @@ class Image private constructor(
                         )
                         val encoder = device.createCommandEncoder()
 
-                        ImageShaderBasic.render(this@apply, encoder, texture, 0f, 0f, scale)
+                        TransitionBasic.render(this@apply, encoder, texture, 0f, 0f, scale)
                         device.queue.submit(arrayOf(encoder.finish()))
 
                         mipmaps.add(Mipmap(texture, scale, tilesize))

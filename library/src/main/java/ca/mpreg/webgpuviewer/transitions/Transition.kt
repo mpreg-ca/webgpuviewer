@@ -1,4 +1,4 @@
-package ca.mpreg.webgpuviewer
+package ca.mpreg.webgpuviewer.transitions
 
 import androidx.compose.ui.geometry.Offset
 import androidx.webgpu.GPUColorTargetState
@@ -13,8 +13,10 @@ import androidx.webgpu.GPUTexture
 import androidx.webgpu.GPUVertexState
 import androidx.webgpu.PrimitiveTopology.Companion.TriangleList
 import androidx.webgpu.TextureFormat
+import ca.mpreg.webgpuviewer.WebGpuImageViewerPage
+import ca.mpreg.webgpuviewer.WebGpuRenderer
 
-abstract class ImageShader {
+abstract class Transition {
     protected abstract val code: String
 
     protected val pipeline: GPURenderPipeline by lazy {

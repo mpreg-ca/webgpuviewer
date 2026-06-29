@@ -1,16 +1,17 @@
 package ca.mpreg.webgpuviewer.test
 
 import android.os.Bundle
-import android.util.Log
 import androidx.appcompat.app.AppCompatActivity
 import ca.mpreg.imagedecoder.ImageDecoder
 import ca.mpreg.webgpuviewer.Image
-import ca.mpreg.webgpuviewer.Trim
+import ca.mpreg.webgpuviewer.transitions.TransitionSphere
 import ca.mpreg.webgpuviewer.WebGpuImageViewerPage
+import ca.mpreg.webgpuviewer.WebGpuRenderer
 import ca.mpreg.webgpuviewer.test.databinding.MainActivityBinding
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class MainActivity : AppCompatActivity() {
     private lateinit var binding: MainActivityBinding
@@ -30,23 +31,49 @@ class MainActivity : AppCompatActivity() {
         }
 
         CoroutineScope(Dispatchers.Default).launch {
-            val stream = assets.open("ref.png")
-            val dec = ImageDecoder.new(stream)
-            Log.i("start", "start ${dec.pages}")
-            val res = dec.decodeNext()
+            val page1 = withContext(Dispatchers.Default) {
+                val stream = assets.open("ref.png")
+                val dec = ImageDecoder.new(stream)
+                dec.decodeNext()
+            }.let {
+                withContext(WebGpuRenderer.dispatcher) {
+                    WebGpuImageViewerPage(Image(it.image, it.width, it.height)).apply {
+                        parent = binding.composeView1.state
+                        x = homeX
+                        y = homeY
+                        scale = homeScale
+                    }
+                }
+            }
+
+            val page2 = withContext(Dispatchers.Default) {
+                val stream = assets.open("ref.png")
+                val dec = ImageDecoder.new(stream)
+                dec.decodeNext()
+            }.let {
+                withContext(WebGpuRenderer.dispatcher) {
+                    WebGpuImageViewerPage(Image(it.image, it.width, it.height)).apply {
+                        parent = binding.composeView1.state
+                        x = homeX
+                        y = homeY
+                        scale = homeScale
+                    }
+                }
+            }
 
             binding.composeView1.state.apply {
                 dpi = resources.displayMetrics.densityDpi / 100f
 
-                val state = this
-                fetchPage = { index ->
-                    WebGpuImageViewerPage(Image(res.image, res.width, res.height)).apply {
-                        trim = Trim.find(image, 1f, 1f, 1f, 10f / 255)
+                transition = TransitionSphere::render
 
-                        parent = state
-                        x = homeX
-                        y = homeY
-                        scale = homeScale
+                haveNext = true
+                havePrev = true
+
+                fetchPage = { index ->
+                    if (index == 0) {
+                        page1
+                    } else {
+                        page2
                     }
                 }
 

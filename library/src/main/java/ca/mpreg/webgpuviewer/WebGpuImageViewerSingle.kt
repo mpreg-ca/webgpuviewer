@@ -33,6 +33,7 @@ import androidx.compose.ui.input.pointer.util.addPointerInputChange
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.util.fastCoerceIn
 import ca.mpreg.webgpuviewer.WebGpuRenderer.Companion.dispatcher
+import ca.mpreg.webgpuviewer.transitions.TransitionBasic
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.awaitCancellation
@@ -135,7 +136,7 @@ class WebGpuImageViewerSingleState {
     fun render() {
         renderer?.render { encoder, texture ->
             image?.let {
-                ImageShaderBasic.render(it, encoder, texture, x, y, scale)
+                TransitionBasic.render(it, encoder, texture, x, y, scale)
             }
         }
     }

@@ -1,4 +1,4 @@
-package ca.mpreg.webgpuviewer
+package ca.mpreg.webgpuviewer.transitions
 
 val ImageShaderSingle = """
 struct Uniforms {
