@@ -36,6 +36,7 @@ import ca.mpreg.webgpuviewer.WebGpuRenderer.Companion.dispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -44,6 +45,7 @@ import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
+import kotlin.time.Duration.Companion.milliseconds
 
 class WebGpuImageViewerPage(val image: Image) {
     var scale: Float = 1f
@@ -227,6 +229,8 @@ class WebGpuImageViewerState {
     var fetchPage: (suspend (Int) -> WebGpuImageViewerPage?)? = null
 
     var onPageChange: ((Int) -> Unit)? = null
+    var onTap: ((Offset) -> Unit)? = null
+    var onLongTap: ((Offset) -> Unit)? = null
 
     private val mutex = Mutex()
 
@@ -327,7 +331,16 @@ fun WebGpuImageViewer(
                     view.parent?.requestDisallowInterceptTouchEvent(true)
 
                     if (waitForCleanUp(firstDown.id, doubleTapTimeout, touchSlop) != null) {
-                        val secondDown = waitForDown(doubleTapTimeout) ?: return@awaitEachGesture
+                        val secondDown = waitForDown(doubleTapTimeout)
+                        if (secondDown == null) {
+                            state.onTap?.invoke(
+                                Offset(
+                                    firstDown.position.x / state.width,
+                                    firstDown.position.y / state.height
+                                )
+                            )
+                            return@awaitEachGesture
+                        }
                         if (waitForCleanUp(secondDown.id, doubleTapTimeout, touchSlop) != null) {
                             // double tap
                             if (page.atHome) {
@@ -438,6 +451,18 @@ fun WebGpuImageViewer(
 
                         page.animationJob?.cancel()
 
+                        var longPressed = false
+                        val longPressJob = scope.launch {
+                            delay(viewConfiguration.longPressTimeoutMillis.milliseconds)
+                            longPressed = true
+                            state.onLongTap?.invoke(
+                                Offset(
+                                    firstDown.position.x / state.width,
+                                    firstDown.position.y / state.height
+                                )
+                            )
+                        }
+
                         do {
                             val event = awaitPointerEvent()
                             val canceled = event.changes.any { it.isConsumed }
@@ -472,6 +497,7 @@ fun WebGpuImageViewer(
                                 if (pointerCountChanged) continue
 
                                 val pan = event.calculatePan()
+                                if (pan != Offset.Zero) longPressJob.cancel()
                                 acc += pan
 
                                 if (pageTurning) {
@@ -523,6 +549,9 @@ fun WebGpuImageViewer(
                                 }
                             }
                         } while (!canceled && event.changes.any { it.pressed })
+
+                        longPressJob.cancel()
+                        if (longPressed) return@awaitEachGesture
 
                         if (pageTurning) {
                             val velocity = velocityTracker.calculateVelocity()

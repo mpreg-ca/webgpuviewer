@@ -23,6 +23,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.AwaitPointerEventScope
 import androidx.compose.ui.input.pointer.PointerEvent
 import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerEventTimeoutCancellationException
 import androidx.compose.ui.input.pointer.PointerId
 import androidx.compose.ui.input.pointer.changedToUp
 import androidx.compose.ui.input.pointer.pointerInput
@@ -34,10 +35,10 @@ import androidx.compose.ui.util.fastCoerceIn
 import ca.mpreg.webgpuviewer.WebGpuRenderer.Companion.dispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlin.coroutines.cancellation.CancellationException
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -520,7 +521,7 @@ suspend fun AwaitPointerEventScope.waitForCleanUp(
             }
         }
     }
-} catch (e: TimeoutCancellationException) {
+} catch (e: PointerEventTimeoutCancellationException) {
     null
 } as PointerEvent?
 
@@ -532,7 +533,7 @@ suspend fun AwaitPointerEventScope.waitForDown(timeout: Long) = try {
         }
         down
     }
-} catch (e: TimeoutCancellationException) {
+} catch (e: PointerEventTimeoutCancellationException) {
     null
 }
 
