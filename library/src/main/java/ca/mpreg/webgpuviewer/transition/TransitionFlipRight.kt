@@ -1,6 +1,7 @@
-package ca.mpreg.webgpuviewer.transitions
+package ca.mpreg.webgpuviewer.transition
 
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.util.fastCoerceAtMost
 import androidx.webgpu.GPUBindGroupDescriptor
 import androidx.webgpu.GPUBindGroupEntry
 import androidx.webgpu.GPUColor
@@ -10,13 +11,14 @@ import androidx.webgpu.GPURenderPassDescriptor
 import androidx.webgpu.GPUTexture
 import androidx.webgpu.LoadOp
 import androidx.webgpu.StoreOp
-import ca.mpreg.webgpuviewer.Image
-import ca.mpreg.webgpuviewer.Image.Companion.device
-import ca.mpreg.webgpuviewer.WebGpuImageViewerPage
+import ca.mpreg.webgpuviewer.renderer.Image.Companion.device
+import ca.mpreg.webgpuviewer.viewer.WebGpuImageViewerPage
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import kotlin.math.abs
+import kotlin.math.atan2
 
-object TransitionBasic : Transition() {
+object TransitionFlipRight : Transition() {
     override val code = """
 struct Uniforms {
     offset: vec2<f32>,
@@ -27,6 +29,7 @@ struct Uniforms {
     dst_width: f32,
     dst_height: f32,
     page_flip: f32,
+    fold_angle: f32,
 }
 
 @group(0) @binding(0) var<uniform> transform: Uniforms;
@@ -319,16 +322,33 @@ fn downsample(src_start: vec2<f32>, scale: vec2<f32>) -> vec4<f32> {
 
 @vertex
 fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
-    var uvs = array<vec2<f32>, 6>(
-        vec2<f32>(0.0, 0.0), // Top-left
-        vec2<f32>(0.0, 1.0), // Bottom-left
-        vec2<f32>(1.0, 0.0), // Top-right
-        vec2<f32>(1.0, 0.0), // Top-right
-        vec2<f32>(0.0, 1.0), // Bottom-left
-        vec2<f32>(1.0, 1.0)  // Bottom-right
-    );
+    // Tessellated quad: 32x16 grid for angled fold
+    const COLS: u32 = 32u;
+    const ROWS: u32 = 16u;
+    let quad_index = vertex_index / 6u;
+    let vert_in_quad = vertex_index % 6u;
+    let col = quad_index % COLS;
+    let row = quad_index / COLS;
 
-    let uv = uvs[vertex_index];
+    let x0 = f32(col) / f32(COLS);
+    let x1 = f32(col + 1u) / f32(COLS);
+    let y0 = f32(row) / f32(ROWS);
+    let y1 = f32(row + 1u) / f32(ROWS);
+
+    var uv: vec2<f32>;
+    switch (vert_in_quad) {
+        case 0u: { uv = vec2<f32>(x0, y0); }
+        case 1u: { uv = vec2<f32>(x0, y1); }
+        case 2u: { uv = vec2<f32>(x1, y0); }
+        case 3u: { uv = vec2<f32>(x1, y0); }
+        case 4u: { uv = vec2<f32>(x0, y1); }
+        default: { uv = vec2<f32>(x1, y1); }
+    }
+
+    // Flip horizontally when folding so fold comes from left
+    if (transform.page_flip != 0.0) {
+        uv.x = 1.0 - uv.x;
+    }
 
     let dst_size_f = vec2<f32>(transform.dst_width, transform.dst_height);
     let src_size_f = vec2<f32>(totalDimensions());
@@ -339,9 +359,53 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     // Convert pixel coordinate to WebGPU NDC Space:
     // X goes from [-1.0, 1.0] (left to right)
     // Y goes from [1.0, -1.0] (top to bottom)
-    let ndc_x = (pixel_pos.x / dst_size_f.x) * 2.0 - 1.0;
-    let ndc_y = 1.0 - (pixel_pos.y / dst_size_f.y) * 2.0;
-    
+    var ndc_x = (pixel_pos.x / dst_size_f.x) * 2.0 - 1.0;
+    var ndc_y = 1.0 - (pixel_pos.y / dst_size_f.y) * 2.0;
+
+    // Page fold effect: page folds back at an angled crease    
+    if (transform.page_flip != 0.0) {
+        let flip = transform.page_flip;
+        let norm_x = uv.x;
+        let norm_y = uv.y;
+        
+        // Angled fold line: normal direction
+        let fold_angle = transform.fold_angle;
+        let nx = cos(fold_angle);
+        let ny = sin(fold_angle);
+        
+        // Distance along fold normal from origin
+        let max_dist = nx + abs(ny);
+        let fold_pos = flip * max_dist;
+        let dist = norm_x * nx + norm_y * ny;
+        
+        let page_left = (pixel_pos.x - norm_x * src_size_f.x * transform.scale) / dst_size_f.x * 2.0 - 1.0;
+        let page_width_ndc = src_size_f.x * transform.scale / dst_size_f.x * 2.0;
+        let page_top = 1.0 - (pixel_pos.y - norm_y * src_size_f.y * transform.scale) / dst_size_f.y * 2.0;
+        let page_height_ndc = src_size_f.y * transform.scale / dst_size_f.y * 2.0;
+        
+        if (dist < fold_pos) {
+            let arc_len = fold_pos - dist;
+            let radius = 0.15;
+            let fold_len = 3.14159265 * radius;
+            
+            var folded_dist: f32;
+            if (arc_len < fold_len) {
+                let theta = arc_len / radius;
+                folded_dist = fold_pos - radius * sin(theta);
+            } else {
+                folded_dist = fold_pos + (arc_len - fold_len);
+            }
+            
+            // Reflect position across fold line
+            let delta = folded_dist - dist;
+            let new_norm_x = norm_x + delta * nx;
+            let new_norm_y = norm_y + delta * ny;
+            
+            ndc_x = page_left + new_norm_x * page_width_ndc;
+            ndc_y = page_top - new_norm_y * page_height_ndc;
+        }
+    }
+
     var out: VertexOutput;
     out.position = vec4<f32>(ndc_x, ndc_y, 0.0, 1.0);
     out.uv = uv;
@@ -367,24 +431,43 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     return vec4<f32>(col.rgb * col.a, col.a);
 }"""
 
+    override fun render(
+        page1: WebGpuImageViewerPage,
+        page2: WebGpuImageViewerPage,
+        encoder: GPUCommandEncoder,
+        dst: GPUTexture,
+        frac: Float,
+        pos1: Offset,
+        pos2: Offset,
+    ) {
+        val dy = pos2.y - pos1.y
+        val dx = pos2.x - pos1.x
+        val sign = if (dx < 0f) -1f else 1f
+        val foldAngle = (sign * (atan2(dy, abs(dx)) / 2)).fastCoerceAtMost(0f)
+        if (frac > 0f) {
+            render(page1, encoder, dst, 0f, 0f, 1f, 0f, foldAngle)
+            render(page2, encoder, dst, 0f, 0f, 1f, 1f - frac, foldAngle)
+        } else {
+            render(page2, encoder, dst, 0f, 0f, 1f, 0f, foldAngle)
+            render(page1, encoder, dst, 0f, 0f, 1f, -frac, foldAngle)
+        }
+    }
+
     fun render(
         page: WebGpuImageViewerPage,
         encoder: GPUCommandEncoder,
         dst: GPUTexture,
         x: Float,
         y: Float,
-        scale: Float
+        scale: Float,
+        frac: Float,
+        foldAngle: Float,
     ) {
-        render(page.image, encoder, dst, page.x + x, page.y + y, page.scale * scale)
-    }
-
-    fun render(
-        image: Image, encoder: GPUCommandEncoder, dst: GPUTexture, x: Float, y: Float, scale: Float
-    ) {
+        val image = page.image
         val buffer = image.buffer ?: return
-        val res = image.prepareForRender(dst, x, y, scale) ?: return
+        val res = image.prepareForRender(dst, page.x + x, page.y + y, page.scale * scale) ?: return
 
-        val byteBuffer = ByteBuffer.allocateDirect(32).apply {
+        val byteBuffer = ByteBuffer.allocateDirect(48).apply {
             order(ByteOrder.nativeOrder())
             putFloat(0, res.x)
             putFloat(4, res.y)
@@ -394,6 +477,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             putFloat(20, res.mipmap.tilesRows.toFloat())
             putFloat(24, dst.width.toFloat())
             putFloat(28, dst.height.toFloat())
+            putFloat(32, frac)
+            putFloat(36, foldAngle)
         }
 
         device.queue.writeBuffer(buffer, 0, byteBuffer)
@@ -424,47 +509,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             )
         )
 
-        pass.draw(6)
+        pass.draw(3072)
         pass.end()
-    }
-
-    override fun render(
-        page1: WebGpuImageViewerPage,
-        page2: WebGpuImageViewerPage,
-        encoder: GPUCommandEncoder,
-        dst: GPUTexture,
-        frac: Float,
-        pos1: Offset,
-        pos2: Offset,
-    ) {
-        if (frac > 0f) {
-            render(page1, encoder, dst, -frac / page1.scale, 0f, 1f)
-            render(page2, encoder, dst, (1f - frac) / page2.scale, 0f, 1f)
-        } else {
-            render(page2, encoder, dst, -(frac + 1f) / page1.scale, 0f, 1f)
-            render(page1, encoder, dst, -frac / page2.scale, 0f, 1f)
-        }
-    }
-
-    object Vertical : Transition() {
-        override val pipeline = TransitionBasic.pipeline
-
-        override fun render(
-            page1: WebGpuImageViewerPage,
-            page2: WebGpuImageViewerPage,
-            encoder: GPUCommandEncoder,
-            dst: GPUTexture,
-            frac: Float,
-            pos1: Offset,
-            pos2: Offset,
-        ) {
-            if (frac > 0f) {
-                render(page1, encoder, dst, 0f, -frac / page1.scale, 1f)
-                render(page2, encoder, dst, 0f, (1f - frac) / page2.scale, 1f)
-            } else {
-                render(page2, encoder, dst, 0f, -(frac + 1f) / page1.scale, 1f)
-                render(page1, encoder, dst, 0f, -frac / page2.scale, 1f)
-            }
-        }
     }
 }

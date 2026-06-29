@@ -32,8 +32,10 @@ import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.input.pointer.util.addPointerInputChange
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.util.fastCoerceIn
-import ca.mpreg.webgpuviewer.WebGpuRenderer.Companion.dispatcher
-import ca.mpreg.webgpuviewer.transitions.TransitionBasic
+import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer.Companion.dispatcher
+import ca.mpreg.webgpuviewer.renderer.Image
+import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
+import ca.mpreg.webgpuviewer.transition.TransitionBasic
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.awaitCancellation

@@ -1,4 +1,4 @@
-package ca.mpreg.webgpuviewer
+package ca.mpreg.webgpuviewer.renderer
 
 import android.util.Log
 import androidx.webgpu.GPUExtent3D

@@ -1,11 +1,11 @@
-package ca.mpreg.webgpuviewer.transitions
+package ca.mpreg.webgpuviewer.transition
 
 import androidx.compose.ui.geometry.Offset
 import androidx.webgpu.GPUCommandEncoder
 import androidx.webgpu.GPUTexture
-import ca.mpreg.webgpuviewer.WebGpuImageViewerPage
+import ca.mpreg.webgpuviewer.viewer.WebGpuImageViewerPage
 
-object TransitionStackLeft : Transition() {
+object TransitionStackRight : Transition() {
     override val code = ""
 
     override fun render(
@@ -18,11 +18,11 @@ object TransitionStackLeft : Transition() {
         pos2: Offset,
     ) {
         if (frac > 0f) {
+            TransitionBasic.render(page1, encoder, dst, 0f, 0f, 1f)
+            TransitionBasic.render(page2, encoder, dst, (1f - frac) / page2.scale, 0f, 1f)
+        } else {
             TransitionBasic.render(page2, encoder, dst, 0f, 0f, 1f)
             TransitionBasic.render(page1, encoder, dst, -frac / page2.scale, 0f, 1f)
-        } else {
-            TransitionBasic.render(page1, encoder, dst, 0f, 0f, 1f)
-            TransitionBasic.render(page2, encoder, dst, -(frac + 1f) / page2.scale, 0f, 1f)
         }
     }
 }

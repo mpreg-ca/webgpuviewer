@@ -1,4 +1,4 @@
-package ca.mpreg.webgpuviewer.transitions
+package ca.mpreg.webgpuviewer.transition
 
 import androidx.compose.ui.geometry.Offset
 import androidx.webgpu.GPUBindGroupDescriptor
@@ -10,8 +10,8 @@ import androidx.webgpu.GPURenderPassDescriptor
 import androidx.webgpu.GPUTexture
 import androidx.webgpu.LoadOp
 import androidx.webgpu.StoreOp
-import ca.mpreg.webgpuviewer.Image.Companion.device
-import ca.mpreg.webgpuviewer.WebGpuImageViewerPage
+import ca.mpreg.webgpuviewer.renderer.Image.Companion.device
+import ca.mpreg.webgpuviewer.viewer.WebGpuImageViewerPage
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 

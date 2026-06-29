@@ -1,7 +1,7 @@
-package ca.mpreg.webgpuviewer.transitions
+package ca.mpreg.webgpuviewer.transition
 
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.util.fastCoerceAtMost
+import androidx.compose.ui.util.fastCoerceAtLeast
 import androidx.webgpu.GPUBindGroupDescriptor
 import androidx.webgpu.GPUBindGroupEntry
 import androidx.webgpu.GPUColor
@@ -11,14 +11,14 @@ import androidx.webgpu.GPURenderPassDescriptor
 import androidx.webgpu.GPUTexture
 import androidx.webgpu.LoadOp
 import androidx.webgpu.StoreOp
-import ca.mpreg.webgpuviewer.Image.Companion.device
-import ca.mpreg.webgpuviewer.WebGpuImageViewerPage
+import ca.mpreg.webgpuviewer.renderer.Image.Companion.device
+import ca.mpreg.webgpuviewer.viewer.WebGpuImageViewerPage
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.abs
 import kotlin.math.atan2
 
-object TransitionFlipRight : Transition() {
+object TransitionFlipLeft : Transition() {
     override val code = """
 struct Uniforms {
     offset: vec2<f32>,
@@ -345,11 +345,6 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
         default: { uv = vec2<f32>(x1, y1); }
     }
 
-    // Flip horizontally when folding so fold comes from left
-    if (transform.page_flip != 0.0) {
-        uv.x = 1.0 - uv.x;
-    }
-
     let dst_size_f = vec2<f32>(transform.dst_width, transform.dst_height);
     let src_size_f = vec2<f32>(totalDimensions());
 
@@ -375,7 +370,7 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
         
         // Distance along fold normal from origin
         let max_dist = nx + abs(ny);
-        let fold_pos = flip * max_dist;
+        let fold_pos = (1.0 - flip) * max_dist;
         let dist = norm_x * nx + norm_y * ny;
         
         let page_left = (pixel_pos.x - norm_x * src_size_f.x * transform.scale) / dst_size_f.x * 2.0 - 1.0;
@@ -383,17 +378,17 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
         let page_top = 1.0 - (pixel_pos.y - norm_y * src_size_f.y * transform.scale) / dst_size_f.y * 2.0;
         let page_height_ndc = src_size_f.y * transform.scale / dst_size_f.y * 2.0;
         
-        if (dist < fold_pos) {
-            let arc_len = fold_pos - dist;
+        if (dist > fold_pos) {
+            let arc_len = dist - fold_pos;
             let radius = 0.15;
             let fold_len = 3.14159265 * radius;
             
             var folded_dist: f32;
             if (arc_len < fold_len) {
                 let theta = arc_len / radius;
-                folded_dist = fold_pos - radius * sin(theta);
+                folded_dist = fold_pos + radius * sin(theta);
             } else {
-                folded_dist = fold_pos + (arc_len - fold_len);
+                folded_dist = fold_pos - (arc_len - fold_len);
             }
             
             // Reflect position across fold line
@@ -443,13 +438,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         val dy = pos2.y - pos1.y
         val dx = pos2.x - pos1.x
         val sign = if (dx < 0f) -1f else 1f
-        val foldAngle = (sign * (atan2(dy, abs(dx)) / 2)).fastCoerceAtMost(0f)
+        val foldAngle = (sign * (atan2(dy, abs(dx)) / 2)).fastCoerceAtLeast(0f)
         if (frac > 0f) {
-            render(page1, encoder, dst, 0f, 0f, 1f, 0f, foldAngle)
-            render(page2, encoder, dst, 0f, 0f, 1f, 1f - frac, foldAngle)
-        } else {
             render(page2, encoder, dst, 0f, 0f, 1f, 0f, foldAngle)
-            render(page1, encoder, dst, 0f, 0f, 1f, -frac, foldAngle)
+            render(page1, encoder, dst, 0f, 0f, 1f, frac, foldAngle)
+        } else {
+            render(page1, encoder, dst, 0f, 0f, 1f, 0f, foldAngle)
+            render(page2, encoder, dst, 0f, 0f, 1f, 1f + frac, foldAngle)
         }
     }
 

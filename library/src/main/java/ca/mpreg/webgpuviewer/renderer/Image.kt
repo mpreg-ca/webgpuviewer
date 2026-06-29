@@ -1,4 +1,4 @@
-package ca.mpreg.webgpuviewer
+package ca.mpreg.webgpuviewer.renderer
 
 import android.util.Log
 import androidx.webgpu.BufferUsage
@@ -9,7 +9,8 @@ import androidx.webgpu.GPUTexture
 import androidx.webgpu.GPUTextureDescriptor
 import androidx.webgpu.TextureFormat
 import androidx.webgpu.TextureUsage
-import ca.mpreg.webgpuviewer.transitions.TransitionBasic
+import ca.mpreg.webgpuviewer.ImageUtil
+import ca.mpreg.webgpuviewer.transition.TransitionBasic
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer

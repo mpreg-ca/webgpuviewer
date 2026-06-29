@@ -1,4 +1,4 @@
-package ca.mpreg.webgpuviewer.transitions
+package ca.mpreg.webgpuviewer.transition
 
 import androidx.compose.ui.geometry.Offset
 import androidx.webgpu.GPUColorTargetState
@@ -13,8 +13,8 @@ import androidx.webgpu.GPUTexture
 import androidx.webgpu.GPUVertexState
 import androidx.webgpu.PrimitiveTopology.Companion.TriangleList
 import androidx.webgpu.TextureFormat
-import ca.mpreg.webgpuviewer.WebGpuImageViewerPage
-import ca.mpreg.webgpuviewer.WebGpuRenderer
+import ca.mpreg.webgpuviewer.viewer.WebGpuImageViewerPage
+import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
 
 abstract class Transition {
     open val code: String = ""

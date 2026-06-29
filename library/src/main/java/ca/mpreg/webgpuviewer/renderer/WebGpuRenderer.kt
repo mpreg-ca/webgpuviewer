@@ -1,4 +1,4 @@
-package ca.mpreg.webgpuviewer
+package ca.mpreg.webgpuviewer.renderer
 
 import android.view.Surface
 import androidx.webgpu.DeviceLostCallback
