@@ -42,6 +42,8 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
             val pageHeight = getPageHeight(page)
             if (scrollY > pageHeight) {
                 onPageChange?.invoke(1)
+                val newPage = getPage(0) ?: return
+                currentPageHeight = getPageHeight(newPage)
                 scrollY -= pageHeight
             }
 
@@ -95,7 +97,7 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
             pair.first.image?.let {
                 val pageScale = screenW / pair.first.width
                 TransitionBasic.render(
-                    it, encoder, texture, offsetX, pair.second, pageScale
+                    it, encoder, texture, offsetX, pair.second, pageScale * scale
                 )
             }
         }
