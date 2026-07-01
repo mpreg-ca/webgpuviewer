@@ -1,5 +1,6 @@
 package ca.mpreg.webgpuviewer.viewer
 
+import android.util.Log
 import androidx.webgpu.GPUCommandEncoder
 import androidx.webgpu.GPUTexture
 import ca.mpreg.webgpuviewer.transition.TransitionBasic
@@ -18,18 +19,18 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
         return page.height * fitWidth
     }
 
-    var currentPage: ImagePage? = null
-    var currentPageHeight = 0f
+    var currentPageHeight: Float? = null
 
     fun scrollBy(deltaPixels: Float) {
         synchronized(mutex) {
+            getPage(0) ?: return
+
             scrollY += deltaPixels
 
             if (scrollY < 0) {
                 if (getPage(-1) == null) {
                     scrollY = 0f
                 } else {
-                    getPage(0) ?: return
                     onPageChange?.invoke(-1)
                     val newPage = getPage(0) ?: return
                     val pageHeight = getPageHeight(newPage)
@@ -58,13 +59,10 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
         val screenW = width.toFloat()
 
         var y = synchronized(mutex) {
-            getPage(0)?.let {
-                val pageHeight = getPageHeight(it)
-                if (currentPageHeight != pageHeight) {
-                    if (currentPage != null) {
-                        scrollY -= pageHeight - currentPageHeight
-                        currentPage = it
-                    }
+            getPage(0)?.let { page ->
+                val pageHeight = getPageHeight(page)
+                if (currentPageHeight != pageHeight && scrollY > 0) {
+                    currentPageHeight?.let { h -> scrollY -= pageHeight - h }
                     currentPageHeight = pageHeight
                 }
             }
