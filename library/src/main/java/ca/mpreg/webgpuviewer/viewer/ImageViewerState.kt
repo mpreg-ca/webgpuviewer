@@ -1,7 +1,6 @@
 package ca.mpreg.webgpuviewer.viewer
 
 import android.content.res.Resources
-import android.util.Log
 import android.view.Surface
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.util.fastCoerceAtLeast
@@ -118,9 +117,7 @@ open class ImageViewerState(var isVertical: Boolean = false) {
     }
 
     suspend fun collect() {
-        Log.i("WebGpuImageViewer", "start collecting")
         renderFlow.collectLatest {
-            Log.i("WebGpuImageViewerState", "collect")
             renderer.render { encoder, texture ->
                 render(encoder, texture)
             }
