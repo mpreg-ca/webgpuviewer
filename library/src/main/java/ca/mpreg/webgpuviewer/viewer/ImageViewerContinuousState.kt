@@ -1,6 +1,5 @@
 package ca.mpreg.webgpuviewer.viewer
 
-import android.util.Log
 import androidx.webgpu.GPUCommandEncoder
 import androidx.webgpu.GPUTexture
 import ca.mpreg.webgpuviewer.transition.TransitionBasic
@@ -81,15 +80,17 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
                 images.add(Pair(page, offsetY))
             }
 
-            y += getPageHeight(page)
-            if (y >= screenH) break
+            val pageHeight = getPageHeight(page)
+
+            y += pageHeight
+            if (y > screenH / scale + pageHeight) break
         }
 
         images.forEach { pair ->
             pair.first.image?.let {
                 val pageScale = screenW / pair.first.width
                 TransitionBasic.render(
-                    it, encoder, texture, offsetX, pair.second, pageScale * scale
+                    it, encoder, texture, offsetX / pageScale, pair.second, pageScale * scale
                 )
             }
         }

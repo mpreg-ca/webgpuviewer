@@ -110,6 +110,10 @@ fun ImageViewerContinuous(
                             velocityTracker.addPointerInputChange(secondDown)
                             val dragPointerId = secondDown.id
                             val originalScale = state.scale
+                            val originalOffsetX = state.offsetX
+                            val originalScrollY = state.scrollY
+                            val px = secondDown.position.x / state.width - 0.5f
+                            val py = secondDown.position.y / state.height - 0.5f
                             var totalDeltaY = 0f
 
                             while (true) {
@@ -124,12 +128,53 @@ fun ImageViewerContinuous(
 
                                 if (totalDeltaY != 0f) {
                                     val newScale =
-                                        (originalScale * 10f.pow(2 * totalDeltaY / state.height)).fastCoerceIn(
-                                            minScale, maxScale
-                                        )
+                                        originalScale * 10f.pow(2 * totalDeltaY / state.height)
+                                    val diff = 1f / newScale - 1f / originalScale
                                     state.scale = newScale
+                                    state.offsetX = originalOffsetX + px * diff
+                                    state.scrollY = originalScrollY - py * diff * state.height
                                     state.invalidate()
                                     change.consume()
+                                }
+                            }
+
+                            val velocity = velocityTracker.calculateVelocity()
+                            if (abs(velocity.y) > 200 && state.scale > minScale && state.scale < maxScale) {
+                                // fling zoom
+                                state.animationJob = scope.launch {
+                                    val animation = Animatable(0f)
+                                    animation.snapTo(0f)
+                                    animation.animateDecay(velocity.y, exponentialDecay()) {
+                                        val newScale =
+                                            (originalScale * 10f.pow(2 * (totalDeltaY + value) / state.height)).fastCoerceIn(
+                                                minScale, maxScale
+                                            )
+                                        val diff = 1f / newScale - 1f / originalScale
+                                        state.scale = newScale
+                                        state.offsetX = originalOffsetX + px * diff
+                                        state.scrollY = originalScrollY - py * diff * state.height
+                                        state.invalidate()
+                                    }
+                                }
+                            } else {
+                                // Snap scale and offsetX back if overshot
+                                val targetScale = state.scale.fastCoerceIn(minScale, maxScale)
+                                val targetMaxOffsetX =
+                                    max(0f, (targetScale - 1f) / (2f * targetScale))
+                                val targetOffsetX =
+                                    state.offsetX.fastCoerceIn(-targetMaxOffsetX, targetMaxOffsetX)
+                                if (targetScale != state.scale || targetOffsetX != state.offsetX) {
+                                    state.animationJob = scope.launch {
+                                        val startScale = state.scale
+                                        val startOffsetX = state.offsetX
+                                        animate(0f, 1f, animationSpec = tween(300)) { t, _ ->
+                                            state.scale =
+                                                startScale + (targetScale - startScale) * t
+                                            state.offsetX =
+                                                startOffsetX + (targetOffsetX - startOffsetX) * t
+                                            state.invalidate()
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -137,6 +182,8 @@ fun ImageViewerContinuous(
                         // Drag gesture
                         val velocityTracker = VelocityTracker()
                         velocityTracker.addPointerInputChange(firstDown)
+
+                        var single = true
 
                         var longPressed = false
                         val longPressJob = scope.launch {
@@ -157,31 +204,41 @@ fun ImageViewerContinuous(
                                 val change = event.changes[0]
                                 velocityTracker.addPointerInputChange(change)
 
+                                if (event.changes.size > 1 && event.changes.all { it.pressed }) {
+                                    single = false
+                                }
+
                                 val pan = event.calculatePan()
                                 val zoom = event.calculateZoom()
 
                                 if (pan != Offset.Zero || zoom != 1f) {
                                     longPressJob.cancel()
 
-                                    // Zoom
+                                    // Zoom (only multi-finger)
                                     if (zoom != 1f) {
                                         val centroid = event.calculateCentroid(useCurrent = true)
-                                        val newScale =
-                                            (state.scale * zoom).fastCoerceIn(minScale, maxScale)
+                                        val newScale = state.scale * zoom
+                                        val diff = 1f / newScale - 1f / state.scale
+                                        val cx = centroid.x / state.width - 0.5f
                                         val cy = centroid.y / state.height - 0.5f
-                                        val zoomScrollDelta =
-                                            cy * (newScale - state.scale) * state.height / newScale
+                                        state.offsetX += cx * diff
+                                        state.scrollBy(-cy * diff * state.height)
                                         state.scale = newScale
-                                        state.scrollBy(zoomScrollDelta)
                                     }
 
                                     // Pan
-                                    val maxOffsetX =
-                                        max(0f, (state.scale - 1f) / (2f * state.scale))
-                                    state.offsetX =
-                                        (state.offsetX + pan.x / state.width / state.scale).fastCoerceIn(
-                                            -maxOffsetX, maxOffsetX
-                                        )
+                                    if (single) {
+                                        // Single finger: clamp offsetX
+                                        val maxOffsetX =
+                                            max(0f, (state.scale - 1f) / (2f * state.scale))
+                                        state.offsetX =
+                                            (state.offsetX + pan.x / state.width / state.scale).fastCoerceIn(
+                                                -maxOffsetX, maxOffsetX
+                                            )
+                                    } else {
+                                        // Multi-finger: allow overshoot
+                                        state.offsetX += pan.x / state.width / state.scale
+                                    }
                                     state.scrollBy(-pan.y / state.scale)
                                     state.invalidate()
                                     event.changes.forEach { if (it.positionChanged()) it.consume() }
@@ -218,9 +275,33 @@ fun ImageViewerContinuous(
                         // Snap scale back if below min
                         if (state.scale < minScale) {
                             state.animationJob = scope.launch {
-                                animate(state.scale, minScale, animationSpec = tween(200)) { v, _ ->
-                                    state.scale = v
+                                val startScale = state.scale
+                                val startOffsetX = state.offsetX
+                                animate(0f, 1f, animationSpec = tween(200)) { t, _ ->
+                                    state.scale = startScale + (minScale - startScale) * t
+                                    state.offsetX = startOffsetX * (1f - t)
                                     state.invalidate()
+                                }
+                            }
+                        } else if (state.scale > maxScale) {
+                            state.animationJob = scope.launch {
+                                val startScale = state.scale
+                                animate(0f, 1f, animationSpec = tween(200)) { t, _ ->
+                                    state.scale = startScale + (maxScale - startScale) * t
+                                    state.invalidate()
+                                }
+                            }
+                        } else {
+                            // Scale is in bounds, snap offsetX back if overshot
+                            val maxOffsetX = max(0f, (state.scale - 1f) / (2f * state.scale))
+                            val clampedX = state.offsetX.fastCoerceIn(-maxOffsetX, maxOffsetX)
+                            if (clampedX != state.offsetX) {
+                                state.animationJob = scope.launch {
+                                    val startX = state.offsetX
+                                    animate(0f, 1f, animationSpec = tween(200)) { t, _ ->
+                                        state.offsetX = startX + (clampedX - startX) * t
+                                        state.invalidate()
+                                    }
                                 }
                             }
                         }
