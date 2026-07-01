@@ -1,6 +1,5 @@
 package ca.mpreg.webgpuviewer.viewer
 
-import android.content.res.Resources
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.VectorConverter
 import androidx.compose.animation.core.animate
@@ -44,7 +43,7 @@ fun ImageViewerContinuous(
     val view = LocalView.current
     val fling = remember { Animatable(Offset.Zero, Offset.VectorConverter) }
 
-    val dpi = Resources.getSystem().displayMetrics.densityDpi / 100f
+    val dpi = view.resources.displayMetrics.densityDpi / 100f
     val minScale = 1f
     val doubleTapScale = max(dpi, minScale * 2f)
     val maxScale = max(doubleTapScale * 2f, 4f)
