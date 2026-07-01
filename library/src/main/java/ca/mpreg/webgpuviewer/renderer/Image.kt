@@ -24,9 +24,6 @@ class Image private constructor(
     var buffer: GPUBuffer? = null
 
     companion object {
-        val device get() = WebGpuRenderer.device
-        val dispatcher get() = WebGpuRenderer.dispatcher
-
         suspend operator fun invoke(pixels: ByteBuffer, width: Int, height: Int): Image {
             return Image(width, height).apply {
                 val tilesize = 4096
@@ -35,7 +32,7 @@ class Image private constructor(
 
                 var pixels = pixels
 
-                withContext(dispatcher) {
+                WebGpuRenderer.withContext { device ->
                     buffer = device.createBuffer(
                         GPUBufferDescriptor(
                             size = 48, usage = BufferUsage.CopyDst or BufferUsage.Uniform
@@ -58,6 +55,7 @@ class Image private constructor(
                         Log.i(
                             "Renderer", "Create mipmap using CPU ${scale} ${newWidth} ${newHeight}"
                         )
+                        // TODO: return mutex
                         pixels = withContext(Dispatchers.Default) {
                             ImageUtil.resize(pixels, textureWidth, textureHeight)
                         }

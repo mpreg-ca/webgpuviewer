@@ -19,8 +19,10 @@ import ca.mpreg.webgpuviewer.viewer.ImagePage
 abstract class Transition {
     open val code: String = ""
 
+    protected val device get() = WebGpuRenderer.device
+
     protected open val pipeline: GPURenderPipeline by lazy {
-        val shaderModule = WebGpuRenderer.device.createShaderModule(
+        val shaderModule = device.createShaderModule(
             GPUShaderModuleDescriptor(shaderSourceWGSL = GPUShaderSourceWGSL(code))
         )
 

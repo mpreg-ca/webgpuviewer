@@ -21,7 +21,7 @@ class Mipmap(
     val tilesize: Int,
 ) {
     companion object {
-        val device = WebGpuRenderer.device
+        private val device get() = WebGpuRenderer.device
     }
 
     var textures: MutableList<GPUTexture> = mutableListOf()

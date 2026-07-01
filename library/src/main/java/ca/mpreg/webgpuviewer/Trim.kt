@@ -21,7 +21,6 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.ceil
@@ -30,7 +29,6 @@ import kotlin.time.Duration.Companion.milliseconds
 class Trim {
     companion object {
         val device get() = WebGpuRenderer.device
-        val dispatcher get() = WebGpuRenderer.dispatcher
         val instance get() = WebGpuRenderer.instance
 
         var pipelineAll: GPUComputePipeline
@@ -84,7 +82,7 @@ class Trim {
         }
 
         suspend fun find(image: Image, r: Float, g: Float, b: Float, threshold: Float): Rect {
-            return withContext(dispatcher) {
+            return WebGpuRenderer.withContext { device ->
                 val mipmap = image.mipmaps[0]
 
                 if (mipmap.tilesCols == 1 && mipmap.tilesRows == 1) {

@@ -42,6 +42,7 @@ class WebGpuRenderer {
         var instance: GPUInstance
         var adapter: GPUAdapter
         var device: GPUDevice
+        val mutex = Mutex()
 
         val dispatcher = Executors.newSingleThreadExecutor { runnable ->
             Thread(runnable, "WebGPU-Render-Thread")
@@ -64,6 +65,16 @@ class WebGpuRenderer {
                         uncapturedErrorCallbackExecutor = Executor(Runnable::run),
                     )
                 )
+            }
+        }
+
+        @JvmStatic
+        suspend fun <R> withContext(block: suspend CoroutineScope.(GPUDevice) -> R): R {
+            return withContext(dispatcher) {
+                val scope = this
+                mutex.withLock {
+                    block(scope, device)
+                }
             }
         }
     }
@@ -105,44 +116,39 @@ class WebGpuRenderer {
         }
     }
 
-    private val mutex = Mutex()
-
     suspend fun render(fn: suspend (GPUCommandEncoder, GPUTexture) -> Unit) {
-        withContext(dispatcher) {
-            mutex.withLock {
-                val surface = surface ?: return@withContext
+        withContext { device ->
+            val surface = surface ?: return@withContext
 
-                val texture = surface.getCurrentTexture().texture
-                val encoder = device.createCommandEncoder()
+            val texture = surface.getCurrentTexture().texture
+            val encoder = device.createCommandEncoder()
 
-                encoder.beginRenderPass(
-                    GPURenderPassDescriptor(
-                        colorAttachments = arrayOf(
-                            GPURenderPassColorAttachment(
-                                view = texture.createView(),
-                                loadOp = LoadOp.Clear,
-                                storeOp = StoreOp.Store,
-                                clearValue = GPUColor(0.0, 0.0, 0.0, 0.0)
-                            )
+            encoder.beginRenderPass(
+                GPURenderPassDescriptor(
+                    colorAttachments = arrayOf(
+                        GPURenderPassColorAttachment(
+                            view = texture.createView(),
+                            loadOp = LoadOp.Clear,
+                            storeOp = StoreOp.Store,
+                            clearValue = GPUColor(0.0, 0.0, 0.0, 0.0)
                         )
                     )
-                ).end()
+                )
+            ).end()
 
-                fn(encoder, texture)
+            fn(encoder, texture)
 
-                device.queue.submit(arrayOf(encoder.finish()))
-                surface.present()
-            }
+            device.queue.submit(arrayOf(encoder.finish()))
+            surface.present()
         }
     }
 
     fun cleanup() {
-        runBlocking(dispatcher) {
+        runBlocking {
             surface?.close()
             surface = null
         }
     }
-
 }
 
 private val defaultUncapturedErrorCallback

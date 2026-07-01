@@ -87,12 +87,6 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
             if (y >= screenH) break
         }
 
-        val y2 = if (images.size < 6) {
-            screenH - y
-        } else {
-            0
-        }
-
         images.forEach { pair ->
             pair.first.image?.let {
                 val pageScale = screenW / pair.first.width
