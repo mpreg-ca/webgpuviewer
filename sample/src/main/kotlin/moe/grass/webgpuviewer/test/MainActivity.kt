@@ -3,11 +3,10 @@ package ca.mpreg.webgpuviewer.test
 import android.os.Bundle
 import androidx.appcompat.app.AppCompatActivity
 import ca.mpreg.imagedecoder.ImageDecoder
-import ca.mpreg.webgpuviewer.Image
-import ca.mpreg.webgpuviewer.WebGpuImageViewerPage
-import ca.mpreg.webgpuviewer.WebGpuRenderer
+import ca.mpreg.webgpuviewer.renderer.Image
+import ca.mpreg.webgpuviewer.viewer.ImagePage
+import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
 import ca.mpreg.webgpuviewer.test.databinding.MainActivityBinding
-import ca.mpreg.webgpuviewer.transitions.TransitionBasic
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -25,7 +24,7 @@ class MainActivity : AppCompatActivity() {
         val width = resources.displayMetrics.widthPixels
         val height = resources.displayMetrics.heightPixels
 
-        binding.composeView1.apply {
+        binding.composeView2.apply {
             layoutParams.width = width
             layoutParams.height = height
         }
@@ -37,8 +36,8 @@ class MainActivity : AppCompatActivity() {
                 dec.decodeNext()
             }.let {
                 withContext(WebGpuRenderer.dispatcher) {
-                    WebGpuImageViewerPage(Image(it.image, it.width, it.height)).apply {
-                        parent = binding.composeView1.state
+                    ImagePage(Image(it.image, it.width, it.height)).apply {
+                        parent = binding.composeView2.state
                         x = homeX
                         y = homeY
                         scale = homeScale
@@ -47,13 +46,41 @@ class MainActivity : AppCompatActivity() {
             }
 
             val page2 = withContext(Dispatchers.Default) {
-                val stream = assets.open("ref.png")
+                val stream = assets.open("ref2.png")
                 val dec = ImageDecoder.new(stream)
                 dec.decodeNext()
             }.let {
                 withContext(WebGpuRenderer.dispatcher) {
-                    WebGpuImageViewerPage(Image(it.image, it.width, it.height)).apply {
-                        parent = binding.composeView1.state
+                    ImagePage(Image(it.image, it.width, it.height)).apply {
+                        parent = binding.composeView2.state
+                        x = homeX
+                        y = homeY
+                        scale = homeScale
+                    }
+                }
+            }
+            val page3 = withContext(Dispatchers.Default) {
+                val stream = assets.open("ref2.png")
+                val dec = ImageDecoder.new(stream)
+                dec.decodeNext()
+            }.let {
+                withContext(WebGpuRenderer.dispatcher) {
+                    ImagePage(Image(it.image, it.width, it.height)).apply {
+                        parent = binding.composeView2.state
+                        x = homeX
+                        y = homeY
+                        scale = homeScale
+                    }
+                }
+            }
+            val page4 = withContext(Dispatchers.Default) {
+                val stream = assets.open("ref2.png")
+                val dec = ImageDecoder.new(stream)
+                dec.decodeNext()
+            }.let {
+                withContext(WebGpuRenderer.dispatcher) {
+                    ImagePage(Image(it.image, it.width, it.height)).apply {
+                        parent = binding.composeView2.state
                         x = homeX
                         y = homeY
                         scale = homeScale
@@ -61,20 +88,24 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            binding.composeView1.state.apply {
+            binding.composeView2.state.apply {
                 dpi = resources.displayMetrics.densityDpi / 100f
 
-                isVertical = true
-                transition = TransitionBasic.Vertical::render
+//                isVertical = true
+//                transition = TransitionBasic.Vertical
 
                 haveNext = true
                 havePrev = true
 
                 fetchPage = { index ->
-                    if (index == 0) {
+                    if(index == -1) {
+                        page4
+                    } else if (index == 0) {
                         page1
-                    } else {
+                    } else if (index == 1){
                         page2
+                    } else {
+                        page3
                     }
                 }
 

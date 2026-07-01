@@ -3,14 +3,14 @@ package ca.mpreg.webgpuviewer.transition
 import androidx.compose.ui.geometry.Offset
 import androidx.webgpu.GPUCommandEncoder
 import androidx.webgpu.GPUTexture
-import ca.mpreg.webgpuviewer.viewer.WebGpuImageViewerPage
+import ca.mpreg.webgpuviewer.viewer.ImagePage
 
 object TransitionStackLeft : Transition() {
     override val code = ""
 
     override fun render(
-        page1: WebGpuImageViewerPage,
-        page2: WebGpuImageViewerPage,
+        page1: ImagePage,
+        page2: ImagePage,
         encoder: GPUCommandEncoder,
         dst: GPUTexture,
         frac: Float,

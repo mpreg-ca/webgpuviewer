@@ -54,12 +54,11 @@ class Mipmap(
                 )
 
                 device.queue.writeTexture(
-                    dataLayout =
-                        GPUTexelCopyBufferLayout(
-                            offset = (y * width + x) * 4L,
-                            bytesPerRow = width * Int.SIZE_BYTES,
-                            rowsPerImage = height,
-                        ),
+                    dataLayout = GPUTexelCopyBufferLayout(
+                        offset = (y * width + x) * 4L,
+                        bytesPerRow = width * Int.SIZE_BYTES,
+                        rowsPerImage = height,
+                    ),
                     data = pixels,
                     destination = GPUTexelCopyTextureInfo(texture = texture),
                     writeSize = size,
@@ -78,8 +77,14 @@ class Mipmap(
         }
     }
 
-    constructor(texture: GPUTexture, scale: Float, tilesize: Int) :
-            this(texture.width, texture.height, scale, 1, 1, tilesize) {
+    constructor(texture: GPUTexture, scale: Float, tilesize: Int) : this(
+        texture.width,
+        texture.height,
+        scale,
+        1,
+        1,
+        tilesize
+    ) {
         textures.add(texture)
         repeat(4) {
             tiles.add(texture)
@@ -100,16 +105,15 @@ class Mipmap(
                 val x = c * tilesize
                 val tileWidth = min((c + 1) * tilesize, width) - (c * tilesize)
 
-                Log.i("Renderer", "Update tile " + c + " " + r)
+                Log.i("Renderer", "Update tile $c $r")
                 val size = GPUExtent3D(tileWidth, tileHeight)
 
                 device.queue.writeTexture(
-                    dataLayout =
-                        GPUTexelCopyBufferLayout(
-                            offset = (y * width + x) * 4L,
-                            bytesPerRow = width * Int.SIZE_BYTES,
-                            rowsPerImage = height,
-                        ),
+                    dataLayout = GPUTexelCopyBufferLayout(
+                        offset = (y * width + x) * 4L,
+                        bytesPerRow = width * Int.SIZE_BYTES,
+                        rowsPerImage = height,
+                    ),
                     data = pixels,
                     destination = GPUTexelCopyTextureInfo(texture = textures[i++]),
                     writeSize = size,

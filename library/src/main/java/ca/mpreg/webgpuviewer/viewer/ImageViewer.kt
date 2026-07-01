@@ -25,21 +25,18 @@ import androidx.compose.ui.input.pointer.util.addPointerInputChange
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.util.fastCoerceIn
 import ca.mpreg.webgpuviewer.orZero
-import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer.Companion.dispatcher
 import ca.mpreg.webgpuviewer.waitForCleanUp
 import ca.mpreg.webgpuviewer.waitForDown
-import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 import kotlin.math.abs
 import kotlin.math.pow
 import kotlin.time.Duration.Companion.milliseconds
 
 @Composable
-fun WebGpuImageViewer(
+fun ImageViewer(
     modifier: Modifier = Modifier,
-    state: WebGpuImageViewerState,
+    state: ImageViewerState,
 ) {
     val scope = rememberCoroutineScope()
 
@@ -58,8 +55,7 @@ fun WebGpuImageViewer(
                     val firstDown = awaitFirstDown(pass = PointerEventPass.Initial)
                     val wasScrolling = state.pageOffset != 0f
                     state.animationJob?.cancel()
-                    val page =
-                        runBlocking(dispatcher) { state.getPage(0) } ?: return@awaitEachGesture
+                    val page = state.getPage(0) ?: return@awaitEachGesture
                     if (!wasScrolling) page.animateTo(Offset(0.5f, 0.5f))
 
                     view.parent?.requestDisallowInterceptTouchEvent(true)
@@ -245,7 +241,7 @@ fun WebGpuImageViewer(
                                         acc = Offset.Zero
                                     }
                                     state.currentPos = event.changes[0].position
-                                    state.render()
+                                    state.invalidate()
                                     event.changes.forEach { if (it.positionChanged()) it.consume() }
                                 } else {
                                     val zoom = event.calculateZoom()
@@ -281,7 +277,7 @@ fun WebGpuImageViewer(
                                                 pageTurning = true
                                                 state.firstPos = firstDown.position
                                                 state.pageOffset += -overflow * page.scale
-                                                state.render()
+                                                state.invalidate()
                                             }
                                             x = clampedX
                                             y = clampedY
@@ -321,7 +317,7 @@ fun WebGpuImageViewer(
                                     initialVelocity
                                 ) {
                                     state.pageOffset = value
-                                    state.render()
+                                    state.invalidate()
                                 }
                             }
                         } else {
@@ -363,9 +359,8 @@ fun WebGpuImageViewer(
         onSurface { surface, width, height ->
             try {
                 state.init(scope, surface, width, height)
-
-                state.render()
-                awaitCancellation()
+                state.invalidate()
+                state.collect()
             } finally {
                 state.cleanup()
             }

@@ -1,24 +1,28 @@
 package ca.mpreg.webgpuviewer.viewer
 
 import android.content.res.Resources
+import android.util.Log
 import android.view.Surface
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.util.fastCoerceAtLeast
 import androidx.compose.ui.util.fastCoerceAtMost
+import androidx.webgpu.GPUCommandEncoder
+import androidx.webgpu.GPUTexture
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer.Companion.dispatcher
 import ca.mpreg.webgpuviewer.transition.Transition
 import ca.mpreg.webgpuviewer.transition.TransitionBasic
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
 import kotlin.math.max
 import kotlin.math.min
 
-
-open class WebGpuImageViewerState(var isVertical: Boolean = false) {
+open class ImageViewerState(var isVertical: Boolean = false) {
     val renderer = WebGpuRenderer()
 
     var animationJob: Job? = null
@@ -68,23 +72,21 @@ open class WebGpuImageViewerState(var isVertical: Boolean = false) {
             }
         }
 
-    var haveNext = false
-    var havePrev = false
+    val havePrev get() = getPage(-1) != null
+    val haveNext get() = getPage(1) != null
 
-    var fetchPage: (suspend (Int) -> WebGpuImageViewerPage?)? = null
+    var fetchPage: ((Int) -> ImagePage?)? = null
 
     var onPageChange: ((Int) -> Unit)? = null
     var onTap: ((Offset) -> Unit)? = null
     var onLongTap: ((Offset) -> Unit)? = null
 
-    private val mutex = Mutex()
-
-    suspend fun getPage(index: Int): WebGpuImageViewerPage? {
+    fun getPage(index: Int): ImagePage? {
         return fetchPage?.invoke(index)?.apply {
-            parent = this@WebGpuImageViewerState
-            scope = this@WebGpuImageViewerState.scope
+            parent = this@ImageViewerState
+            scope = this@ImageViewerState.scope
             onInvalidate = {
-                render()
+                invalidate()
             }
         }
     }
@@ -105,25 +107,43 @@ open class WebGpuImageViewerState(var isVertical: Boolean = false) {
 
     var transition: Transition = if (isVertical) TransitionBasic.Vertical else TransitionBasic
 
-    open fun render() {
-        renderer.render { encoder, texture ->
-            val currentPage = getPage(0) ?: return@render
+    var renderFlow = MutableSharedFlow<Int>(
+        replay = 0, extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
 
-            if (pageOffset == 0f) {
-                TransitionBasic.render(currentPage, encoder, texture, 0f, 0f, 1f)
-            } else if (pageOffset > 0f) {
-                getPage(1)?.let {
-                    transition.render(
-                        currentPage, it, encoder, texture, pageOffset, firstPos, currentPos,
-                    )
-                } ?: TransitionBasic.render(currentPage, encoder, texture, 0f, 0f, 1f)
-            } else {
-                getPage(-1)?.let {
-                    transition.render(
-                        currentPage, it, encoder, texture, pageOffset, firstPos, currentPos
-                    )
-                } ?: TransitionBasic.render(currentPage, encoder, texture, 0f, 0f, 1f)
+    fun invalidate() {
+        scope?.launch {
+            renderFlow.emit(0)
+        }
+    }
+
+    suspend fun collect() {
+        Log.i("WebGpuImageViewer", "start collecting")
+        renderFlow.collectLatest {
+            Log.i("WebGpuImageViewerState", "collect")
+            renderer.render { encoder, texture ->
+                render(encoder, texture)
             }
+        }
+    }
+
+    protected open suspend fun render(encoder: GPUCommandEncoder, texture: GPUTexture) {
+        val currentPage = getPage(0) ?: return@render
+
+        if (pageOffset == 0f) {
+            TransitionBasic.render(currentPage, encoder, texture, 0f, 0f, 1f)
+        } else if (pageOffset > 0f) {
+            getPage(1)?.let {
+                transition.render(
+                    currentPage, it, encoder, texture, pageOffset, firstPos, currentPos,
+                )
+            } ?: TransitionBasic.render(currentPage, encoder, texture, 0f, 0f, 1f)
+        } else {
+            getPage(-1)?.let {
+                transition.render(
+                    currentPage, it, encoder, texture, pageOffset, firstPos, currentPos
+                )
+            } ?: TransitionBasic.render(currentPage, encoder, texture, 0f, 0f, 1f)
         }
     }
 

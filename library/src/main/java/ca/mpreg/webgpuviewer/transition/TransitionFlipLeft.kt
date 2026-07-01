@@ -12,7 +12,7 @@ import androidx.webgpu.GPUTexture
 import androidx.webgpu.LoadOp
 import androidx.webgpu.StoreOp
 import ca.mpreg.webgpuviewer.renderer.Image.Companion.device
-import ca.mpreg.webgpuviewer.viewer.WebGpuImageViewerPage
+import ca.mpreg.webgpuviewer.viewer.ImagePage
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.abs
@@ -427,8 +427,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 }"""
 
     override fun render(
-        page1: WebGpuImageViewerPage,
-        page2: WebGpuImageViewerPage,
+        page1: ImagePage,
+        page2: ImagePage,
         encoder: GPUCommandEncoder,
         dst: GPUTexture,
         frac: Float,
@@ -449,7 +449,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     fun render(
-        page: WebGpuImageViewerPage,
+        page: ImagePage,
         encoder: GPUCommandEncoder,
         dst: GPUTexture,
         x: Float,
@@ -458,7 +458,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         frac: Float,
         foldAngle: Float,
     ) {
-        val image = page.image
+        val image = page.image ?: return
         val buffer = image.buffer ?: return
         val res = image.prepareForRender(dst, page.x + x, page.y + y, page.scale * scale) ?: return
 

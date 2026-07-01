@@ -8,12 +8,12 @@
         android:layout_height="match_parent"
         android:orientation="horizontal">
 
-        <ca.mpreg.webgpuviewer.WebGpuImageView
-            android:id="@+id/compose_view_1"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent" />
+<!--        <ca.mpreg.webgpuviewer.WebGpuImageView-->
+<!--            android:id="@+id/compose_view_1"-->
+<!--            android:layout_width="match_parent"-->
+<!--            android:layout_height="match_parent" />-->
 
-        <ca.mpreg.webgpuviewer.WebGpuImageView
+        <ca.mpreg.webgpuviewer.WebGpuImageViewContinuous
             android:id="@+id/compose_view_2"
             android:layout_width="match_parent"
             android:layout_height="match_parent" />

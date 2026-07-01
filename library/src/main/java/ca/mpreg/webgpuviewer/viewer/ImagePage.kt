@@ -13,15 +13,18 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlin.math.max
 
-class WebGpuImageViewerPage(val image: Image) {
+open class ImagePage(val image: Image? = null) {
+    class Dummy(override val width: Int, override val height: Int) :
+        ImagePage(null)
+
     var scale: Float = 1f
     var x: Float = 0f
     var y: Float = 0f
 
     var animationJob: Job? = null
 
-    val width get() = image.width
-    val height get() = image.height
+    open val width get() = image?.width ?: 0
+    open val height get() = image?.height ?: 0
 
     var trim: Rect? = null
 
@@ -49,7 +52,7 @@ class WebGpuImageViewerPage(val image: Image) {
 
     var onInvalidate: (() -> Unit)? = null
 
-    var parent: WebGpuImageViewerState? = null
+    var parent: ImageViewerState? = null
 
     val minScale get() = parent?.getMinScale(width, height) ?: 1f
 

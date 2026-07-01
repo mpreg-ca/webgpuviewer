@@ -12,7 +12,7 @@ import androidx.webgpu.LoadOp
 import androidx.webgpu.StoreOp
 import ca.mpreg.webgpuviewer.renderer.Image
 import ca.mpreg.webgpuviewer.renderer.Image.Companion.device
-import ca.mpreg.webgpuviewer.viewer.WebGpuImageViewerPage
+import ca.mpreg.webgpuviewer.viewer.ImagePage
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -368,13 +368,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 }"""
 
     fun render(
-        page: WebGpuImageViewerPage,
+        page: ImagePage,
         encoder: GPUCommandEncoder,
         dst: GPUTexture,
         x: Float,
         y: Float,
         scale: Float
     ) {
+        page.image ?: return
         render(page.image, encoder, dst, page.x + x, page.y + y, page.scale * scale)
     }
 
@@ -429,8 +430,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     override fun render(
-        page1: WebGpuImageViewerPage,
-        page2: WebGpuImageViewerPage,
+        page1: ImagePage,
+        page2: ImagePage,
         encoder: GPUCommandEncoder,
         dst: GPUTexture,
         frac: Float,
@@ -441,8 +442,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             render(page1, encoder, dst, -frac / page1.scale, 0f, 1f)
             render(page2, encoder, dst, (1f - frac) / page2.scale, 0f, 1f)
         } else {
-            render(page2, encoder, dst, -(frac + 1f) / page1.scale, 0f, 1f)
-            render(page1, encoder, dst, -frac / page2.scale, 0f, 1f)
+            render(page2, encoder, dst, -(frac + 1f) / page2.scale, 0f, 1f)
+            render(page1, encoder, dst, -frac / page1.scale, 0f, 1f)
         }
     }
 
@@ -450,8 +451,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         override val pipeline = TransitionBasic.pipeline
 
         override fun render(
-            page1: WebGpuImageViewerPage,
-            page2: WebGpuImageViewerPage,
+            page1: ImagePage,
+            page2: ImagePage,
             encoder: GPUCommandEncoder,
             dst: GPUTexture,
             frac: Float,
@@ -462,8 +463,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 render(page1, encoder, dst, 0f, -frac / page1.scale, 1f)
                 render(page2, encoder, dst, 0f, (1f - frac) / page2.scale, 1f)
             } else {
-                render(page2, encoder, dst, 0f, -(frac + 1f) / page1.scale, 1f)
-                render(page1, encoder, dst, 0f, -frac / page2.scale, 1f)
+                render(page2, encoder, dst, 0f, -(frac + 1f) / page2.scale, 1f)
+                render(page1, encoder, dst, 0f, -frac / page1.scale, 1f)
             }
         }
     }
