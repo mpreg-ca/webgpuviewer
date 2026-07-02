@@ -26,7 +26,7 @@ abstract class Transition {
             GPUShaderModuleDescriptor(shaderSourceWGSL = GPUShaderSourceWGSL(code))
         )
 
-        WebGpuRenderer.device.createRenderPipeline(
+        device.createRenderPipeline(
             GPURenderPipelineDescriptor(
                 vertex = GPUVertexState(shaderModule, entryPoint = "vs_main"),
                 fragment = GPUFragmentState(

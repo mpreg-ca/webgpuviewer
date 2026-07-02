@@ -18,11 +18,11 @@ import kotlin.math.floor
 import kotlin.math.log2
 import kotlin.math.round
 
+const val BUFFER_SIZE = 96L
+
 class Image private constructor(
     val width: Int, val height: Int, var x: Float = 0f, var y: Float = 0f
 ) {
-    var buffer: GPUBuffer? = null
-
     companion object {
         suspend operator fun invoke(pixels: ByteBuffer, width: Int, height: Int): Image {
             return Image(width, height).apply {
@@ -33,12 +33,6 @@ class Image private constructor(
                 var pixels = pixels
 
                 WebGpuRenderer.withContext { device ->
-                    buffer = device.createBuffer(
-                        GPUBufferDescriptor(
-                            size = 48, usage = BufferUsage.CopyDst or BufferUsage.Uniform
-                        )
-                    )
-
                     mipmaps.add(Mipmap(pixels, width, height, 1f, tilesize))
 
                     var scale = 1f
@@ -96,6 +90,14 @@ class Image private constructor(
         }
     }
 
+    val buffer: GPUBuffer by lazy {
+        WebGpuRenderer.device.createBuffer(
+            GPUBufferDescriptor(
+                size = BUFFER_SIZE, usage = BufferUsage.CopyDst or BufferUsage.Uniform
+            )
+        )
+    }
+
     val mipmaps: MutableList<Mipmap> = mutableListOf()
 
     fun update(pixels: ByteBuffer) {
@@ -103,7 +105,7 @@ class Image private constructor(
     }
 
     protected fun finalize() {
-        buffer?.close()
+        buffer.close()
     }
 
     class MipMapForDraw(

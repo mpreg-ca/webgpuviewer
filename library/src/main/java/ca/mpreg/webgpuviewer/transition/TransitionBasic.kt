@@ -381,7 +381,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     fun render(
         image: Image, encoder: GPUCommandEncoder, dst: GPUTexture, x: Float, y: Float, scale: Float
     ) {
-        val buffer = image.buffer ?: return
         val res = image.prepareForRender(dst, x, y, scale) ?: return
 
         val byteBuffer = ByteBuffer.allocateDirect(32).apply {
@@ -396,7 +395,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             putFloat(28, dst.height.toFloat())
         }
 
-        device.queue.writeBuffer(buffer, 0, byteBuffer)
+        device.queue.writeBuffer(image.buffer, 0, byteBuffer)
 
         val pass = encoder.beginRenderPass(
             GPURenderPassDescriptor(
@@ -416,7 +415,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             0, device.createBindGroup(
                 GPUBindGroupDescriptor(
                     layout = pipeline.getBindGroupLayout(0), entries = arrayOf(
-                        GPUBindGroupEntry(0, buffer = buffer),
+                        GPUBindGroupEntry(0, buffer = image.buffer),
                     ).plus(res.quad.tiles.mapIndexed { i, value ->
                         GPUBindGroupEntry(1 + i, textureView = value.createView())
                     })

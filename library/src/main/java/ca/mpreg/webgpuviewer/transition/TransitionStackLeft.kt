@@ -6,8 +6,6 @@ import androidx.webgpu.GPUTexture
 import ca.mpreg.webgpuviewer.viewer.ImagePage
 
 object TransitionStackLeft : Transition() {
-    override val code = ""
-
     override fun render(
         page1: ImagePage,
         page2: ImagePage,

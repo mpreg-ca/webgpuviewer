@@ -458,10 +458,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         foldAngle: Float,
     ) {
         val image = page.image ?: return
-        val buffer = image.buffer ?: return
         val res = image.prepareForRender(dst, page.x + x, page.y + y, page.scale * scale) ?: return
 
-        val byteBuffer = ByteBuffer.allocateDirect(48).apply {
+        val byteBuffer = ByteBuffer.allocateDirect(40).apply {
             order(ByteOrder.nativeOrder())
             putFloat(0, res.x)
             putFloat(4, res.y)
@@ -475,7 +474,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             putFloat(36, foldAngle)
         }
 
-        device.queue.writeBuffer(buffer, 0, byteBuffer)
+        device.queue.writeBuffer(image.buffer, 0, byteBuffer)
 
         val pass = encoder.beginRenderPass(
             GPURenderPassDescriptor(
@@ -495,7 +494,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             0, device.createBindGroup(
                 GPUBindGroupDescriptor(
                     layout = pipeline.getBindGroupLayout(0), entries = arrayOf(
-                        GPUBindGroupEntry(0, buffer = buffer),
+                        GPUBindGroupEntry(0, buffer = image.buffer),
                     ).plus(res.quad.tiles.mapIndexed { i, value ->
                         GPUBindGroupEntry(1 + i, textureView = value.createView())
                     })
