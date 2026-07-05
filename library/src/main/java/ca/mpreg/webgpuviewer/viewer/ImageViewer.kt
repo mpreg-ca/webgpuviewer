@@ -98,8 +98,7 @@ fun ImageViewer(
 
                             while (true) {
                                 val event = awaitPointerEvent(pass = PointerEventPass.Initial)
-                                val change =
-                                    event.changes.firstOrNull { it.id == dragPointerId && it.positionChanged() }
+                                val change = event.changes.firstOrNull { it.id == dragPointerId }
 
                                 if (change == null || change.changedToUp() || change.isConsumed) {
                                     break
@@ -107,25 +106,27 @@ fun ImageViewer(
 
                                 velocityTracker.addPointerInputChange(change)
 
-                                val pan = event.calculatePan()
-                                totalDeltaY += pan.y
-                                if (totalDeltaY != 0f) {
+                                if (change.positionChanged()) {
+                                    val pan = event.calculatePan()
+                                    totalDeltaY += pan.y
+                                    if (totalDeltaY != 0f) {
 
-                                    val px = secondDown.position.x / state.width - 0.5f
-                                    val py = secondDown.position.y / state.height - 0.5f
+                                        val px = secondDown.position.x / state.width - 0.5f
+                                        val py = secondDown.position.y / state.height - 0.5f
 
-                                    val newScale =
-                                        originalScale * 10f.pow(2 * totalDeltaY / state.height)
+                                        val newScale =
+                                            originalScale * 10f.pow(2 * totalDeltaY / state.height)
 
-                                    page.scale = newScale
-                                    val diff = 1 / page.scale - 1 / originalScale
+                                        page.scale = newScale
+                                        val diff = 1 / page.scale - 1 / originalScale
 
-                                    page.setPos(
-                                        (originalX + px * diff).orZero(),
-                                        (originalY + py * diff).orZero()
-                                    )
+                                        page.setPos(
+                                            (originalX + px * diff).orZero(),
+                                            (originalY + py * diff).orZero()
+                                        )
 
-                                    change.consume()
+                                        change.consume()
+                                    }
                                 }
                             }
 
