@@ -437,8 +437,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         pos2: Offset,
     ) {
         if (frac > 0f) {
-            render(page1, encoder, dst, -frac / page1.scale, 0f, 1f)
             render(page2, encoder, dst, (1f - frac) / page2.scale, 0f, 1f)
+            render(page1, encoder, dst, -frac / page1.scale, 0f, 1f)
         } else {
             render(page2, encoder, dst, -(frac + 1f) / page2.scale, 0f, 1f)
             render(page1, encoder, dst, -frac / page1.scale, 0f, 1f)
