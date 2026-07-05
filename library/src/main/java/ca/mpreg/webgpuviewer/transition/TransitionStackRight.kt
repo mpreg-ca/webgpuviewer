@@ -20,7 +20,7 @@ object TransitionStackRight : Transition() {
             TransitionBasic.render(page2, encoder, dst, (1f - frac) / page2.scale, 0f, 1f)
         } else {
             TransitionBasic.render(page2, encoder, dst, 0f, 0f, 1f)
-            TransitionBasic.render(page1, encoder, dst, -frac / page2.scale, 0f, 1f)
+            TransitionBasic.render(page1, encoder, dst, -frac / page1.scale, 0f, 1f)
         }
     }
 }

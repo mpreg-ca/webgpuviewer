@@ -17,7 +17,7 @@ object TransitionStackLeft : Transition() {
     ) {
         if (frac > 0f) {
             TransitionBasic.render(page2, encoder, dst, 0f, 0f, 1f)
-            TransitionBasic.render(page1, encoder, dst, -frac / page2.scale, 0f, 1f)
+            TransitionBasic.render(page1, encoder, dst, -frac / page1.scale, 0f, 1f)
         } else {
             TransitionBasic.render(page1, encoder, dst, 0f, 0f, 1f)
             TransitionBasic.render(page2, encoder, dst, -(frac + 1f) / page2.scale, 0f, 1f)
