@@ -47,22 +47,26 @@ open class ImageViewerState(var isVertical: Boolean = false) {
         return max(0f, (height.toFloat() / this.height - 1 / scale) / 2)
     }
 
+    private var suppressPageChange = false
+
     var pageOffset = 0f
         set(value) {
             var v = value
             var pageDelta = 0
 
-            while (v >= 1f && haveNext) {
-                pageDelta += 1
-                v -= 1f
-            }
-            while (v <= -1f && havePrev) {
-                pageDelta -= 1
-                v += 1f
+            if (!suppressPageChange) {
+                while (v >= 1f && haveNext) {
+                    pageDelta += 1
+                    v -= 1f
+                }
+                while (v <= -1f && havePrev) {
+                    pageDelta -= 1
+                    v += 1f
+                }
             }
 
-            if (!haveNext) v = v.fastCoerceAtMost(0f)
-            if (!havePrev) v = v.fastCoerceAtLeast(0f)
+            if (!haveNext) v = v.fastCoerceAtMost(1f)
+            if (!havePrev) v = v.fastCoerceAtLeast(-1f)
 
             field = v
 
@@ -70,6 +74,12 @@ open class ImageViewerState(var isVertical: Boolean = false) {
                 onPageChange?.invoke(pageDelta)
             }
         }
+
+    fun setPageOffsetDirect(value: Float) {
+        suppressPageChange = true
+        pageOffset = value
+        suppressPageChange = false
+    }
 
     val havePrev get() = getPage(-1) != null
     val haveNext get() = getPage(1) != null
