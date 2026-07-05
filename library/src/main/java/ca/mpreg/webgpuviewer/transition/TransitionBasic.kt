@@ -366,7 +366,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     return vec4<f32>(col.rgb * col.a, col.a);
 }"""
 
-    fun render(
+    internal fun render(
         page: ImagePage,
         encoder: GPUCommandEncoder,
         dst: GPUTexture,
@@ -378,7 +378,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         render(page.image, encoder, dst, page.x + x, page.y + y, page.scale * scale)
     }
 
-    fun render(
+    internal fun render(
         image: Image, encoder: GPUCommandEncoder, dst: GPUTexture, x: Float, y: Float, scale: Float
     ) {
         val res = image.prepareForRender(dst, x, y, scale) ?: return

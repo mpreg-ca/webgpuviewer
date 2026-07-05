@@ -439,26 +439,23 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         val sign = if (dx < 0f) -1f else 1f
         val foldAngle = (sign * (atan2(dy, abs(dx)) / 2)).fastCoerceAtLeast(0f)
         if (frac > 0f) {
-            render(page2, encoder, dst, 0f, 0f, 1f, 0f, foldAngle)
-            render(page1, encoder, dst, 0f, 0f, 1f, frac, foldAngle)
+            render(page2, encoder, dst, 0f, foldAngle)
+            render(page1, encoder, dst, frac, foldAngle)
         } else {
-            render(page1, encoder, dst, 0f, 0f, 1f, 0f, foldAngle)
-            render(page2, encoder, dst, 0f, 0f, 1f, 1f + frac, foldAngle)
+            render(page1, encoder, dst, 0f, foldAngle)
+            render(page2, encoder, dst, 1f + frac, foldAngle)
         }
     }
 
-    fun render(
+    private fun render(
         page: ImagePage,
         encoder: GPUCommandEncoder,
         dst: GPUTexture,
-        x: Float,
-        y: Float,
-        scale: Float,
         frac: Float,
         foldAngle: Float,
     ) {
         val image = page.image ?: return
-        val res = image.prepareForRender(dst, page.x + x, page.y + y, page.scale * scale) ?: return
+        val res = image.prepareForRender(dst, page.x, page.y, page.scale) ?: return
 
         val byteBuffer = ByteBuffer.allocateDirect(40).apply {
             order(ByteOrder.nativeOrder())
