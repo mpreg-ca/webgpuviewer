@@ -1,6 +1,7 @@
 package ca.mpreg.webgpuviewer.viewer
 
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.VectorConverter
 import androidx.compose.animation.core.exponentialDecay
 import androidx.compose.animation.core.spring
@@ -314,7 +315,7 @@ fun ImageViewer(
                                 anim.updateBounds(lowerBound = -1f, upperBound = 1f)
                                 anim.animateTo(
                                     target,
-                                    spring(dampingRatio = 1f, stiffness = 400f),
+                                    spring(stiffness = Spring.StiffnessMediumLow),
                                     initialVelocity
                                 ) {
                                     state.pageOffset = value
