@@ -152,14 +152,14 @@ fun ImageViewerContinuous(
                                             (originalScale * 10f.pow(2 * (totalDeltaY + value) / state.height)).fastCoerceIn(
                                                 minScale, maxScale
                                             )
-                                        if (newScale != state.scale) {
-                                            val diff = 1f / newScale - 1f / originalScale
-                                            state.scale = newScale
-                                            state.offsetX = originalOffsetX + px * diff
-                                            state.scrollY =
-                                                originalScrollY - py * diff * state.height
-                                            state.invalidate()
-                                        }
+                                        val diff = 1f / newScale - 1f / originalScale
+                                        val maxOffsetX = max(0f, (newScale - 1f) / (2f * newScale))
+                                        state.scale = newScale
+                                        state.offsetX = (originalOffsetX + px * diff).fastCoerceIn(
+                                            -maxOffsetX, maxOffsetX
+                                        )
+                                        state.scrollY = originalScrollY - py * diff * state.height
+                                        state.invalidate()
                                     }
                                 }
                             } else {
