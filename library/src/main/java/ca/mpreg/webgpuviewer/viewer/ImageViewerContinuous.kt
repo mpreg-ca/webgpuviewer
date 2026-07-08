@@ -1,10 +1,11 @@
 package ca.mpreg.webgpuviewer.viewer
 
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.VectorConverter
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.exponentialDecay
-import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.AndroidExternalSurface
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -73,8 +74,45 @@ fun ImageViewerContinuous(
                                     firstDown.position.y / state.height
                                 )
                             )
+
+                            if (state.scale < minScale) {
+                                state.animationJob = scope.launch {
+                                    val startScale = state.scale
+                                    val startOffsetX = state.offsetX
+                                    animate(
+                                        0f,
+                                        1f,
+                                        animationSpec = spring(stiffness = Spring.StiffnessMediumLow)
+                                    ) { t, _ ->
+                                        state.scale = startScale + (minScale - startScale) * t
+                                        state.offsetX = startOffsetX * (1f - t)
+                                        state.invalidate()
+                                    }
+                                }
+                            } else if (state.scale > maxScale) {
+                                state.animationJob = scope.launch {
+                                    val startScale = state.scale
+                                    val startOffsetX = state.offsetX
+                                    val targetMaxOffsetX =
+                                        max(0f, (maxScale - 1f) / (2f * maxScale))
+                                    val targetOffsetX = startOffsetX.fastCoerceIn(
+                                        -targetMaxOffsetX, targetMaxOffsetX
+                                    )
+                                    animate(
+                                        0f,
+                                        1f,
+                                        animationSpec = spring(stiffness = Spring.StiffnessMediumLow)
+                                    ) { t, _ ->
+                                        state.scale = startScale + (maxScale - startScale) * t
+                                        state.offsetX =
+                                            startOffsetX + (targetOffsetX - startOffsetX) * t
+                                        state.invalidate()
+                                    }
+                                }
+                            }
                             return@awaitEachGesture
                         }
+
                         if (waitForCleanUp(secondDown.id, doubleTapTimeout, touchSlop) != null) {
                             // Double tap: toggle zoom
                             if (state.scale > minScale + 0.1f) {
@@ -82,7 +120,11 @@ fun ImageViewerContinuous(
                                 state.animationJob = scope.launch {
                                     val startScale = state.scale
                                     val startOffsetX = state.offsetX
-                                    animate(0f, 1f, animationSpec = tween(300)) { t, _ ->
+                                    animate(
+                                        0f,
+                                        1f,
+                                        animationSpec = spring(stiffness = Spring.StiffnessMediumLow)
+                                    ) { t, _ ->
                                         state.scale = startScale + (minScale - startScale) * t
                                         state.offsetX = startOffsetX * (1f - t)
                                         state.invalidate()
@@ -94,7 +136,11 @@ fun ImageViewerContinuous(
                                 val py = secondDown.position.y / state.height - 0.5f
                                 state.animationJob = scope.launch {
                                     val startScale = state.scale
-                                    animate(0f, 1f, animationSpec = tween(300)) { t, _ ->
+                                    animate(
+                                        0f,
+                                        1f,
+                                        animationSpec = spring(stiffness = Spring.StiffnessMediumLow)
+                                    ) { t, _ ->
                                         val newScale =
                                             startScale + (doubleTapScale - startScale) * t
                                         val scrollDelta =
@@ -146,8 +192,7 @@ fun ImageViewerContinuous(
                             if (abs(velocity.y) > 200 && state.scale in minScale..maxScale) {
                                 // Fling zoom
                                 state.animationJob = scope.launch {
-                                    val animation = Animatable(0f)
-                                    animation.animateDecay(velocity.y, exponentialDecay()) {
+                                    Animatable(0f).animateDecay(velocity.y, exponentialDecay()) {
                                         val newScale =
                                             (originalScale * 10f.pow(2 * (totalDeltaY + value) / state.height)).fastCoerceIn(
                                                 minScale, maxScale
@@ -173,7 +218,11 @@ fun ImageViewerContinuous(
                                     state.animationJob = scope.launch {
                                         val startScale = state.scale
                                         val startOffsetX = state.offsetX
-                                        animate(0f, 1f, animationSpec = tween(300)) { t, _ ->
+                                        animate(
+                                            0f,
+                                            1f,
+                                            animationSpec = spring(stiffness = Spring.StiffnessMediumLow)
+                                        ) { t, _ ->
                                             state.scale =
                                                 startScale + (targetScale - startScale) * t
                                             state.offsetX =
@@ -279,8 +328,7 @@ fun ImageViewerContinuous(
                             val startOffsetX = state.offsetX
                             val startScrollY = state.scrollY
                             state.animationJob = scope.launch {
-                                val animation = Animatable(0f)
-                                animation.animateDecay(zoomVelocity, exponentialDecay()) {
+                                Animatable(0f).animateDecay(zoomVelocity, exponentialDecay()) {
                                     val newScale =
                                         (startScale * exp(value)).fastCoerceIn(minScale, maxScale)
                                     val diff = 1f / newScale - 1f / startScale
@@ -298,7 +346,11 @@ fun ImageViewerContinuous(
                             state.animationJob = scope.launch {
                                 val startScale = state.scale
                                 val startOffsetX = state.offsetX
-                                animate(0f, 1f, animationSpec = tween(200)) { t, _ ->
+                                animate(
+                                    0f,
+                                    1f,
+                                    animationSpec = spring(stiffness = Spring.StiffnessMediumLow)
+                                ) { t, _ ->
                                     state.scale = startScale + (minScale - startScale) * t
                                     state.offsetX = startOffsetX * (1f - t)
                                     state.invalidate()
@@ -312,7 +364,11 @@ fun ImageViewerContinuous(
                                 val targetMaxOffsetX = max(0f, (maxScale - 1f) / (2f * maxScale))
                                 val targetOffsetX =
                                     startOffsetX.fastCoerceIn(-targetMaxOffsetX, targetMaxOffsetX)
-                                animate(0f, 1f, animationSpec = tween(200)) { t, _ ->
+                                animate(
+                                    0f,
+                                    1f,
+                                    animationSpec = spring(stiffness = Spring.StiffnessMediumLow)
+                                ) { t, _ ->
                                     state.scale = startScale + (maxScale - startScale) * t
                                     state.offsetX =
                                         startOffsetX + (targetOffsetX - startOffsetX) * t
@@ -347,7 +403,11 @@ fun ImageViewerContinuous(
                                 if (clampedX != state.offsetX) {
                                     state.animationJob = scope.launch {
                                         val startX = state.offsetX
-                                        animate(0f, 1f, animationSpec = tween(200)) { t, _ ->
+                                        animate(
+                                            0f,
+                                            1f,
+                                            animationSpec = spring(stiffness = Spring.StiffnessMediumLow)
+                                        ) { t, _ ->
                                             state.offsetX = startX + (clampedX - startX) * t
                                             state.invalidate()
                                         }

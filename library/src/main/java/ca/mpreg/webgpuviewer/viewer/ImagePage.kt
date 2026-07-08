@@ -2,8 +2,9 @@ package ca.mpreg.webgpuviewer.viewer
 
 import android.content.res.Resources
 import android.graphics.Rect
+import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animate
-import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.spring
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.util.fastCoerceIn
 import ca.mpreg.webgpuviewer.orZero
@@ -14,8 +15,7 @@ import kotlinx.coroutines.launch
 import kotlin.math.max
 
 open class ImagePage(val image: Image? = null) {
-    class Dummy(override val width: Int, override val height: Int) :
-        ImagePage(null)
+    class Dummy(override val width: Int, override val height: Int) : ImagePage(null)
 
     var scale: Float = 1f
     var x: Float = 0f
@@ -124,7 +124,9 @@ open class ImagePage(val image: Image? = null) {
         }
 
         animationJob = scope?.launch {
-            animate(0f, 1f, animationSpec = tween(300)) { value, _ ->
+            animate(
+                0f, 1f, animationSpec = spring(stiffness = Spring.StiffnessMediumLow)
+            ) { value, _ ->
                 val scale = startScale * (1 - value) + targetScale * value
                 val c = if (startScale != targetScale) {
                     val diff = 1 / scale - 1 / startScale

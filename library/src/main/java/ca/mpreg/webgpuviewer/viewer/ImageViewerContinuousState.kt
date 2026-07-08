@@ -1,8 +1,12 @@
 package ca.mpreg.webgpuviewer.viewer
 
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.spring
 import androidx.webgpu.GPUCommandEncoder
 import androidx.webgpu.GPUTexture
 import ca.mpreg.webgpuviewer.transition.TransitionBasic
+import kotlinx.coroutines.launch
 
 class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
     var scale = 1f
@@ -49,6 +53,20 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
 
             if (getPage(1) == null) {
                 scrollY = 0f
+            }
+        }
+    }
+
+    fun animateScroll(deltaPixels: Float) {
+        animationJob?.cancel()
+        animationJob = scope?.launch {
+            var lastValue = 0f
+            animate(
+                0f, deltaPixels, animationSpec = spring(stiffness = Spring.StiffnessMediumLow)
+            ) { value, _ ->
+                scrollBy(value - lastValue)
+                lastValue = value
+                invalidate()
             }
         }
     }

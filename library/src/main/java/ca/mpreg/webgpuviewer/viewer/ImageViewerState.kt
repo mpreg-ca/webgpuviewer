@@ -2,6 +2,9 @@ package ca.mpreg.webgpuviewer.viewer
 
 import android.content.res.Resources
 import android.view.Surface
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.util.fastCoerceAtLeast
 import androidx.compose.ui.util.fastCoerceAtMost
@@ -75,10 +78,24 @@ open class ImageViewerState(var isVertical: Boolean = false) {
             }
         }
 
-    fun setPageOffsetDirect(value: Float) {
+    private fun setPageOffsetDirect(value: Float) {
         suppressPageChange = true
         pageOffset = value
         suppressPageChange = false
+    }
+
+    fun animatePageTurn(direction: Int) {
+        animationJob?.cancel()
+        animationJob = scope?.launch {
+            setPageOffsetDirect(direction.toFloat())
+            invalidate()
+            Animatable(direction.toFloat()).animateTo(
+                0f, animationSpec = spring(stiffness = Spring.StiffnessMediumLow)
+            ) {
+                setPageOffsetDirect(value)
+                invalidate()
+            }
+        }
     }
 
     val havePrev get() = getPage(-1) != null

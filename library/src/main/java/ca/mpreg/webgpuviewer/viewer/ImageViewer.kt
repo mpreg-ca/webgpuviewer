@@ -70,8 +70,23 @@ fun ImageViewer(
                                     firstDown.position.y / state.height
                                 )
                             )
+
+                            if (state.pageOffset != 0f) {
+                                state.animationJob = scope.launch {
+                                    Animatable(state.pageOffset).animateTo(
+                                        0f,
+                                        animationSpec = spring(stiffness = Spring.StiffnessMediumLow)
+                                    ) {
+                                        state.pageOffset = value
+                                        state.invalidate()
+                                    }
+                                }
+                            } else {
+                                page.animateTo(Offset(0.5f, 0.5f))
+                            }
                             return@awaitEachGesture
                         }
+
                         if (waitForCleanUp(secondDown.id, doubleTapTimeout, touchSlop) != null) {
                             // double tap
                             if (page.atHome) {
@@ -135,9 +150,7 @@ fun ImageViewer(
                             if (abs(velocity.y) > 200 && page.scale > page.homeScale && page.scale < page.maxScale) {
                                 // fling zoom
                                 state.animationJob = scope.launch {
-                                    val animation = Animatable(0f)
-                                    animation.snapTo(0f)
-                                    animation.animateDecay(velocity.y, exponentialDecay()) {
+                                    Animatable(0f).animateDecay(velocity.y, exponentialDecay()) {
                                         val px = secondDown.position.x / state.width - 0.5f
                                         val py = secondDown.position.y / state.height - 0.5f
 
@@ -315,8 +328,8 @@ fun ImageViewer(
                                 anim.updateBounds(lowerBound = -1f, upperBound = 1f)
                                 anim.animateTo(
                                     target,
-                                    spring(stiffness = Spring.StiffnessMediumLow),
-                                    initialVelocity
+                                    initialVelocity = initialVelocity,
+                                    animationSpec = spring(stiffness = Spring.StiffnessMediumLow)
                                 ) {
                                     state.pageOffset = value
                                     state.invalidate()
