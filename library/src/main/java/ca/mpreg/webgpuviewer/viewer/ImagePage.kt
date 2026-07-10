@@ -54,13 +54,15 @@ open class ImagePage(val image: Image? = null) {
 
     var parent: ImageViewerState? = null
 
-    val minScale get() = parent?.getMinScale(width, height) ?: 1f
+    var minScale = -1f
+        get() = if (field > 0) field else parent?.getMinScale(width, height) ?: 1f
 
     var dpi = Resources.getSystem().displayMetrics.densityDpi / 100f
 
     val doubleTapScale get() = max(dpi, minScale * 2)
 
-    val maxScale get() = max(doubleTapScale * 2, 2f)
+    var maxScale = -1f
+        get() = if (field > 0) field else max(doubleTapScale * 2, 2f)
 
     fun setPos(x: Float = this.x, y: Float = this.y, scale: Float = this.scale) {
         if (this.x == x && this.y == y && this.scale == scale) {
