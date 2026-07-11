@@ -78,12 +78,7 @@ class Mipmap(
     }
 
     constructor(texture: GPUTexture, scale: Float, tilesize: Int) : this(
-        texture.width,
-        texture.height,
-        scale,
-        1,
-        1,
-        tilesize
+        texture.width, texture.height, scale, 1, 1, tilesize
     ) {
         textures.add(texture)
         repeat(4) {
@@ -92,7 +87,12 @@ class Mipmap(
     }
 
     protected fun finalize() {
-        textures.forEach { it.destroy() }
+        cleanup()
+    }
+
+    fun cleanup() {
+        textures.forEach { tex -> tex.destroy() }
+        textures.clear()
     }
 
     fun update(pixels: ByteBuffer) {
@@ -105,7 +105,7 @@ class Mipmap(
                 val x = c * tilesize
                 val tileWidth = min((c + 1) * tilesize, width) - (c * tilesize)
 
-                Log.i("Renderer", "Update tile $c $r")
+                Log.d("Renderer", "Update tile $c $r")
                 val size = GPUExtent3D(tileWidth, tileHeight)
 
                 device.queue.writeTexture(

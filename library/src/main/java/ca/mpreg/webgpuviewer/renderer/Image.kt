@@ -41,7 +41,7 @@ class Image private constructor(
 
                     var scale = 1f
 
-                    Log.i("Renderer", "Creating mipmaps")
+                    Log.d("Renderer", "Creating mipmaps")
 
                     var textureWidth = width
                     var textureHeight = height
@@ -50,7 +50,7 @@ class Image private constructor(
                         scale /= 2
                         val newWidth = floor(width * scale).toInt()
                         val newHeight = floor(height * scale).toInt()
-                        Log.i(
+                        Log.d(
                             "Renderer", "Create mipmap using CPU ${scale} ${newWidth} ${newHeight}"
                         )
                         // TODO: return mutex
@@ -68,7 +68,7 @@ class Image private constructor(
                         scale /= 2
                         val newWidth = floor(width * scale).toInt()
                         val newHeight = floor(height * scale).toInt()
-                        Log.i(
+                        Log.d(
                             "Renderer",
                             "Create mipmap using shader ${scale} ${newWidth} ${newHeight}"
                         )
@@ -88,7 +88,7 @@ class Image private constructor(
                         mipmaps.add(Mipmap(texture, scale, tilesize))
                     }
 
-                    Log.i("Renderer", "Finished create mipmaps")
+                    Log.d("Renderer", "Finished create mipmaps")
                 }
             }
         }
@@ -104,11 +104,13 @@ class Image private constructor(
 
     val mipmaps: MutableList<Mipmap> = mutableListOf()
 
-    fun update(pixels: ByteBuffer) {
-        mipmaps[0].update(pixels)
+    protected fun finalize() {
+        cleanup()
     }
 
-    protected fun finalize() {
+    fun cleanup() {
+        mipmaps.forEach { it.cleanup() }
+        mipmaps.clear()
         buffer.close()
     }
 

@@ -374,8 +374,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         y: Float,
         scale: Float
     ) {
-        page.image ?: return
-        render(page.image, encoder, dst, page.x + x, page.y + y, page.scale * scale)
+        val image = page.image ?: return
+        render(image, encoder, dst, page.x + x, page.y + y, page.scale * scale)
     }
 
     internal fun render(

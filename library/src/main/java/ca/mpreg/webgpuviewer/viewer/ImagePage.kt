@@ -11,12 +11,15 @@ import androidx.compose.ui.util.fastCoerceIn
 import ca.mpreg.webgpuviewer.orZero
 import ca.mpreg.webgpuviewer.renderer.Image
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.nio.ByteBuffer
 import kotlin.math.max
+import kotlin.time.Duration.Companion.milliseconds
 
-open class ImagePage(val image: Image? = null) {
+open class ImagePage(var image: Image? = null) {
     class Dummy(override val width: Int, override val height: Int) : ImagePage(null)
 
     companion object {
@@ -38,6 +41,37 @@ open class ImagePage(val image: Image? = null) {
     var y: Float = 0f
 
     var animationJob: Job? = null
+    var animationLoop: Job? = null
+    var pages: List<Pair<Image, Int>>? = null
+
+    protected fun finalize() {
+        cleanup()
+    }
+
+    fun cleanup() {
+        animationLoop?.cancel()
+        animationJob?.cancel()
+        image?.cleanup()
+        image = null
+        pages?.forEach { it.first.cleanup() }
+        pages = null
+    }
+
+    fun startAnimationLoop(pages: List<Pair<Image, Int>>, invalidate: () -> Unit) {
+        animationLoop?.cancel()
+        this.pages = pages
+        animationLoop = CoroutineScope(Dispatchers.Default).launch {
+            var frame = 0
+            while (true) {
+                this@ImagePage.pages?.get(frame)?.let { image ->
+                    this@ImagePage.image = image.first
+                    invalidate()
+                    delay(image.second.coerceAtLeast(0).milliseconds)
+                }
+                frame = (frame + 1) % (this@ImagePage.pages?.size ?: 1)
+            }
+        }
+    }
 
     open val width get() = image?.width ?: 0
     open val height get() = image?.height ?: 0
