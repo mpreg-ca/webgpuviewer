@@ -134,7 +134,7 @@ class Trim {
                     top.add(find(mipmap.textures[col], pipelineTop, r, g, b, threshold))
                     bottom.add(
                         find(
-                            mipmap.textures[col + (mipmap.tilesCols - 1) * mipmap.tilesRows],
+                            mipmap.textures[(mipmap.tilesRows - 1) * mipmap.tilesCols + col],
                             pipelineBottom,
                             r,
                             g,

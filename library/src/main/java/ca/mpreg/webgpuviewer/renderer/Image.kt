@@ -24,7 +24,9 @@ class Image private constructor(
     val width: Int, val height: Int, var x: Float = 0f, var y: Float = 0f
 ) {
     companion object {
-        suspend operator fun invoke(pixels: ByteBuffer, width: Int, height: Int): Image {
+        suspend operator fun invoke(
+            pixels: ByteBuffer, width: Int, height: Int, createMipMaps: Boolean = true
+        ): Image {
             return Image(width, height).apply {
                 val tilesize = 4096
                 val maxWidth = 4096
@@ -34,6 +36,8 @@ class Image private constructor(
 
                 WebGpuRenderer.withContext { device ->
                     mipmaps.add(Mipmap(pixels, width, height, 1f, tilesize))
+
+                    if (!createMipMaps) return@withContext
 
                     var scale = 1f
 

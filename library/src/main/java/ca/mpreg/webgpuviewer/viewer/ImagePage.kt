@@ -1,6 +1,7 @@
 package ca.mpreg.webgpuviewer.viewer
 
 import android.content.res.Resources
+import android.graphics.Bitmap
 import android.graphics.Rect
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animate
@@ -12,10 +13,25 @@ import ca.mpreg.webgpuviewer.renderer.Image
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import java.nio.ByteBuffer
 import kotlin.math.max
 
 open class ImagePage(val image: Image? = null) {
     class Dummy(override val width: Int, override val height: Int) : ImagePage(null)
+
+    companion object {
+        suspend operator fun invoke(
+            pixels: ByteBuffer, width: Int, height: Int, createMipMaps: Boolean = true
+        ): ImagePage {
+            return ImagePage(Image(pixels, width, height, createMipMaps))
+        }
+
+        suspend operator fun invoke(bitmap: Bitmap, createMipMaps: Boolean = true): ImagePage {
+            val buf = ByteBuffer.allocateDirect(bitmap.byteCount)
+            bitmap.copyPixelsToBuffer(buf)
+            return ImagePage(buf, bitmap.width, bitmap.height, createMipMaps)
+        }
+    }
 
     var scale: Float = 1f
     var x: Float = 0f
@@ -34,18 +50,18 @@ open class ImagePage(val image: Image? = null) {
         get() {
             val trim = trim ?: return 0f
             val parent = parent ?: return 0f
-            val left = -((trim.left - 0.5f * width) / trim.width() + 0.5f)
+            val center = (trim.left + trim.right) / 2f
             val maxX = parent.maxX(width, homeScale)
-            return (left / homeScale).fastCoerceIn(-maxX, maxX)
+            return ((0.5f * width - center) / parent.width).fastCoerceIn(-maxX, maxX)
         }
 
     val homeY: Float
         get() {
             val trim = trim ?: return 0f
             val parent = parent ?: return 0f
-            val top = -((trim.top - 0.5f * height) / trim.height() + 0.5f)
+            val center = (trim.top + trim.bottom) / 2f
             val maxY = parent.maxY(height, homeScale)
-            return (top / homeScale).fastCoerceIn(-maxY, maxY)
+            return ((0.5f * height - center) / parent.height).fastCoerceIn(-maxY, maxY)
         }
 
     val atHome get() = x == homeX && y == homeY && scale == homeScale
