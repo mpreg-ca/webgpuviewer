@@ -57,20 +57,13 @@ fun ImageViewer(
                     val wasScrolling = state.pageOffset != 0f
                     state.animationJob?.cancel()
                     val page = state.getPage(0) ?: return@awaitEachGesture
-                    if (!wasScrolling) page.animateTo(Offset(0.5f, 0.5f))
+                    page.animationJob?.cancel()
 
                     view.parent?.requestDisallowInterceptTouchEvent(true)
 
                     if (waitForCleanUp(firstDown.id, doubleTapTimeout, touchSlop) != null) {
                         val secondDown = waitForDown(doubleTapTimeout)
                         if (secondDown == null) {
-                            state.onTap?.invoke(
-                                Offset(
-                                    firstDown.position.x / state.width,
-                                    firstDown.position.y / state.height
-                                )
-                            )
-
                             if (state.pageOffset != 0f) {
                                 state.animationJob = scope.launch {
                                     Animatable(state.pageOffset).animateTo(
@@ -81,9 +74,14 @@ fun ImageViewer(
                                         state.invalidate()
                                     }
                                 }
-                            } else {
-                                page.animateTo(Offset(0.5f, 0.5f))
                             }
+                            page.animateTo(Offset(0.5f, 0.5f))
+                            state.onTap?.invoke(
+                                Offset(
+                                    firstDown.position.x / state.width,
+                                    firstDown.position.y / state.height
+                                )
+                            )
                             return@awaitEachGesture
                         }
 
@@ -182,6 +180,8 @@ fun ImageViewer(
                             }
                         }
                     } else {
+                        if (!wasScrolling) page.animateTo(Offset(0.5f, 0.5f))
+
                         var lastMoveTime = firstDown.uptimeMillis
                         var lastEventTime: Long = firstDown.uptimeMillis
                         var acc = Offset.Zero
