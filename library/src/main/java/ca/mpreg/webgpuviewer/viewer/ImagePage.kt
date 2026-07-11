@@ -10,6 +10,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.util.fastCoerceIn
 import ca.mpreg.webgpuviewer.orZero
 import ca.mpreg.webgpuviewer.renderer.Image
+import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -44,17 +45,17 @@ open class ImagePage(var image: Image? = null) {
     var animationLoop: Job? = null
     var pages: List<Pair<Image, Int>>? = null
 
-    protected fun finalize() {
-        cleanup()
-    }
-
     fun cleanup() {
         animationLoop?.cancel()
         animationJob?.cancel()
-        image?.cleanup()
-        image = null
-        pages?.forEach { it.first.cleanup() }
-        pages = null
+        CoroutineScope(Dispatchers.Default).launch {
+            WebGpuRenderer.withContext {
+                image?.cleanup()
+                image = null
+                pages?.forEach { it.first.cleanup() }
+                pages = null
+            }
+        }
     }
 
     fun startAnimationLoop(pages: List<Pair<Image, Int>>, invalidate: () -> Unit) {

@@ -104,11 +104,7 @@ class Image private constructor(
 
     val mipmaps: MutableList<Mipmap> = mutableListOf()
 
-    protected fun finalize() {
-        cleanup()
-    }
-
-    fun cleanup() {
+    internal fun cleanup() {
         mipmaps.forEach { it.cleanup() }
         mipmaps.clear()
         buffer.close()

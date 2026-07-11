@@ -86,11 +86,7 @@ class Mipmap(
         }
     }
 
-    protected fun finalize() {
-        cleanup()
-    }
-
-    fun cleanup() {
+    internal fun cleanup() {
         textures.forEach { tex -> tex.destroy() }
         textures.clear()
     }

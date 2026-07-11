@@ -29,6 +29,7 @@ import androidx.webgpu.WebGpuRuntimeException
 import androidx.webgpu.helper.Util.windowFromSurface
 import androidx.webgpu.helper.initLibrary
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
@@ -71,9 +72,8 @@ class WebGpuRenderer {
         @JvmStatic
         suspend fun <R> withContext(block: suspend CoroutineScope.(GPUDevice) -> R): R {
             return withContext(dispatcher) {
-                val scope = this
                 mutex.withLock {
-                    block(scope, device)
+                    block(this, device)
                 }
             }
         }
