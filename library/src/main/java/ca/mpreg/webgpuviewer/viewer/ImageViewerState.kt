@@ -152,7 +152,7 @@ open class ImageViewerState(var isVertical: Boolean = false) {
     }
 
     protected open suspend fun render(encoder: GPUCommandEncoder, texture: GPUTexture) {
-        val currentPage = getPage(0) ?: return@render
+        val currentPage = getPage(0) ?: return
 
         if (pageOffset == 0f) {
             TransitionBasic.render(currentPage, encoder, texture, 0f, 0f, 1f)

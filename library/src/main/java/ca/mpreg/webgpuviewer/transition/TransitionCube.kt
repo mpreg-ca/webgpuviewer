@@ -421,7 +421,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                         view = dst.createView(),
                         loadOp = LoadOp.Load,
                         storeOp = StoreOp.Store,
-                        clearValue = GPUColor(0.0, 0.0, 0.0, 1.0)
+                        clearValue = GPUColor(0.0, 0.0, 0.0, 0.0)
                     )
                 )
             )

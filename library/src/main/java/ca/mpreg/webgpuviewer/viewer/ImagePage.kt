@@ -8,6 +8,7 @@ import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.spring
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.util.fastCoerceIn
+import androidx.webgpu.GPUTexture
 import ca.mpreg.webgpuviewer.orZero
 import ca.mpreg.webgpuviewer.renderer.Image
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
@@ -20,8 +21,18 @@ import java.nio.ByteBuffer
 import kotlin.math.max
 import kotlin.time.Duration.Companion.milliseconds
 
-open class ImagePage(var image: Image? = null) {
+open class ImagePage(var image: Image?) {
     class Dummy(override val width: Int, override val height: Int) : ImagePage(null)
+
+    class Draw private constructor(image: Image) : ImagePage(image) {
+        companion object {
+            suspend operator fun invoke(width: Int, height: Int): Draw {
+                return Draw(Image(width, height))
+            }
+        }
+
+        val texture: GPUTexture? get() = image?.mipmaps?.firstOrNull()?.textures?.firstOrNull()
+    }
 
     companion object {
         suspend operator fun invoke(
@@ -35,6 +46,10 @@ open class ImagePage(var image: Image? = null) {
             bitmap.copyPixelsToBuffer(buf)
             return ImagePage(buf, bitmap.width, bitmap.height, createMipMaps)
         }
+
+        suspend operator fun invoke(width: Int, height: Int): ImagePage {
+            return Draw(width, height)
+        }
     }
 
     var scale: Float = 1f
@@ -45,7 +60,10 @@ open class ImagePage(var image: Image? = null) {
     var animationLoop: Job? = null
     var pages: List<Pair<Image, Int>>? = null
 
+    var destroyed = false
+
     fun cleanup() {
+        destroyed = true
         animationLoop?.cancel()
         animationJob?.cancel()
         CoroutineScope(Dispatchers.Default).launch {

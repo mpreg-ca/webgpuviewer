@@ -81,9 +81,20 @@ class Mipmap(
         texture.width, texture.height, scale, 1, 1, tilesize
     ) {
         textures.add(texture)
-        repeat(4) {
-            tiles.add(texture)
-        }
+        repeat(4) { tiles.add(texture) }
+    }
+
+    constructor(width: Int, height: Int) : this(width, height, 1f, 1, 1, 4096) {
+        val texture = device.createTexture(
+            GPUTextureDescriptor(
+                size = GPUExtent3D(width, height),
+                format = TextureFormat.RGBA8Unorm,
+                usage = TextureUsage.TextureBinding or TextureUsage.CopyDst or TextureUsage.RenderAttachment or TextureUsage.StorageBinding,
+            )
+        )
+
+        textures.add(texture)
+        repeat(4) { tiles.add(texture) }
     }
 
     internal fun cleanup() {

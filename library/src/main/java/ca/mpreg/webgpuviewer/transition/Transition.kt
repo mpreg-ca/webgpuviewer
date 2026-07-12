@@ -1,6 +1,10 @@
 package ca.mpreg.webgpuviewer.transition
 
 import androidx.compose.ui.geometry.Offset
+import androidx.webgpu.BlendFactor
+import androidx.webgpu.BlendOperation
+import androidx.webgpu.GPUBlendComponent
+import androidx.webgpu.GPUBlendState
 import androidx.webgpu.GPUColorTargetState
 import androidx.webgpu.GPUCommandEncoder
 import androidx.webgpu.GPUFragmentState
@@ -30,9 +34,21 @@ abstract class Transition {
             GPURenderPipelineDescriptor(
                 vertex = GPUVertexState(shaderModule, entryPoint = "vs_main"),
                 fragment = GPUFragmentState(
-                    shaderModule,
-                    entryPoint = "fs_main",
-                    targets = arrayOf(GPUColorTargetState(format = TextureFormat.RGBA8Unorm))
+                    shaderModule, entryPoint = "fs_main", targets = arrayOf(
+                        GPUColorTargetState(
+                            format = TextureFormat.RGBA8Unorm, blend = GPUBlendState(
+                                color = GPUBlendComponent(
+                                    srcFactor = BlendFactor.SrcAlpha,
+                                    dstFactor = BlendFactor.OneMinusSrcAlpha,
+                                    operation = BlendOperation.Add
+                                ), alpha = GPUBlendComponent(
+                                    srcFactor = BlendFactor.One,
+                                    dstFactor = BlendFactor.OneMinusSrcAlpha,
+                                    operation = BlendOperation.Add
+                                )
+                            )
+                        )
+                    )
                 ),
                 primitive = GPUPrimitiveState(topology = TriangleList),
             )

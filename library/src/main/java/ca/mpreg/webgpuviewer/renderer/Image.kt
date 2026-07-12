@@ -92,6 +92,14 @@ class Image private constructor(
                 }
             }
         }
+
+        suspend operator fun invoke(width: Int, height: Int): Image {
+            return Image(width, height).apply {
+                WebGpuRenderer.withContext { _ ->
+                    mipmaps.add(Mipmap(width, height))
+                }
+            }
+        }
     }
 
     val buffer: GPUBuffer by lazy {
