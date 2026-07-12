@@ -121,8 +121,8 @@ class Image private constructor(
 
         val mipmap = mipmaps[level]
 
-        val x = x + this.x / dst.width
-        val y = y + this.y / dst.height
+        val x = x + this.x / dst.width + WebGpuRenderer.offsetX
+        val y = y + this.y / dst.height + WebGpuRenderer.offsetY
 
         val vx = round(-x * dst.width + mipmap.width / 2).toInt()
         val vy = round(-y * dst.height + mipmap.height / 2).toInt()

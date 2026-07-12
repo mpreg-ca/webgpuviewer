@@ -45,6 +45,9 @@ class WebGpuRenderer {
         var device: GPUDevice
         val mutex = Mutex()
 
+        var offsetX: Float = 0f
+        var offsetY: Float = 0f
+
         val dispatcher = Executors.newSingleThreadExecutor { runnable ->
             Thread(runnable, "WebGPU-Render-Thread")
         }.asCoroutineDispatcher()
