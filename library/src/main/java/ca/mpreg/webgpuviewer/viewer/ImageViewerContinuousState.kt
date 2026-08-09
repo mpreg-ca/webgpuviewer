@@ -78,7 +78,7 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
         val offsetX: Float
     )
 
-    override fun captureRenderState(): Any? {
+    override fun captureRenderState(): Any {
         val screenH = height.toFloat()
         val screenW = width.toFloat()
 
@@ -124,9 +124,5 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
                 )
             }
         }
-    }
-
-    override suspend fun render(encoder: GPUCommandEncoder, texture: GPUTexture) {
-        // Legacy - not used when captureRenderState is overridden
     }
 }

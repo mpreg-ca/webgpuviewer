@@ -97,7 +97,36 @@ open class ImagePage(var image: Image?) {
 
     var trim: Rect? = null
 
-    val homeScale get() = trim?.let { parent?.getMinScale(it.width(), it.height()) } ?: minScale
+    val homeScale: Float
+        get() {
+            val parent = parent ?: return minScale
+            val baseScale = trim?.let { parent.getMinScale(it.width(), it.height()) } ?: minScale
+            
+            // If cutout avoidance is enabled, reduce scale if image doesn't fit
+            val cutoutPx = parent.cutoutTopPx
+            if (cutoutPx > 0f) {
+                val imageHeight = (trim?.height() ?: height).toFloat()
+                
+                if (parent.alwaysAvoidCutout) {
+                    // Always use reduced available height
+                    val availableHeight = parent.height - cutoutPx
+                    val maxScaleForCutout = availableHeight / imageHeight
+                    return minOf(baseScale, maxScaleForCutout).coerceAtLeast(0.01f)
+                } else {
+                    // Only reduce scale if image at baseScale would overlap cutout
+                    val imageHeightOnScreen = imageHeight * baseScale
+                    val centeredTopY = (parent.height - imageHeightOnScreen) / 2f
+                    if (centeredTopY < cutoutPx) {
+                        // Scale down just enough so shifting can clear the cutout
+                        val availableHeight = parent.height - cutoutPx
+                        val maxScaleForCutout = availableHeight / imageHeight
+                        return minOf(baseScale, maxScaleForCutout).coerceAtLeast(0.01f)
+                    }
+                }
+            }
+            
+            return baseScale
+        }
 
     val homeX: Float
         get() {
@@ -111,31 +140,36 @@ open class ImagePage(var image: Image?) {
     val homeY: Float
         get() {
             val parent = parent ?: return 0f
+            val minY = parent.minY(height, homeScale)
             val maxY = parent.maxY(height, homeScale)
             
             val trim = trim
-            val baseY = if (trim != null) {
+            var baseY = if (trim != null) {
                 val center = (trim.top + trim.bottom) / 2f
                 (0.5f * height - center) / parent.height
             } else {
                 0f
             }
             
-            // If cutout avoidance is enabled, check if image top would be in cutout area
+            // If cutout avoidance is enabled, shift image down
             val cutoutPx = parent.cutoutTopPx
-            if (cutoutPx > 0f) {
-                // Calculate where the top of the image would be at home position
+            if (cutoutPx > 0f && parent.height > 0) {
                 val imageHeightOnScreen = height * homeScale
-                val imageTopY = (parent.height - imageHeightOnScreen) / 2f - baseY * parent.height * homeScale
+                val centeredTopY = (parent.height - imageHeightOnScreen) / 2f
                 
-                if (imageTopY < cutoutPx) {
-                    // Shift down to clear the cutout
-                    val shiftNeeded = (cutoutPx - imageTopY) / parent.height / homeScale
-                    return (baseY - shiftNeeded).fastCoerceIn(-maxY, maxY)
+                if (parent.alwaysAvoidCutout) {
+                    // Always center in available space below cutout
+                    val cutoutOffset = cutoutPx / 2f / parent.height / homeScale
+                    baseY += cutoutOffset
+                } else if (centeredTopY < cutoutPx) {
+                    // Only shift enough to clear the cutout
+                    val overlap = cutoutPx - centeredTopY
+                    val cutoutOffset = overlap / parent.height / homeScale
+                    baseY += cutoutOffset
                 }
             }
             
-            return baseY.fastCoerceIn(-maxY, maxY)
+            return baseY.fastCoerceIn(minY, maxY)
         }
 
     val atHome get() = x == homeX && y == homeY && scale == homeScale
@@ -184,53 +218,45 @@ open class ImagePage(var image: Image?) {
         val startX = x
         val startY = y
 
+        @Suppress("NAME_SHADOWING")
         val targetScale = targetScale.fastCoerceIn(minScale, maxScale)
 
         val maxX = parent?.maxX(width, targetScale) ?: 0f
+        val minY = parent?.minY(height, targetScale) ?: 0f
         val maxY = parent?.maxY(height, targetScale) ?: 0f
 
-        val diffEnd = if (targetScale != startScale) {
-            1 / targetScale - 1 / scale
-        } else {
-            1f
-        }
+        val scaleChanging = targetScale != startScale
+        val diffEnd = if (scaleChanging) 1 / targetScale - 1 / startScale else 1f
 
-        val endX = if (origin != null) {
-            if (targetScale != startScale) {
-                (startX + (origin.x - 0.5f) * diffEnd).fastCoerceIn(-maxX, maxX)
-            } else {
-                x.fastCoerceIn(-maxX, maxX)
-            }
+        val endX: Float
+        val endY: Float
+        
+        if (origin != null && scaleChanging) {
+            endX = (startX + (origin.x - 0.5f) * diffEnd).fastCoerceIn(-maxX, maxX)
+            endY = (startY + (origin.y - 0.5f) * diffEnd).fastCoerceIn(minY, maxY)
+        } else if (origin != null) {
+            endX = x.fastCoerceIn(-maxX, maxX)
+            endY = y.fastCoerceIn(minY, maxY)
         } else {
-            targetX
-        }
-
-        val endY = if (origin != null) {
-            if (targetScale != startScale) {
-                (startY + (origin.y - 0.5f) * diffEnd).fastCoerceIn(-maxY, maxY)
-            } else {
-                y.fastCoerceIn(-maxY, maxY)
-            }
-        } else {
-            targetY
+            endX = targetX
+            endY = targetY
         }
 
         animationJob = scope?.launch {
             animate(
                 0f, 1f, animationSpec = spring(stiffness = Spring.StiffnessMediumLow)
             ) { value, _ ->
-                val scale = startScale * (1 - value) + targetScale * value
-                val c = if (startScale != targetScale) {
-                    val diff = 1 / scale - 1 / startScale
-                    (diff / diffEnd).fastCoerceIn(0f, 1f)
+                val currentScale = startScale + (targetScale - startScale) * value
+                val c = if (scaleChanging) {
+                    ((1 / currentScale - 1 / startScale) / diffEnd).fastCoerceIn(0f, 1f)
                 } else {
                     value
                 }
 
                 setPos(
-                    (startX * (1 - c) + endX * c).orZero(),
-                    (startY * (1 - c) + endY * c).orZero(),
-                    scale
+                    (startX + (endX - startX) * c).orZero(),
+                    (startY + (endY - startY) * c).orZero(),
+                    currentScale
                 )
             }
         }

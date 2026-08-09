@@ -118,14 +118,8 @@ class WebGpuRenderer {
         }
     }
 
+    /** Render - caller must already be on dispatcher thread */
     suspend fun render(fn: suspend (GPUCommandEncoder, GPUTexture) -> Unit) {
-        withContext(dispatcher) {
-            renderDirect(fn)
-        }
-    }
-
-    /** Render without thread switching - caller must already be on dispatcher thread */
-    suspend fun renderDirect(fn: suspend (GPUCommandEncoder, GPUTexture) -> Unit) {
         val surface = surface ?: return
 
         mutex.withLock {

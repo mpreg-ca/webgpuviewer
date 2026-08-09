@@ -37,8 +37,21 @@ open class ImageViewerState(var isVertical: Boolean = false) {
 
     var scope: CoroutineScope? = null
 
-    /** Top padding in pixels to avoid display cutout. Set from WindowInsets.displayCutout. */
+    /** Top padding in pixels to avoid display cutout. Set automatically by ImageViewer when avoidCutout is true. */
     var cutoutTopPx: Float = 0f
+        set(value) {
+            if (field != value) {
+                field = value
+                // Move current page to new home position when cutout changes
+                getPage(0)?.home()
+            }
+        }
+    
+    /** When true, images will be positioned/scaled to avoid the display cutout. */
+    var avoidCutout: Boolean = false
+    
+    /** When true, always shift images below cutout. When false, only shift if image would overlap cutout. */
+    var alwaysAvoidCutout: Boolean = false
 
     fun getMinScale(width: Int, height: Int): Float {
         val ratioX = this.width.toFloat() / width.toFloat()
@@ -50,8 +63,30 @@ open class ImageViewerState(var isVertical: Boolean = false) {
         return max(0f, (width.toFloat() / this.width - 1 / scale) / 2)
     }
 
+    fun minY(height: Int, scale: Float): Float {
+        val base = -max(0f, (height.toFloat() / this.height - 1 / scale) / 2)
+        return base
+    }
+
     fun maxY(height: Int, scale: Float): Float {
-        return max(0f, (height.toFloat() / this.height - 1 / scale) / 2)
+        val base = max(0f, (height.toFloat() / this.height - 1 / scale) / 2)
+        if (cutoutTopPx > 0f) {
+            if (alwaysAvoidCutout) {
+                // Allow full cutout offset for centering below cutout
+                val cutoutOffset = cutoutTopPx / this.height / scale
+                return base + cutoutOffset
+            }
+            // Only add offset if image would overlap cutout
+            val imageHeightOnScreen = height * scale
+            val centeredTopY = (this.height - imageHeightOnScreen) / 2f
+            if (centeredTopY < cutoutTopPx) {
+                // Only add enough to clear the cutout
+                val overlap = cutoutTopPx - centeredTopY
+                val cutoutOffset = overlap / this.height / scale
+                return base + cutoutOffset
+            }
+        }
+        return base
     }
 
     private var suppressPageChange = false
@@ -151,7 +186,7 @@ open class ImageViewerState(var isVertical: Boolean = false) {
             val snapshot = captureRenderState() ?: return@collectLatest
             // Now render on GPU thread with captured state
             withContext(WebGpuRenderer.dispatcher) {
-                renderer.renderDirect { encoder, texture ->
+                renderer.render { encoder, texture ->
                     renderSnapshot(encoder, texture, snapshot)
                 }
             }
@@ -180,47 +215,10 @@ open class ImageViewerState(var isVertical: Boolean = false) {
     
     protected open suspend fun renderSnapshot(encoder: GPUCommandEncoder, texture: GPUTexture, snapshot: Any) {
         val s = snapshot as RenderSnapshot
-        if (s.offset == 0f) {
+        if (s.adjacentPage != null && s.offset != 0f) {
+            s.transition.render(s.currentPage, s.adjacentPage, encoder, texture, s.offset, s.firstPos, s.currentPos)
+        } else {
             TransitionBasic.render(s.currentPage, encoder, texture, 0f, 0f, 1f)
-        } else if (s.offset > 0f) {
-            s.adjacentPage?.let {
-                s.transition.render(
-                    s.currentPage, it, encoder, texture, s.offset, s.firstPos, s.currentPos,
-                )
-            } ?: TransitionBasic.render(s.currentPage, encoder, texture, 0f, 0f, 1f)
-        } else {
-            s.adjacentPage?.let {
-                s.transition.render(
-                    s.currentPage, it, encoder, texture, s.offset, s.firstPos, s.currentPos
-                )
-            } ?: TransitionBasic.render(s.currentPage, encoder, texture, 0f, 0f, 1f)
-        }
-    }
-    
-    // Legacy method for subclass compatibility
-    protected open suspend fun render(encoder: GPUCommandEncoder, texture: GPUTexture) {
-        val currentPage = getPage(0) ?: return
-        val offset = pageOffset
-        val adjacentPage = when {
-            offset > 0f -> getPage(1)
-            offset < 0f -> getPage(-1)
-            else -> null
-        }
-
-        if (offset == 0f) {
-            TransitionBasic.render(currentPage, encoder, texture, 0f, 0f, 1f)
-        } else if (offset > 0f) {
-            adjacentPage?.let {
-                transition.render(
-                    currentPage, it, encoder, texture, offset, firstPos, currentPos,
-                )
-            } ?: TransitionBasic.render(currentPage, encoder, texture, 0f, 0f, 1f)
-        } else {
-            adjacentPage?.let {
-                transition.render(
-                    currentPage, it, encoder, texture, offset, firstPos, currentPos
-                )
-            } ?: TransitionBasic.render(currentPage, encoder, texture, 0f, 0f, 1f)
         }
     }
 

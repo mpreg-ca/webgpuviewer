@@ -43,7 +43,6 @@ import kotlin.time.Duration.Companion.milliseconds
 fun ImageViewer(
     modifier: Modifier = Modifier,
     state: ImageViewerState,
-    avoidCutout: Boolean = false,
 ) {
     val scope = rememberCoroutineScope()
 
@@ -51,7 +50,7 @@ fun ImageViewer(
 
     val view = LocalView.current
 
-    if (avoidCutout) {
+    if (state.avoidCutout) {
         val density = LocalDensity.current
         val cutoutTop = WindowInsets.displayCutout.asPaddingValues().calculateTopPadding()
         state.cutoutTopPx = with(density) { cutoutTop.toPx() }
@@ -177,10 +176,11 @@ fun ImageViewer(
                                         val y = (originalY + py * diff).orZero()
 
                                         val maxX = state.maxX(page.width, page.scale)
+                                        val minY = state.minY(page.height, page.scale)
                                         val maxY = state.maxY(page.height, page.scale)
 
                                         page.setPos(
-                                            x.fastCoerceIn(-maxX, maxX), y.fastCoerceIn(-maxY, maxY)
+                                            x.fastCoerceIn(-maxX, maxX), y.fastCoerceIn(minY, maxY)
                                         )
                                     }
                                 }
@@ -286,11 +286,12 @@ fun ImageViewer(
                                         y += (centroid.y / state.height - 0.5f) * diff
 
                                         val maxX = state.maxX(page.width, newScale)
+                                        val minY = state.minY(page.height, newScale)
                                         val maxY = state.maxY(page.height, newScale)
 
                                         if (single) {
                                             val clampedX = x.fastCoerceIn(-maxX, maxX)
-                                            val clampedY = y.fastCoerceIn(-maxY, maxY)
+                                            val clampedY = y.fastCoerceIn(minY, maxY)
                                             val overflow = if (state.isVertical) {
                                                 y - clampedY
                                             } else {
@@ -351,6 +352,7 @@ fun ImageViewer(
                             }
                         } else {
                             val maxX = state.maxX(page.width, page.scale)
+                            val minY = state.minY(page.height, page.scale)
                             val maxY = state.maxY(page.height, page.scale)
 
                             val velocity = velocityTracker.calculateVelocity()
@@ -358,7 +360,7 @@ fun ImageViewer(
                                     velocity.x
                                 ) > 400 || abs(velocity.y) > 400) && (page.x.fastCoerceIn(
                                     -maxX, maxX
-                                ) == page.x || page.y.fastCoerceIn(-maxY, maxY) == page.y)
+                                ) == page.x || page.y.fastCoerceIn(minY, maxY) == page.y)
                             ) {
                                 // fling pan
                                 page.animationJob = scope.launch {
@@ -373,7 +375,7 @@ fun ImageViewer(
                                         val dy = (delta.y / state.height) / page.scale
                                         page.setPos(
                                             (page.x + dx).fastCoerceIn(-maxX, maxX).orZero(),
-                                            (page.y + dy).fastCoerceIn(-maxY, maxY).orZero()
+                                            (page.y + dy).fastCoerceIn(minY, maxY).orZero()
                                         )
                                     }
                                 }
