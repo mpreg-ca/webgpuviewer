@@ -219,8 +219,9 @@ open class ImageViewerState(var isVertical: Boolean = false) {
 
     @Synchronized
     fun post(fn: suspend () -> Unit) {
-        if (scope?.isActive == true) {
-            CoroutineScope(dispatcher).launch {
+        val activeScope = scope
+        if (activeScope?.isActive == true) {
+            activeScope.launch(dispatcher) {
                 fn()
             }
         } else {

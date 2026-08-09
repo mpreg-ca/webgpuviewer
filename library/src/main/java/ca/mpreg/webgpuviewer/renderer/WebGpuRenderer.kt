@@ -118,7 +118,6 @@ class WebGpuRenderer {
         }
     }
 
-    /** Render - caller must already be on dispatcher thread */
     suspend fun render(fn: suspend (GPUCommandEncoder, GPUTexture) -> Unit) {
         val surface = surface ?: return
 

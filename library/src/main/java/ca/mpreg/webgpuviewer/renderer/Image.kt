@@ -32,63 +32,69 @@ class Image private constructor(
                 val maxWidth = 4096
                 val maxHeight = 4096
 
-                var pixels = pixels
+                // Prepare all mipmap pixel data on CPU first (no GPU mutex needed)
+                data class MipmapData(val pixels: ByteBuffer, val w: Int, val h: Int, val scale: Float)
+                val mipmapDataList = mutableListOf<MipmapData>()
+                mipmapDataList.add(MipmapData(pixels, width, height, 1f))
 
-                WebGpuRenderer.withContext { device ->
-                    mipmaps.add(Mipmap(pixels, width, height, 1f, tilesize))
-
-                    if (!createMipMaps) return@withContext
-
-                    var scale = 1f
-
-                    Log.d("Renderer", "Creating mipmaps")
-
+                if (createMipMaps) {
+                    var currentPixels = pixels
                     var textureWidth = width
                     var textureHeight = height
+                    var scale = 1f
 
                     while (width * scale > tilesize || height * scale > tilesize) {
                         scale /= 2
                         val newWidth = floor(width * scale).toInt()
                         val newHeight = floor(height * scale).toInt()
-                        Log.d(
-                            "Renderer", "Create mipmap using CPU ${scale} ${newWidth} ${newHeight}"
-                        )
-                        // TODO: return mutex
-                        pixels = withContext(Dispatchers.Default) {
-                            ImageUtil.resize(pixels, textureWidth, textureHeight)
+                        Log.d("Renderer", "Create mipmap using CPU ${scale} ${newWidth} ${newHeight}")
+                        
+                        currentPixels = withContext(Dispatchers.Default) {
+                            ImageUtil.resize(currentPixels, textureWidth, textureHeight)
                         }
-
-                        mipmaps.add(Mipmap(pixels, newWidth, newHeight, scale, tilesize))
-
+                        mipmapDataList.add(MipmapData(currentPixels, newWidth, newHeight, scale))
                         textureWidth = newWidth
                         textureHeight = newHeight
                     }
+                }
 
-                    while (width * scale > maxWidth && height * scale > maxHeight) {
-                        scale /= 2
-                        val newWidth = floor(width * scale).toInt()
-                        val newHeight = floor(height * scale).toInt()
-                        Log.d(
-                            "Renderer",
-                            "Create mipmap using shader ${scale} ${newWidth} ${newHeight}"
-                        )
-                        val size = GPUExtent3D(newWidth, newHeight)
-                        val texture = device.createTexture(
-                            GPUTextureDescriptor(
-                                size = size,
-                                usage = TextureUsage.TextureBinding or TextureUsage.RenderAttachment,
-                                format = TextureFormat.RGBA8Unorm
-                            )
-                        )
-                        val encoder = device.createCommandEncoder()
+                // Now upload all textures to GPU in one batch (minimizes mutex holding time)
+                WebGpuRenderer.withContext { device ->
+                    try {
+                        for (data in mipmapDataList) {
+                            mipmaps.add(Mipmap(data.pixels, data.w, data.h, data.scale, tilesize))
+                        }
 
-                        TransitionBasic.render(this@apply, encoder, texture, 0f, 0f, scale)
-                        device.queue.submit(arrayOf(encoder.finish()))
-
-                        mipmaps.add(Mipmap(texture, scale, tilesize))
+                        // GPU-based mipmaps if needed
+                        if (createMipMaps && mipmapDataList.isNotEmpty()) {
+                            var scale = mipmapDataList.last().scale
+                            while (width * scale > maxWidth && height * scale > maxHeight) {
+                                scale /= 2
+                                val newWidth = floor(width * scale).toInt()
+                                val newHeight = floor(height * scale).toInt()
+                                Log.d("Renderer", "Create mipmap using shader ${scale} ${newWidth} ${newHeight}")
+                                
+                                val size = GPUExtent3D(newWidth, newHeight)
+                                val texture = device.createTexture(
+                                    GPUTextureDescriptor(
+                                        size = size,
+                                        usage = TextureUsage.TextureBinding or TextureUsage.RenderAttachment,
+                                        format = TextureFormat.RGBA8Unorm
+                                    )
+                                )
+                                val encoder = device.createCommandEncoder()
+                                TransitionBasic.render(this@apply, encoder, texture, 0f, 0f, scale)
+                                device.queue.submit(arrayOf(encoder.finish()))
+                                mipmaps.add(Mipmap(texture, scale, tilesize))
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.e("Renderer", "Error creating mipmaps", e)
+                        // Clean up any mipmaps that were created before the error
+                        mipmaps.forEach { it.cleanup() }
+                        mipmaps.clear()
+                        throw e
                     }
-
-                    Log.d("Renderer", "Finished create mipmaps")
                 }
             }
         }
@@ -96,26 +102,38 @@ class Image private constructor(
         suspend operator fun invoke(width: Int, height: Int): Image {
             return Image(width, height).apply {
                 WebGpuRenderer.withContext { _ ->
-                    mipmaps.add(Mipmap(width, height))
+                    try {
+                        mipmaps.add(Mipmap(width, height))
+                    } catch (e: Exception) {
+                        Log.e("Renderer", "Error creating drawable image", e)
+                        throw e
+                    }
                 }
             }
         }
     }
 
-    val buffer: GPUBuffer by lazy {
-        WebGpuRenderer.device.createBuffer(
-            GPUBufferDescriptor(
-                size = BUFFER_SIZE, usage = BufferUsage.CopyDst or BufferUsage.Uniform
-            )
-        )
-    }
+    private var _buffer: GPUBuffer? = null
+    
+    val buffer: GPUBuffer
+        get() {
+            if (_buffer == null) {
+                _buffer = WebGpuRenderer.device.createBuffer(
+                    GPUBufferDescriptor(
+                        size = BUFFER_SIZE, usage = BufferUsage.CopyDst or BufferUsage.Uniform
+                    )
+                )
+            }
+            return _buffer!!
+        }
 
     val mipmaps: MutableList<Mipmap> = mutableListOf()
 
     internal fun cleanup() {
         mipmaps.forEach { it.cleanup() }
         mipmaps.clear()
-        buffer.close()
+        _buffer?.close()
+        _buffer = null
     }
 
     class MipMapForDraw(

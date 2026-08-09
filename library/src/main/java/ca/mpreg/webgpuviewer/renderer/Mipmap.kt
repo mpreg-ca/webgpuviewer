@@ -100,6 +100,7 @@ class Mipmap(
     internal fun cleanup() {
         textures.forEach { tex -> tex.destroy() }
         textures.clear()
+        tiles.clear()
     }
 
     fun update(pixels: ByteBuffer) {

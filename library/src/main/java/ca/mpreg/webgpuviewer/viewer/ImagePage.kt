@@ -65,13 +65,22 @@ open class ImagePage(var image: Image?) {
     fun cleanup() {
         destroyed = true
         animationLoop?.cancel()
+        animationLoop = null
         animationJob?.cancel()
-        CoroutineScope(Dispatchers.Default).launch {
-            WebGpuRenderer.withContext {
-                image?.cleanup()
-                image = null
-                pages?.forEach { it.first.cleanup() }
-                pages = null
+        animationJob = null
+        
+        // Capture references before nulling
+        val imageToCleanup = image
+        val pagesToCleanup = pages
+        image = null
+        pages = null
+        
+        if (imageToCleanup != null || pagesToCleanup != null) {
+            CoroutineScope(Dispatchers.Default).launch {
+                WebGpuRenderer.withContext {
+                    imageToCleanup?.cleanup()
+                    pagesToCleanup?.forEach { it.first.cleanup() }
+                }
             }
         }
     }
