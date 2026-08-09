@@ -64,29 +64,19 @@ open class ImageViewerState(var isVertical: Boolean = false) {
     }
 
     fun minY(height: Int, scale: Float): Float {
-        val base = -max(0f, (height.toFloat() / this.height - 1 / scale) / 2)
-        return base
+        return -max(0f, (height.toFloat() / this.height - 1 / scale) / 2)
+    }
+    
+    fun minY(height: Int, scale: Float, homeY: Float): Float {
+        return min(minY(height, scale), homeY)
     }
 
     fun maxY(height: Int, scale: Float): Float {
-        val base = max(0f, (height.toFloat() / this.height - 1 / scale) / 2)
-        if (cutoutTopPx > 0f) {
-            if (alwaysAvoidCutout) {
-                // Allow full cutout offset for centering below cutout
-                val cutoutOffset = cutoutTopPx / this.height / scale
-                return base + cutoutOffset
-            }
-            // Only add offset if image would overlap cutout
-            val imageHeightOnScreen = height * scale
-            val centeredTopY = (this.height - imageHeightOnScreen) / 2f
-            if (centeredTopY < cutoutTopPx) {
-                // Only add enough to clear the cutout
-                val overlap = cutoutTopPx - centeredTopY
-                val cutoutOffset = overlap / this.height / scale
-                return base + cutoutOffset
-            }
-        }
-        return base
+        return max(0f, (height.toFloat() / this.height - 1 / scale) / 2)
+    }
+    
+    fun maxY(height: Int, scale: Float, homeY: Float): Float {
+        return max(maxY(height, scale), homeY)
     }
 
     private var suppressPageChange = false

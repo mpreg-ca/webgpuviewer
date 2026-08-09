@@ -176,8 +176,8 @@ fun ImageViewer(
                                         val y = (originalY + py * diff).orZero()
 
                                         val maxX = state.maxX(page.width, page.scale)
-                                        val minY = state.minY(page.height, page.scale)
-                                        val maxY = state.maxY(page.height, page.scale)
+                                        val minY = state.minY(page.height, page.scale, page.homeY)
+                                        val maxY = state.maxY(page.height, page.scale, page.homeY)
 
                                         page.setPos(
                                             x.fastCoerceIn(-maxX, maxX), y.fastCoerceIn(minY, maxY)
@@ -286,8 +286,8 @@ fun ImageViewer(
                                         y += (centroid.y / state.height - 0.5f) * diff
 
                                         val maxX = state.maxX(page.width, newScale)
-                                        val minY = state.minY(page.height, newScale)
-                                        val maxY = state.maxY(page.height, newScale)
+                                        val minY = state.minY(page.height, newScale, page.homeY)
+                                        val maxY = state.maxY(page.height, newScale, page.homeY)
 
                                         if (single) {
                                             val clampedX = x.fastCoerceIn(-maxX, maxX)
@@ -352,8 +352,8 @@ fun ImageViewer(
                             }
                         } else {
                             val maxX = state.maxX(page.width, page.scale)
-                            val minY = state.minY(page.height, page.scale)
-                            val maxY = state.maxY(page.height, page.scale)
+                            val minY = state.minY(page.height, page.scale, page.homeY)
+                            val maxY = state.maxY(page.height, page.scale, page.homeY)
 
                             val velocity = velocityTracker.calculateVelocity()
                             if ((page.scale >= page.homeScale) && (page.scale <= page.maxScale) && (lastEventTime - lastMoveTime) < 100 && (abs(

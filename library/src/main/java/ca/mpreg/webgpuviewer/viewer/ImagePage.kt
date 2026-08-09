@@ -102,26 +102,17 @@ open class ImagePage(var image: Image?) {
             val parent = parent ?: return minScale
             val baseScale = trim?.let { parent.getMinScale(it.width(), it.height()) } ?: minScale
             
-            // If cutout avoidance is enabled, reduce scale if image doesn't fit
             val cutoutPx = parent.cutoutTopPx
             if (cutoutPx > 0f) {
                 val imageHeight = (trim?.height() ?: height).toFloat()
+                val imageHeightOnScreen = imageHeight * baseScale
+                val centeredTopY = (parent.height - imageHeightOnScreen) / 2f
                 
-                if (parent.alwaysAvoidCutout) {
-                    // Always use reduced available height
+                // Reduce scale if always avoiding cutout, or if image would overlap
+                if (parent.alwaysAvoidCutout || centeredTopY < cutoutPx) {
                     val availableHeight = parent.height - cutoutPx
                     val maxScaleForCutout = availableHeight / imageHeight
                     return minOf(baseScale, maxScaleForCutout).coerceAtLeast(0.01f)
-                } else {
-                    // Only reduce scale if image at baseScale would overlap cutout
-                    val imageHeightOnScreen = imageHeight * baseScale
-                    val centeredTopY = (parent.height - imageHeightOnScreen) / 2f
-                    if (centeredTopY < cutoutPx) {
-                        // Scale down just enough so shifting can clear the cutout
-                        val availableHeight = parent.height - cutoutPx
-                        val maxScaleForCutout = availableHeight / imageHeight
-                        return minOf(baseScale, maxScaleForCutout).coerceAtLeast(0.01f)
-                    }
                 }
             }
             
@@ -140,39 +131,44 @@ open class ImagePage(var image: Image?) {
     val homeY: Float
         get() {
             val parent = parent ?: return 0f
-            val minY = parent.minY(height, homeScale)
-            val maxY = parent.maxY(height, homeScale)
-            
             val trim = trim
-            var baseY = if (trim != null) {
-                val center = (trim.top + trim.bottom) / 2f
-                (0.5f * height - center) / parent.height
+            
+            // trimBaseY centers the trim on screen
+            val trimBaseY = if (trim != null) {
+                val trimCenter = (trim.top + trim.bottom) / 2f
+                (0.5f * height - trimCenter) / parent.height
             } else {
                 0f
             }
             
-            // If cutout avoidance is enabled, shift image down
             val cutoutPx = parent.cutoutTopPx
             if (cutoutPx > 0f && parent.height > 0) {
-                val imageHeightOnScreen = height * homeScale
-                val centeredTopY = (parent.height - imageHeightOnScreen) / 2f
+                val visibleHeight = (trim?.height() ?: height).toFloat()
+                val trimHeightOnScreen = visibleHeight * homeScale
+                val trimTopY = (parent.height - trimHeightOnScreen) / 2f
                 
-                if (parent.alwaysAvoidCutout) {
-                    // Always center in available space below cutout
-                    val cutoutOffset = cutoutPx / 2f / parent.height / homeScale
-                    baseY += cutoutOffset
-                } else if (centeredTopY < cutoutPx) {
-                    // Only shift enough to clear the cutout
-                    val overlap = cutoutPx - centeredTopY
-                    val cutoutOffset = overlap / parent.height / homeScale
-                    baseY += cutoutOffset
+                val cutoutOffset = when {
+                    parent.alwaysAvoidCutout -> cutoutPx / 2f
+                    trimTopY < cutoutPx -> cutoutPx - trimTopY
+                    else -> 0f
+                }
+                
+                if (cutoutOffset > 0f) {
+                    return trimBaseY + cutoutOffset / parent.height / homeScale
                 }
             }
             
-            return baseY.fastCoerceIn(minY, maxY)
+            val minY = parent.minY(height, homeScale)
+            val maxY = parent.maxY(height, homeScale)
+            return trimBaseY.fastCoerceIn(minY, maxY)
         }
 
-    val atHome get() = x == homeX && y == homeY && scale == homeScale
+    val atHome get(): Boolean {
+        val eps = 0.0001f
+        return kotlin.math.abs(x - homeX) < eps && 
+               kotlin.math.abs(y - homeY) < eps && 
+               kotlin.math.abs(scale - homeScale) < eps
+    }
 
     var onInvalidate: (() -> Unit)? = null
 
@@ -222,8 +218,8 @@ open class ImagePage(var image: Image?) {
         val targetScale = targetScale.fastCoerceIn(minScale, maxScale)
 
         val maxX = parent?.maxX(width, targetScale) ?: 0f
-        val minY = parent?.minY(height, targetScale) ?: 0f
-        val maxY = parent?.maxY(height, targetScale) ?: 0f
+        val minY = parent?.minY(height, targetScale, homeY) ?: 0f
+        val maxY = parent?.maxY(height, targetScale, homeY) ?: 0f
 
         val scaleChanging = targetScale != startScale
         val diffEnd = if (scaleChanging) 1 / targetScale - 1 / startScale else 1f
