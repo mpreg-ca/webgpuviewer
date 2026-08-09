@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
@@ -49,13 +50,12 @@ fun ImageViewer(
     val fling = remember { Animatable(Offset.Zero, Offset.VectorConverter) }
 
     val view = LocalView.current
+    val density = LocalDensity.current
+    val cutoutTop = WindowInsets.displayCutout.asPaddingValues().calculateTopPadding()
+    val cutoutPx = with(density) { cutoutTop.toPx() }
 
-    if (state.avoidCutout) {
-        val density = LocalDensity.current
-        val cutoutTop = WindowInsets.displayCutout.asPaddingValues().calculateTopPadding()
-        state.cutoutTopPx = with(density) { cutoutTop.toPx() }
-    } else {
-        state.cutoutTopPx = 0f
+    LaunchedEffect(state.avoidCutout, cutoutPx) {
+        state.cutoutTopPx = if (state.avoidCutout) cutoutPx else 0f
     }
 
     AndroidExternalSurface(
@@ -77,8 +77,8 @@ fun ImageViewer(
                     var longPressed = false
 
                     val edgeThreshold = 50f
-                    val nearEdge = firstDown.position.x < edgeThreshold || 
-                                   firstDown.position.x > state.width - edgeThreshold
+                    val nearEdge =
+                        firstDown.position.x < edgeThreshold || firstDown.position.x > state.width - edgeThreshold
                     val longPressJob = if (!nearEdge) {
                         scope.launch {
                             delay(viewConfiguration.longPressTimeoutMillis.milliseconds)

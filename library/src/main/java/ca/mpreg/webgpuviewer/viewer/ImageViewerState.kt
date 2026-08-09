@@ -5,6 +5,9 @@ import android.view.Surface
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.util.fastCoerceAtLeast
 import androidx.compose.ui.util.fastCoerceAtMost
@@ -48,10 +51,10 @@ open class ImageViewerState(var isVertical: Boolean = false) {
         }
     
     /** When true, images will be positioned/scaled to avoid the display cutout. */
-    var avoidCutout: Boolean = false
+    var avoidCutout: Boolean by mutableStateOf(false)
     
     /** When true, always shift images below cutout. When false, only shift if image would overlap cutout. */
-    var alwaysAvoidCutout: Boolean = false
+    var alwaysAvoidCutout: Boolean by mutableStateOf(false)
 
     fun getMinScale(width: Int, height: Int): Float {
         val ratioX = this.width.toFloat() / width.toFloat()
