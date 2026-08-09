@@ -21,6 +21,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.max
 import kotlin.math.min
 
@@ -35,6 +36,9 @@ open class ImageViewerState(var isVertical: Boolean = false) {
     var dpi = Resources.getSystem().displayMetrics.densityDpi / 100f
 
     var scope: CoroutineScope? = null
+
+    /** Top padding in pixels to avoid display cutout. Set from WindowInsets.displayCutout. */
+    var cutoutTopPx: Float = 0f
 
     fun getMinScale(width: Int, height: Int): Float {
         val ratioX = this.width.toFloat() / width.toFloat()
@@ -134,38 +138,87 @@ open class ImageViewerState(var isVertical: Boolean = false) {
     var transition: Transition = if (isVertical) TransitionBasic.Vertical else TransitionBasic
 
     var renderFlow = MutableSharedFlow<Int>(
-        replay = 0, extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST
+        replay = 1, extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST
     )
 
     fun invalidate() {
-        scope?.launch {
-            renderFlow.emit(0)
-        }
+        renderFlow.tryEmit(0)
     }
 
     suspend fun collect() {
         renderFlow.collectLatest {
-            renderer.render { encoder, texture ->
-                render(encoder, texture)
+            // Capture render state on main thread before any thread switching
+            val snapshot = captureRenderState() ?: return@collectLatest
+            // Now render on GPU thread with captured state
+            withContext(WebGpuRenderer.dispatcher) {
+                renderer.renderDirect { encoder, texture ->
+                    renderSnapshot(encoder, texture, snapshot)
+                }
             }
         }
     }
-
+    
+    protected open fun captureRenderState(): Any? {
+        val currentPage = getPage(0) ?: return null
+        val offset = pageOffset
+        val adjacentPage = when {
+            offset > 0f -> getPage(1)
+            offset < 0f -> getPage(-1)
+            else -> null
+        }
+        return RenderSnapshot(currentPage, adjacentPage, offset, transition, firstPos, currentPos)
+    }
+    
+    private class RenderSnapshot(
+        val currentPage: ImagePage,
+        val adjacentPage: ImagePage?,
+        val offset: Float,
+        val transition: Transition,
+        val firstPos: Offset,
+        val currentPos: Offset
+    )
+    
+    protected open suspend fun renderSnapshot(encoder: GPUCommandEncoder, texture: GPUTexture, snapshot: Any) {
+        val s = snapshot as RenderSnapshot
+        if (s.offset == 0f) {
+            TransitionBasic.render(s.currentPage, encoder, texture, 0f, 0f, 1f)
+        } else if (s.offset > 0f) {
+            s.adjacentPage?.let {
+                s.transition.render(
+                    s.currentPage, it, encoder, texture, s.offset, s.firstPos, s.currentPos,
+                )
+            } ?: TransitionBasic.render(s.currentPage, encoder, texture, 0f, 0f, 1f)
+        } else {
+            s.adjacentPage?.let {
+                s.transition.render(
+                    s.currentPage, it, encoder, texture, s.offset, s.firstPos, s.currentPos
+                )
+            } ?: TransitionBasic.render(s.currentPage, encoder, texture, 0f, 0f, 1f)
+        }
+    }
+    
+    // Legacy method for subclass compatibility
     protected open suspend fun render(encoder: GPUCommandEncoder, texture: GPUTexture) {
         val currentPage = getPage(0) ?: return
+        val offset = pageOffset
+        val adjacentPage = when {
+            offset > 0f -> getPage(1)
+            offset < 0f -> getPage(-1)
+            else -> null
+        }
 
-        if (pageOffset == 0f) {
+        if (offset == 0f) {
             TransitionBasic.render(currentPage, encoder, texture, 0f, 0f, 1f)
-        } else if (pageOffset > 0f) {
-            getPage(1)?.let {
+        } else if (offset > 0f) {
+            adjacentPage?.let {
                 transition.render(
-                    currentPage, it, encoder, texture, pageOffset, firstPos, currentPos,
+                    currentPage, it, encoder, texture, offset, firstPos, currentPos,
                 )
             } ?: TransitionBasic.render(currentPage, encoder, texture, 0f, 0f, 1f)
         } else {
-            getPage(-1)?.let {
+            adjacentPage?.let {
                 transition.render(
-                    currentPage, it, encoder, texture, pageOffset, firstPos, currentPos
+                    currentPage, it, encoder, texture, offset, firstPos, currentPos
                 )
             } ?: TransitionBasic.render(currentPage, encoder, texture, 0f, 0f, 1f)
         }

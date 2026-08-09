@@ -110,11 +110,32 @@ open class ImagePage(var image: Image?) {
 
     val homeY: Float
         get() {
-            val trim = trim ?: return 0f
             val parent = parent ?: return 0f
-            val center = (trim.top + trim.bottom) / 2f
             val maxY = parent.maxY(height, homeScale)
-            return ((0.5f * height - center) / parent.height).fastCoerceIn(-maxY, maxY)
+            
+            val trim = trim
+            val baseY = if (trim != null) {
+                val center = (trim.top + trim.bottom) / 2f
+                (0.5f * height - center) / parent.height
+            } else {
+                0f
+            }
+            
+            // If cutout avoidance is enabled, check if image top would be in cutout area
+            val cutoutPx = parent.cutoutTopPx
+            if (cutoutPx > 0f) {
+                // Calculate where the top of the image would be at home position
+                val imageHeightOnScreen = height * homeScale
+                val imageTopY = (parent.height - imageHeightOnScreen) / 2f - baseY * parent.height * homeScale
+                
+                if (imageTopY < cutoutPx) {
+                    // Shift down to clear the cutout
+                    val shiftNeeded = (cutoutPx - imageTopY) / parent.height / homeScale
+                    return (baseY - shiftNeeded).fastCoerceIn(-maxY, maxY)
+                }
+            }
+            
+            return baseY.fastCoerceIn(-maxY, maxY)
         }
 
     val atHome get() = x == homeX && y == homeY && scale == homeScale

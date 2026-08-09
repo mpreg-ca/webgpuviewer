@@ -119,24 +119,22 @@ class WebGpuRenderer {
     }
 
     suspend fun render(fn: suspend (GPUCommandEncoder, GPUTexture) -> Unit) {
-        withContext { device ->
-            val surface = surface ?: return@withContext
+        withContext(dispatcher) {
+            renderDirect(fn)
+        }
+    }
 
-            val texture = surface.getCurrentTexture().texture
+    /** Render without thread switching - caller must already be on dispatcher thread */
+    suspend fun renderDirect(fn: suspend (GPUCommandEncoder, GPUTexture) -> Unit) {
+        val surface = surface ?: return
+
+        mutex.withLock {
+            val texture = try {
+                surface.getCurrentTexture().texture
+            } catch (e: Exception) {
+                return
+            }
             val encoder = device.createCommandEncoder()
-
-            encoder.beginRenderPass(
-                GPURenderPassDescriptor(
-                    colorAttachments = arrayOf(
-                        GPURenderPassColorAttachment(
-                            view = texture.createView(),
-                            loadOp = LoadOp.Clear,
-                            storeOp = StoreOp.Store,
-                            clearValue = GPUColor(0.0, 0.0, 0.0, 0.0)
-                        )
-                    )
-                )
-            ).end()
 
             fn(encoder, texture)
 

@@ -71,7 +71,14 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
         }
     }
 
-    override suspend fun render(encoder: GPUCommandEncoder, texture: GPUTexture) {
+    private class ContinuousRenderSnapshot(
+        val images: List<Pair<ImagePage, Float>>,
+        val screenW: Float,
+        val scale: Float,
+        val offsetX: Float
+    )
+
+    override fun captureRenderState(): Any? {
         val screenH = height.toFloat()
         val screenW = width.toFloat()
 
@@ -104,13 +111,22 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
             if (y > screenH / scale + pageHeight) break
         }
 
-        images.forEach { pair ->
+        return ContinuousRenderSnapshot(images, screenW, scale, offsetX)
+    }
+
+    override suspend fun renderSnapshot(encoder: GPUCommandEncoder, texture: GPUTexture, snapshot: Any) {
+        val s = snapshot as ContinuousRenderSnapshot
+        s.images.forEach { pair ->
             pair.first.image?.let {
-                val pageScale = screenW / pair.first.width
+                val pageScale = s.screenW / pair.first.width
                 TransitionBasic.render(
-                    it, encoder, texture, offsetX / pageScale, pair.second, pageScale * scale
+                    it, encoder, texture, s.offsetX / pageScale, pair.second, pageScale * s.scale
                 )
             }
         }
+    }
+
+    override suspend fun render(encoder: GPUCommandEncoder, texture: GPUTexture) {
+        // Legacy - not used when captureRenderState is overridden
     }
 }

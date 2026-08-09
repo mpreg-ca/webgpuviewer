@@ -11,6 +11,9 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculateCentroid
 import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
@@ -23,8 +26,10 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.input.pointer.util.addPointerInputChange
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.util.fastCoerceIn
+import androidx.compose.ui.util.fastForEach
 import ca.mpreg.webgpuviewer.orZero
 import ca.mpreg.webgpuviewer.waitForCleanUp
 import ca.mpreg.webgpuviewer.waitForDown
@@ -38,12 +43,21 @@ import kotlin.time.Duration.Companion.milliseconds
 fun ImageViewer(
     modifier: Modifier = Modifier,
     state: ImageViewerState,
+    avoidCutout: Boolean = false,
 ) {
     val scope = rememberCoroutineScope()
 
     val fling = remember { Animatable(Offset.Zero, Offset.VectorConverter) }
 
     val view = LocalView.current
+
+    if (avoidCutout) {
+        val density = LocalDensity.current
+        val cutoutTop = WindowInsets.displayCutout.asPaddingValues().calculateTopPadding()
+        state.cutoutTopPx = with(density) { cutoutTop.toPx() }
+    } else {
+        state.cutoutTopPx = 0f
+    }
 
     AndroidExternalSurface(
         modifier = modifier
@@ -209,7 +223,7 @@ fun ImageViewer(
                         }
 
                         do {
-                            val event = awaitPointerEvent()
+                            val event = awaitPointerEvent(pass = PointerEventPass.Initial)
                             val canceled = event.changes.any { it.isConsumed }
                             if (!canceled) {
                                 val change = event.changes[0]
@@ -257,7 +271,7 @@ fun ImageViewer(
                                     }
                                     state.currentPos = event.changes[0].position
                                     state.invalidate()
-                                    event.changes.forEach { if (it.positionChanged()) it.consume() }
+                                    event.changes.fastForEach { if (it.positionChanged()) it.consume() }
                                 } else {
                                     val zoom = event.calculateZoom()
 
@@ -301,7 +315,7 @@ fun ImageViewer(
                                         page.scale = newScale
                                         page.setPos(x.orZero(), y.orZero())
 
-                                        event.changes.forEach { if (it.positionChanged()) it.consume() }
+                                        event.changes.fastForEach { if (it.positionChanged()) it.consume() }
                                     }
                                 }
                             }
