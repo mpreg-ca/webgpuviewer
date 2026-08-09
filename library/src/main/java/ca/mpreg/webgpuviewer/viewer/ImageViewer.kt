@@ -74,7 +74,26 @@ fun ImageViewer(
 
                     view.parent?.requestDisallowInterceptTouchEvent(true)
 
+                    var longPressed = false
+
+                    val edgeThreshold = 50f
+                    val nearEdge = firstDown.position.x < edgeThreshold || 
+                                   firstDown.position.x > state.width - edgeThreshold
+                    val longPressJob = if (!nearEdge) {
+                        scope.launch {
+                            delay(viewConfiguration.longPressTimeoutMillis.milliseconds)
+                            longPressed = true
+                            state.onLongTap?.invoke(
+                                Offset(
+                                    firstDown.position.x / state.width,
+                                    firstDown.position.y / state.height
+                                )
+                            )
+                        }
+                    } else null
+
                     if (waitForCleanUp(firstDown.id, doubleTapTimeout, touchSlop) != null) {
+                        longPressJob?.cancel()
                         val secondDown = waitForDown(doubleTapTimeout)
                         if (secondDown == null) {
                             if (state.pageOffset != 0f) {
@@ -210,22 +229,13 @@ fun ImageViewer(
 
                         page.animationJob?.cancel()
 
-                        var longPressed = false
-                        val longPressJob = scope.launch {
-                            delay(viewConfiguration.longPressTimeoutMillis.milliseconds)
-                            longPressed = true
-                            state.onLongTap?.invoke(
-                                Offset(
-                                    firstDown.position.x / state.width,
-                                    firstDown.position.y / state.height
-                                )
-                            )
-                        }
-
+                        var canceled = false
                         do {
                             val event = awaitPointerEvent(pass = PointerEventPass.Initial)
-                            val canceled = event.changes.any { it.isConsumed }
-                            if (!canceled) {
+                            canceled = event.changes.any { it.isConsumed }
+                            if (canceled) {
+                                longPressJob?.cancel()
+                            } else {
                                 val change = event.changes[0]
                                 lastEventTime = change.uptimeMillis
 
@@ -256,7 +266,7 @@ fun ImageViewer(
                                 if (pointerCountChanged) continue
 
                                 val pan = event.calculatePan()
-                                if (pan != Offset.Zero) longPressJob.cancel()
+                                if (acc.getDistance() > touchSlop) longPressJob?.cancel()
                                 acc += pan
 
                                 if (pageTurning) {
@@ -322,8 +332,8 @@ fun ImageViewer(
                             }
                         } while (!canceled && event.changes.any { it.pressed })
 
-                        longPressJob.cancel()
-                        if (longPressed) return@awaitEachGesture
+                        longPressJob?.cancel()
+                        if (longPressed || canceled) return@awaitEachGesture
 
                         if (pageTurning) {
                             val velocity = velocityTracker.calculateVelocity()

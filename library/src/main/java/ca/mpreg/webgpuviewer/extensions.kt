@@ -16,7 +16,17 @@ suspend fun AwaitPointerEventScope.waitForCleanUp(
 
         while (true) {
             val event = awaitPointerEvent()
+
+            if (event.changes.any { it.isConsumed }) {
+                return@withTimeout null
+            }
+
             val change = event.changes.firstOrNull { it.id == pointerId } ?: return@withTimeout null
+
+            if (event.changes.any { it.id != pointerId && it.pressed }) {
+                return@withTimeout null
+            }
+
             acc += event.calculatePan()
             if (acc.getDistance() > touchSlop) {
                 return@withTimeout null
