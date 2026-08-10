@@ -163,7 +163,8 @@ fn downsample(src_start: vec2<f32>, scale: vec2<f32>) -> vec4<f32> {
 }
 
 fn sampleImage(uv: vec2<f32>) -> vec4<f32> {
-    let src_size_f = vec2<f32>(totalDimensions());
+    let size = vec2<i32>(totalDimensions());
+    let src_size_f = vec2<f32>(size);
     let scale_factor = 1.0 / transform.scale;
     if (scale_factor > 1.0) {
         let src_start = uv * src_size_f;
@@ -171,7 +172,6 @@ fn sampleImage(uv: vec2<f32>) -> vec4<f32> {
     }
     // Nearest for sphere (catmull-rom too expensive per ray)
     let pos = vec2<i32>(uv * src_size_f);
-    let size = vec2<i32>(totalDimensions());
     if (pos.x < 0 || pos.y < 0 || pos.x >= size.x || pos.y >= size.y) {
         return vec4<f32>(0.0);
     }
@@ -282,8 +282,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     if (t >= 1.0 / 3.0 && t < 2.0 / 3.0) {
         if (in.sphere_z < 0.0) { discard; }
     }
-
-    if (in.uv.x < 0.0 || in.uv.x > 1.0 || in.uv.y < 0.0 || in.uv.y > 1.0) { discard; }
 
     let col = sampleImage(in.uv);
     return vec4<f32>(col.rgb * col.a, col.a);

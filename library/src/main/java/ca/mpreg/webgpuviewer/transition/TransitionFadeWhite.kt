@@ -67,9 +67,8 @@ fn totalLoad(pos: vec2<i32>) -> vec4<f32> {
 }
 
 fn sampleImage(uv: vec2<f32>) -> vec4<f32> {
-    let src_size_f = vec2<f32>(totalDimensions());
-    let pos = vec2<i32>(uv * src_size_f);
     let size = vec2<i32>(totalDimensions());
+    let pos = vec2<i32>(uv * vec2<f32>(size));
     if (pos.x < 0 || pos.y < 0 || pos.x >= size.x || pos.y >= size.y) {
         return vec4<f32>(0.0);
     }
@@ -121,25 +120,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     ) {
         // frac goes from 0 to 1 (forward) or 0 to -1 (backward)
         val t = if (frac > 0f) frac else -frac
-        
+
         // First half: fade current to white
         // Second half: fade white to next
         if (t < 0.5f) {
             // Fade page1 to white (t goes 0 -> 0.5, fadeToWhite goes 0 -> 1)
             val fadeToWhite = t * 2f
-            if (frac > 0f) {
-                renderPage(page1, encoder, dst, fadeToWhite)
-            } else {
-                renderPage(page1, encoder, dst, fadeToWhite)
-            }
+            renderPage(page1, encoder, dst, fadeToWhite)
         } else {
             // Fade white to page2 (t goes 0.5 -> 1, fadeToWhite goes 1 -> 0)
             val fadeToWhite = (1f - t) * 2f
-            if (frac > 0f) {
-                renderPage(page2, encoder, dst, fadeToWhite)
-            } else {
-                renderPage(page2, encoder, dst, fadeToWhite)
-            }
+            renderPage(page2, encoder, dst, fadeToWhite)
         }
     }
 

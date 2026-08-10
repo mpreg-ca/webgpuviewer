@@ -106,9 +106,8 @@ object TransitionCubeOuter : Transition() {
         pos1: Offset,
         pos2: Offset,
     ) {
-        val frac = -frac
-
-        val t = if (frac > 0f) frac else 1f + frac
+        // CubeOuter rotates opposite to Cube, hence negated frac
+        val t = if (frac < 0f) -frac else 1f - frac
 
         val frontPhase = if (t < PHASE_IN_END) t / PHASE_IN_END else 1f
         val sidePhase =
@@ -122,9 +121,10 @@ object TransitionCubeOuter : Transition() {
 
         val screenAspect = dst.width.toFloat() / dst.height.toFloat()
 
+        // Negated frac means page selection is swapped vs TransitionCube
         val frontPage: ImagePage
         val sidePage: ImagePage
-        if (frac > 0f) {
+        if (frac < 0f) {
             frontPage = page1
             sidePage = page2
         } else {

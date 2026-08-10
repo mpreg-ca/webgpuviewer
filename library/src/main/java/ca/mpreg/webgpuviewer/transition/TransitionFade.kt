@@ -10,7 +10,6 @@ import androidx.webgpu.GPURenderPassDescriptor
 import androidx.webgpu.GPUTexture
 import androidx.webgpu.LoadOp
 import androidx.webgpu.StoreOp
-import ca.mpreg.webgpuviewer.renderer.Image
 import ca.mpreg.webgpuviewer.viewer.ImagePage
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -122,9 +121,8 @@ fn to_srgb_exact(linear_rgb: vec4<f32>) -> vec4<f32> {
 }
 
 fn sampleImage1(uv: vec2<f32>) -> vec4<f32> {
-    let src_size_f = vec2<f32>(totalDimensions1());
-    let pos = vec2<i32>(uv * src_size_f);
     let size = vec2<i32>(totalDimensions1());
+    let pos = vec2<i32>(uv * vec2<f32>(size));
     if (pos.x < 0 || pos.y < 0 || pos.x >= size.x || pos.y >= size.y) {
         return vec4<f32>(0.0);
     }
@@ -132,9 +130,8 @@ fn sampleImage1(uv: vec2<f32>) -> vec4<f32> {
 }
 
 fn sampleImage2(uv: vec2<f32>) -> vec4<f32> {
-    let src_size_f = vec2<f32>(totalDimensions2());
-    let pos = vec2<i32>(uv * src_size_f);
     let size = vec2<i32>(totalDimensions2());
+    let pos = vec2<i32>(uv * vec2<f32>(size));
     if (pos.x < 0 || pos.y < 0 || pos.x >= size.x || pos.y >= size.y) {
         return vec4<f32>(0.0);
     }

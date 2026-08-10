@@ -13,7 +13,7 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
 
     var offsetX = 0f
 
-    var mutex = Any()
+    private val scrollLock = Any()
     var scrollY = 0f
 
     fun getPageHeight(page: ImagePage): Float {
@@ -25,7 +25,7 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
     var currentPageHeight: Float? = null
 
     fun scrollBy(deltaPixels: Float) {
-        synchronized(mutex) {
+        synchronized(scrollLock) {
             getPage(0) ?: return
 
             scrollY += deltaPixels
@@ -84,7 +84,7 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
         val screenH = height.toFloat()
         val screenW = width.toFloat()
 
-        var y = synchronized(mutex) {
+        var y = synchronized(scrollLock) {
             getPage(0)?.let { page ->
                 val pageHeight = getPageHeight(page)
                 if (currentPageHeight != pageHeight && scrollY > 0) {

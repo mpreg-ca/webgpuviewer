@@ -192,9 +192,11 @@ class WebGpuRenderer {
     }
 
     fun cleanup() {
-        runBlocking {
-            surface?.close()
-            surface = null
+        runBlocking(dispatcher) {
+            mutex.withLock {
+                surface?.close()
+                surface = null
+            }
         }
     }
 }

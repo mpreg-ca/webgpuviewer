@@ -163,14 +163,14 @@ fn downsample(src_start: vec2<f32>, scale: vec2<f32>) -> vec4<f32> {
 }
 
 fn sampleImage(uv: vec2<f32>) -> vec4<f32> {
-    let src_size_f = vec2<f32>(totalDimensions());
+    let size = vec2<i32>(totalDimensions());
+    let src_size_f = vec2<f32>(size);
     let scale_factor = 1.0 / transform.scale;
     if (scale_factor > 1.0) {
         let src_start = uv * src_size_f;
         return downsample(src_start, vec2<f32>(scale_factor));
     }
     let pos = vec2<i32>(uv * src_size_f);
-    let size = vec2<i32>(totalDimensions());
     if (pos.x < 0 || pos.y < 0 || pos.x >= size.x || pos.y >= size.y) {
         return vec4<f32>(0.0);
     }

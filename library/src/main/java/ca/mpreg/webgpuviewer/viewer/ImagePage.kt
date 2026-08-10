@@ -19,6 +19,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.nio.ByteBuffer
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.time.Duration.Companion.milliseconds
 
@@ -187,9 +188,7 @@ open class ImagePage(var image: Image?) {
     val atHome
         get(): Boolean {
             val eps = 0.0001f
-            return kotlin.math.abs(x - homeX) < eps && kotlin.math.abs(y - homeY) < eps && kotlin.math.abs(
-                scale - homeScale
-            ) < eps
+            return abs(x - homeX) < eps && abs(y - homeY) < eps && abs(scale - homeScale) < eps
         }
 
     var onInvalidate: (() -> Unit)? = null

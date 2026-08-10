@@ -163,7 +163,7 @@ class Image private constructor(
     internal fun cleanup() {
         mipmaps.forEach { it.cleanup() }
         mipmaps.clear()
-        _buffer?.close()
+        _buffer?.destroy()
         _buffer = null
     }
 
@@ -178,19 +178,19 @@ class Image private constructor(
 
         val mipmap = mipmaps[level]
 
-        val x = x + this.x / dst.width + WebGpuRenderer.offsetX
-        val y = y + this.y / dst.height + WebGpuRenderer.offsetY
+        val adjustedX = x + this.x / dst.width + WebGpuRenderer.offsetX
+        val adjustedY = y + this.y / dst.height + WebGpuRenderer.offsetY
 
-        val vx = round(-x * dst.width + mipmap.width / 2).toInt()
-        val vy = round(-y * dst.height + mipmap.height / 2).toInt()
+        val vx = round(-adjustedX * dst.width + mipmap.width / 2).toInt()
+        val vy = round(-adjustedY * dst.height + mipmap.height / 2).toInt()
 
         val quad = mipmap.getQuad(vx, vy)
 
         return MipMapForDraw(
             mipmap,
             quad,
-            (0.5f / scale + x) * mipmap.scale + (quad.x - 0.5f * mipmap.width) / dst.width,
-            (0.5f / scale + y) * mipmap.scale + (quad.y - 0.5f * mipmap.height) / dst.height,
+            (0.5f / scale + adjustedX) * mipmap.scale + (quad.x - 0.5f * mipmap.width) / dst.width,
+            (0.5f / scale + adjustedY) * mipmap.scale + (quad.y - 0.5f * mipmap.height) / dst.height,
             scale / mipmap.scale
         )
     }
