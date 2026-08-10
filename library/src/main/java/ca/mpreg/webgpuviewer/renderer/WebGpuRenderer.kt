@@ -6,22 +6,17 @@ import androidx.webgpu.DeviceLostException
 import androidx.webgpu.FeatureLevel
 import androidx.webgpu.GPU.createInstance
 import androidx.webgpu.GPUAdapter
-import androidx.webgpu.GPUColor
 import androidx.webgpu.GPUCommandEncoder
 import androidx.webgpu.GPUDevice
 import androidx.webgpu.GPUDeviceDescriptor
 import androidx.webgpu.GPUInstance
 import androidx.webgpu.GPUInstanceDescriptor
-import androidx.webgpu.GPURenderPassColorAttachment
-import androidx.webgpu.GPURenderPassDescriptor
 import androidx.webgpu.GPURequestAdapterOptions
 import androidx.webgpu.GPUSurface
 import androidx.webgpu.GPUSurfaceConfiguration
 import androidx.webgpu.GPUSurfaceDescriptor
 import androidx.webgpu.GPUSurfaceSourceAndroidNativeWindow
 import androidx.webgpu.GPUTexture
-import androidx.webgpu.LoadOp
-import androidx.webgpu.StoreOp
 import androidx.webgpu.TextureFormat
 import androidx.webgpu.TextureUsage
 import androidx.webgpu.UncapturedErrorCallback
@@ -50,6 +45,52 @@ class WebGpuRenderer {
         val dispatcher = Executors.newSingleThreadExecutor { runnable ->
             Thread(runnable, "WebGPU-Render-Thread")
         }.asCoroutineDispatcher()
+        
+        // Frame time profiling
+        var profilingEnabled = false
+        private var frameCount = 0L
+        private var totalFrameTimeNs = 0L
+        private var minFrameTimeNs = Long.MAX_VALUE
+        private var maxFrameTimeNs = 0L
+        private var lastFrameTimeNs = 0L
+        private val recentFrameTimes = LongArray(60)
+        private var recentFrameIndex = 0
+        
+        val lastFrameTimeMs: Float get() = lastFrameTimeNs / 1_000_000f
+        val avgFrameTimeMs: Float get() = if (frameCount > 0) totalFrameTimeNs / frameCount / 1_000_000f else 0f
+        val minFrameTimeMs: Float get() = if (minFrameTimeNs == Long.MAX_VALUE) 0f else minFrameTimeNs / 1_000_000f
+        val maxFrameTimeMs: Float get() = maxFrameTimeNs / 1_000_000f
+        val recentAvgFrameTimeMs: Float get() {
+            val count = minOf(frameCount.toInt(), 60)
+            if (count == 0) return 0f
+            var sum = 0L
+            for (i in 0 until count) {
+                sum += recentFrameTimes[i]
+            }
+            return sum.toFloat() / count / 1_000_000f
+        }
+        val estimatedFps: Float get() = if (lastFrameTimeNs > 0) 1_000_000_000f / lastFrameTimeNs else 0f
+        
+        fun resetProfiling() {
+            frameCount = 0
+            totalFrameTimeNs = 0
+            minFrameTimeNs = Long.MAX_VALUE
+            maxFrameTimeNs = 0
+            lastFrameTimeNs = 0
+            recentFrameIndex = 0
+            recentFrameTimes.fill(0)
+        }
+        
+        internal fun recordFrameTime(timeNs: Long) {
+            if (!profilingEnabled) return
+            frameCount++
+            totalFrameTimeNs += timeNs
+            lastFrameTimeNs = timeNs
+            if (timeNs < minFrameTimeNs) minFrameTimeNs = timeNs
+            if (timeNs > maxFrameTimeNs) maxFrameTimeNs = timeNs
+            recentFrameTimes[recentFrameIndex] = timeNs
+            recentFrameIndex = (recentFrameIndex + 1) % 60
+        }
 
         init {
             runBlocking {
@@ -120,6 +161,7 @@ class WebGpuRenderer {
 
     suspend fun render(fn: suspend (GPUCommandEncoder, GPUTexture) -> Unit) {
         val surface = surface ?: return
+        val startTime = if (profilingEnabled) System.nanoTime() else 0L
 
         mutex.withLock {
             val texture = try {
@@ -133,6 +175,16 @@ class WebGpuRenderer {
 
             device.queue.submit(arrayOf(encoder.finish()))
             surface.present()
+        }
+        
+        if (profilingEnabled) {
+            val frameTime = System.nanoTime() - startTime
+            recordFrameTime(frameTime)
+            android.util.Log.d("WebGpuRenderer", "Frame: %.2fms | Avg: %.2fms | FPS: %.1f".format(
+                frameTime / 1_000_000f,
+                recentAvgFrameTimeMs,
+                estimatedFps
+            ))
         }
     }
 

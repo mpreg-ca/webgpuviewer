@@ -3,6 +3,7 @@ package ca.mpreg.webgpuviewer.viewer
 import android.content.res.Resources
 import android.graphics.Bitmap
 import android.graphics.Rect
+import android.util.Log
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.spring
@@ -33,6 +34,8 @@ open class ImagePage(var image: Image?) {
 
         val texture: GPUTexture? get() = image?.mipmaps?.firstOrNull()?.textures?.firstOrNull()
     }
+
+    val isDecoded: Boolean get() = this !is Dummy && this !is Draw
 
     companion object {
         suspend operator fun invoke(
@@ -68,18 +71,27 @@ open class ImagePage(var image: Image?) {
         animationLoop = null
         animationJob?.cancel()
         animationJob = null
-        
+
         // Capture references before nulling
         val imageToCleanup = image
         val pagesToCleanup = pages
         image = null
         pages = null
-        
+
         if (imageToCleanup != null || pagesToCleanup != null) {
             CoroutineScope(Dispatchers.Default).launch {
-                WebGpuRenderer.withContext {
-                    imageToCleanup?.cleanup()
-                    pagesToCleanup?.forEach { it.first.cleanup() }
+                try {
+                    WebGpuRenderer.withContext {
+                        // If pages exist, they contain all frames including the first one (which is also image)
+                        // So only clean pages OR image, not both, to avoid double cleanup
+                        if (pagesToCleanup != null) {
+                            pagesToCleanup.forEach { it.first.cleanup() }
+                        } else {
+                            imageToCleanup?.cleanup()
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.e("ImagePage", "Error during cleanup", e)
                 }
             }
         }
@@ -110,13 +122,13 @@ open class ImagePage(var image: Image?) {
         get() {
             val parent = parent ?: return minScale
             val baseScale = trim?.let { parent.getMinScale(it.width(), it.height()) } ?: minScale
-            
+
             val cutoutPx = parent.cutoutTopPx
             if (cutoutPx > 0f) {
                 val imageHeight = (trim?.height() ?: height).toFloat()
                 val imageHeightOnScreen = imageHeight * baseScale
                 val centeredTopY = (parent.height - imageHeightOnScreen) / 2f
-                
+
                 // Reduce scale if always avoiding cutout, or if image would overlap
                 if (parent.alwaysAvoidCutout || centeredTopY < cutoutPx) {
                     val availableHeight = parent.height - cutoutPx
@@ -124,7 +136,7 @@ open class ImagePage(var image: Image?) {
                     return minOf(baseScale, maxScaleForCutout).coerceAtLeast(0.01f)
                 }
             }
-            
+
             return baseScale
         }
 
@@ -141,7 +153,7 @@ open class ImagePage(var image: Image?) {
         get() {
             val parent = parent ?: return 0f
             val trim = trim
-            
+
             // trimBaseY centers the trim on screen
             val trimBaseY = if (trim != null) {
                 val trimCenter = (trim.top + trim.bottom) / 2f
@@ -149,35 +161,36 @@ open class ImagePage(var image: Image?) {
             } else {
                 0f
             }
-            
+
             val cutoutPx = parent.cutoutTopPx
             if (cutoutPx > 0f && parent.height > 0) {
                 val visibleHeight = (trim?.height() ?: height).toFloat()
                 val trimHeightOnScreen = visibleHeight * homeScale
                 val trimTopY = (parent.height - trimHeightOnScreen) / 2f
-                
+
                 val cutoutOffset = when {
                     parent.alwaysAvoidCutout -> cutoutPx / 2f
                     trimTopY < cutoutPx -> cutoutPx - trimTopY
                     else -> 0f
                 }
-                
+
                 if (cutoutOffset > 0f) {
                     return trimBaseY + cutoutOffset / parent.height / homeScale
                 }
             }
-            
+
             val minY = parent.minY(height, homeScale)
             val maxY = parent.maxY(height, homeScale)
             return trimBaseY.fastCoerceIn(minY, maxY)
         }
 
-    val atHome get(): Boolean {
-        val eps = 0.0001f
-        return kotlin.math.abs(x - homeX) < eps && 
-               kotlin.math.abs(y - homeY) < eps && 
-               kotlin.math.abs(scale - homeScale) < eps
-    }
+    val atHome
+        get(): Boolean {
+            val eps = 0.0001f
+            return kotlin.math.abs(x - homeX) < eps && kotlin.math.abs(y - homeY) < eps && kotlin.math.abs(
+                scale - homeScale
+            ) < eps
+        }
 
     var onInvalidate: (() -> Unit)? = null
 
@@ -223,8 +236,7 @@ open class ImagePage(var image: Image?) {
         val startX = x
         val startY = y
 
-        @Suppress("NAME_SHADOWING")
-        val targetScale = targetScale.fastCoerceIn(minScale, maxScale)
+        @Suppress("NAME_SHADOWING") val targetScale = targetScale.fastCoerceIn(minScale, maxScale)
 
         val maxX = parent?.maxX(width, targetScale) ?: 0f
         val minY = parent?.minY(height, targetScale, homeY) ?: 0f
@@ -235,7 +247,7 @@ open class ImagePage(var image: Image?) {
 
         val endX: Float
         val endY: Float
-        
+
         if (origin != null && scaleChanging) {
             endX = (startX + (origin.x - 0.5f) * diffEnd).fastCoerceIn(-maxX, maxX)
             endY = (startY + (origin.y - 0.5f) * diffEnd).fastCoerceIn(minY, maxY)

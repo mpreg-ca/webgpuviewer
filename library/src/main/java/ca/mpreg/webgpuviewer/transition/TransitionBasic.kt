@@ -25,7 +25,6 @@ struct Uniforms {
     tiles_height: f32,
     dst_width: f32,
     dst_height: f32,
-    page_flip: f32,
 }
 
 @group(0) @binding(0) var<uniform> transform: Uniforms;
@@ -416,8 +415,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 GPUBindGroupDescriptor(
                     layout = pipeline.getBindGroupLayout(0), entries = arrayOf(
                         GPUBindGroupEntry(0, buffer = image.buffer),
-                    ).plus(res.quad.tiles.mapIndexed { i, value ->
-                        GPUBindGroupEntry(1 + i, textureView = value.createView())
+                    ).plus(res.quad.tileViews.mapIndexed { i, view ->
+                        GPUBindGroupEntry(1 + i, textureView = view)
                     })
                 )
             )

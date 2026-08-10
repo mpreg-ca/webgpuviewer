@@ -52,7 +52,9 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
             }
 
             if (getPage(1) == null) {
-                scrollY = 0f
+                val page = getPage(0) ?: return
+                val pageHeight = getPageHeight(page)
+                scrollY = scrollY.coerceAtMost(pageHeight)
             }
         }
     }
@@ -114,7 +116,11 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
         return ContinuousRenderSnapshot(images, screenW, scale, offsetX)
     }
 
-    override suspend fun renderSnapshot(encoder: GPUCommandEncoder, texture: GPUTexture, snapshot: Any) {
+    override suspend fun renderSnapshot(
+        encoder: GPUCommandEncoder,
+        texture: GPUTexture,
+        snapshot: Any
+    ) {
         val s = snapshot as ContinuousRenderSnapshot
         s.images.forEach { pair ->
             pair.first.image?.let {

@@ -6,6 +6,7 @@ import androidx.webgpu.GPUTexelCopyBufferLayout
 import androidx.webgpu.GPUTexelCopyTextureInfo
 import androidx.webgpu.GPUTexture
 import androidx.webgpu.GPUTextureDescriptor
+import androidx.webgpu.GPUTextureView
 import androidx.webgpu.TextureFormat
 import androidx.webgpu.TextureUsage
 import java.nio.ByteBuffer
@@ -25,7 +26,11 @@ class Mipmap(
     }
 
     var textures: MutableList<GPUTexture> = mutableListOf()
+    private var textureViews: MutableList<GPUTextureView> = mutableListOf()
     private var tiles: MutableList<GPUTexture> = mutableListOf()
+    private var tileViews: MutableList<GPUTextureView> = mutableListOf()
+
+    private var cachedQuad: Quad? = null
 
     constructor(pixels: ByteBuffer, width: Int, height: Int, scale: Float, tilesize: Int) : this(
         width = width,
@@ -65,6 +70,7 @@ class Mipmap(
                 )
 
                 textures.add(texture)
+                textureViews.add(texture.createView())
             }
         }
 
@@ -73,7 +79,12 @@ class Mipmap(
             for (c in 0 until 2) {
                 val i = row + c.coerceAtMost(tilesCols - 1)
                 tiles.add(textures[i])
+                tileViews.add(textureViews[i])
             }
+        }
+
+        if (tilesCols <= 2 && tilesRows <= 2) {
+            cachedQuad = Quad(tiles, tileViews, 0, 0)
         }
     }
 
@@ -81,7 +92,13 @@ class Mipmap(
         texture.width, texture.height, scale, 1, 1, tilesize
     ) {
         textures.add(texture)
-        repeat(4) { tiles.add(texture) }
+        val view = texture.createView()
+        textureViews.add(view)
+        repeat(4) {
+            tiles.add(texture)
+            tileViews.add(view)
+        }
+        cachedQuad = Quad(tiles, tileViews, 0, 0)
     }
 
     constructor(width: Int, height: Int) : this(width, height, 1f, 1, 1, 4096) {
@@ -94,10 +111,19 @@ class Mipmap(
         )
 
         textures.add(texture)
-        repeat(4) { tiles.add(texture) }
+        val view = texture.createView()
+        textureViews.add(view)
+        repeat(4) {
+            tiles.add(texture)
+            tileViews.add(view)
+        }
+        cachedQuad = Quad(tiles, tileViews, 0, 0)
     }
 
     internal fun cleanup() {
+        cachedQuad = null
+        textureViews.clear()
+        tileViews.clear()
         textures.forEach { tex -> tex.destroy() }
         textures.clear()
         tiles.clear()
@@ -130,14 +156,15 @@ class Mipmap(
         }
     }
 
-    class Quad(val tiles: List<GPUTexture>, val x: Int, val y: Int)
+    class Quad(
+        val tiles: List<GPUTexture>, val tileViews: List<GPUTextureView>, val x: Int, val y: Int
+    )
 
     fun getQuad(centerX: Int, centerY: Int): Quad {
-        if (tilesCols <= 2 && tilesRows <= 2) {
-            return Quad(tiles, 0, 0)
-        }
+        cachedQuad?.let { return it }
 
-        val tiles = mutableListOf<GPUTexture>()
+        val quadTiles = mutableListOf<GPUTexture>()
+        val quadViews = mutableListOf<GPUTextureView>()
 
         val cX = centerX.toFloat()
         val cY = centerY.toFloat()
@@ -172,14 +199,15 @@ class Mipmap(
             }
         }.coerceIn(0, tilesRows - 1)
 
-        for (r in 0 until 2) {
-            val row = (tY + r).coerceAtMost(tilesRows - 1) * tilesCols
-            for (c in 0 until 2) {
-                val i = row + (tX + c).coerceAtMost(tilesCols - 1)
-                tiles.add(textures[i])
+        for (row in 0 until 2) {
+            val rowIdx = (tY + row).coerceAtMost(tilesRows - 1) * tilesCols
+            for (col in 0 until 2) {
+                val i = rowIdx + (tX + col).coerceAtMost(tilesCols - 1)
+                quadTiles.add(textures[i])
+                quadViews.add(textureViews[i])
             }
         }
 
-        return Quad(tiles, tX * tiles[0].width, tY * tiles[0].height)
+        return Quad(quadTiles, quadViews, tX * quadTiles[0].width, tY * quadTiles[0].height)
     }
 }

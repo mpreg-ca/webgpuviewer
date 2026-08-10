@@ -49,10 +49,10 @@ open class ImageViewerState(var isVertical: Boolean = false) {
                 getPage(0)?.home()
             }
         }
-    
+
     /** When true, images will be positioned/scaled to avoid the display cutout. */
     var avoidCutout: Boolean by mutableStateOf(false)
-    
+
     /** When true, always shift images below cutout. When false, only shift if image would overlap cutout. */
     var alwaysAvoidCutout: Boolean by mutableStateOf(false)
 
@@ -69,7 +69,7 @@ open class ImageViewerState(var isVertical: Boolean = false) {
     fun minY(height: Int, scale: Float): Float {
         return -max(0f, (height.toFloat() / this.height - 1 / scale) / 2)
     }
-    
+
     fun minY(height: Int, scale: Float, homeY: Float): Float {
         return min(minY(height, scale), homeY)
     }
@@ -77,7 +77,7 @@ open class ImageViewerState(var isVertical: Boolean = false) {
     fun maxY(height: Int, scale: Float): Float {
         return max(0f, (height.toFloat() / this.height - 1 / scale) / 2)
     }
-    
+
     fun maxY(height: Int, scale: Float, homeY: Float): Float {
         return max(maxY(height, scale), homeY)
     }
@@ -121,10 +121,17 @@ open class ImageViewerState(var isVertical: Boolean = false) {
         animationJob = scope?.launch {
             setPageOffsetDirect(direction.toFloat())
             invalidate()
-            Animatable(direction.toFloat()).animateTo(
-                0f, animationSpec = spring(stiffness = Spring.StiffnessMediumLow)
-            ) {
-                setPageOffsetDirect(value)
+            try {
+                Animatable(direction.toFloat()).animateTo(
+                    0f, animationSpec = spring(stiffness = Spring.StiffnessMediumLow)
+                ) {
+                    setPageOffsetDirect(value)
+                    invalidate()
+                }
+            } finally {
+                // Ensure we snap to exactly 0 and clear override
+                setPageOffsetDirect(0f)
+                transitionFromPage = null
                 invalidate()
             }
         }
@@ -138,6 +145,9 @@ open class ImageViewerState(var isVertical: Boolean = false) {
     var onPageChange: ((Int) -> Unit)? = null
     var onTap: ((Offset) -> Unit)? = null
     var onLongTap: ((Offset) -> Unit)? = null
+    
+    /** Override for the "from" page during far navigation animation */
+    var transitionFromPage: ImagePage? = null
 
     fun getPage(index: Int): ImagePage? {
         return fetchPage?.invoke(index)?.apply {
@@ -178,25 +188,27 @@ open class ImageViewerState(var isVertical: Boolean = false) {
             // Capture render state on main thread before any thread switching
             val snapshot = captureRenderState() ?: return@collectLatest
             // Now render on GPU thread with captured state
-            withContext(WebGpuRenderer.dispatcher) {
+            withContext(dispatcher) {
                 renderer.render { encoder, texture ->
                     renderSnapshot(encoder, texture, snapshot)
                 }
             }
         }
     }
-    
+
     protected open fun captureRenderState(): Any? {
         val currentPage = getPage(0) ?: return null
         val offset = pageOffset
         val adjacentPage = when {
+            offset == 0f -> null
+            // Use override if set (for far navigation)
+            transitionFromPage != null -> transitionFromPage
             offset > 0f -> getPage(1)
-            offset < 0f -> getPage(-1)
-            else -> null
+            else -> getPage(-1)
         }
         return RenderSnapshot(currentPage, adjacentPage, offset, transition, firstPos, currentPos)
     }
-    
+
     private class RenderSnapshot(
         val currentPage: ImagePage,
         val adjacentPage: ImagePage?,
@@ -205,11 +217,23 @@ open class ImageViewerState(var isVertical: Boolean = false) {
         val firstPos: Offset,
         val currentPos: Offset
     )
-    
-    protected open suspend fun renderSnapshot(encoder: GPUCommandEncoder, texture: GPUTexture, snapshot: Any) {
+
+    protected open suspend fun renderSnapshot(
+        encoder: GPUCommandEncoder,
+        texture: GPUTexture,
+        snapshot: Any
+    ) {
         val s = snapshot as RenderSnapshot
         if (s.adjacentPage != null && s.offset != 0f) {
-            s.transition.render(s.currentPage, s.adjacentPage, encoder, texture, s.offset, s.firstPos, s.currentPos)
+            s.transition.render(
+                s.currentPage,
+                s.adjacentPage,
+                encoder,
+                texture,
+                s.offset,
+                s.firstPos,
+                s.currentPos
+            )
         } else {
             TransitionBasic.render(s.currentPage, encoder, texture, 0f, 0f, 1f)
         }
