@@ -1,6 +1,6 @@
 plugins {
     alias(libs.plugins.android.library)
-    alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.kotlin.compose.compiler)
     id("com.vanniktech.maven.publish") version "0.36.0"
 }
 
@@ -52,6 +52,7 @@ android {
 }
 
 dependencies {
+    implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.annotation)
     implementation(libs.androidx.core)
     implementation(libs.androidx.webgpu)
