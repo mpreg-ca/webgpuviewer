@@ -55,8 +55,9 @@ dependencies {
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.annotation)
     implementation(libs.androidx.core)
-    implementation(libs.androidx.webgpu)
     implementation(libs.androidx.compose.foundation)
+
+    api(libs.androidx.webgpu)
 }
 
 afterEvaluate {
