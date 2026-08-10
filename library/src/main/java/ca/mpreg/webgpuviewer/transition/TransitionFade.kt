@@ -120,22 +120,317 @@ fn to_srgb_exact(linear_rgb: vec4<f32>) -> vec4<f32> {
     return vec4(select(higher, lower, cond), linear_rgb.a);
 }
 
-fn sampleImage1(uv: vec2<f32>) -> vec4<f32> {
-    let size = vec2<i32>(totalDimensions1());
-    let pos = vec2<i32>(uv * vec2<f32>(size));
-    if (pos.x < 0 || pos.y < 0 || pos.x >= size.x || pos.y >= size.y) {
-        return vec4<f32>(0.0);
-    }
-    return totalLoad1(pos);
+fn catmull_rom_weights(t: f32) -> array<f32, 4> {
+    let t2 = t * t;
+    let t3 = t2 * t;
+    return array<f32, 4>(
+        -0.5 * t3 + t2 - 0.5 * t,
+         1.5 * t3 - 2.5 * t2 + 1.0,
+        -1.5 * t3 + 2.0 * t2 + 0.5 * t,
+         0.5 * t3 - 0.5 * t2
+    );
 }
 
-fn sampleImage2(uv: vec2<f32>) -> vec4<f32> {
-    let size = vec2<i32>(totalDimensions2());
-    let pos = vec2<i32>(uv * vec2<f32>(size));
-    if (pos.x < 0 || pos.y < 0 || pos.x >= size.x || pos.y >= size.y) {
-        return vec4<f32>(0.0);
+// Image 1 sampling functions
+fn catmull_rom_fast1(tex: texture_2d<f32>, p: vec2<i32>, wx: array<f32, 4>, wy: array<f32, 4>) -> vec4<f32> {
+    let r0 = to_linear_exact(textureLoad(tex, vec2<i32>(p.x, p.y), 0)) * wx[0]
+           + to_linear_exact(textureLoad(tex, vec2<i32>(p.x+1, p.y), 0)) * wx[1]
+           + to_linear_exact(textureLoad(tex, vec2<i32>(p.x+2, p.y), 0)) * wx[2]
+           + to_linear_exact(textureLoad(tex, vec2<i32>(p.x+3, p.y), 0)) * wx[3];
+    let r1 = to_linear_exact(textureLoad(tex, vec2<i32>(p.x, p.y+1), 0)) * wx[0]
+           + to_linear_exact(textureLoad(tex, vec2<i32>(p.x+1, p.y+1), 0)) * wx[1]
+           + to_linear_exact(textureLoad(tex, vec2<i32>(p.x+2, p.y+1), 0)) * wx[2]
+           + to_linear_exact(textureLoad(tex, vec2<i32>(p.x+3, p.y+1), 0)) * wx[3];
+    let r2 = to_linear_exact(textureLoad(tex, vec2<i32>(p.x, p.y+2), 0)) * wx[0]
+           + to_linear_exact(textureLoad(tex, vec2<i32>(p.x+1, p.y+2), 0)) * wx[1]
+           + to_linear_exact(textureLoad(tex, vec2<i32>(p.x+2, p.y+2), 0)) * wx[2]
+           + to_linear_exact(textureLoad(tex, vec2<i32>(p.x+3, p.y+2), 0)) * wx[3];
+    let r3 = to_linear_exact(textureLoad(tex, vec2<i32>(p.x, p.y+3), 0)) * wx[0]
+           + to_linear_exact(textureLoad(tex, vec2<i32>(p.x+1, p.y+3), 0)) * wx[1]
+           + to_linear_exact(textureLoad(tex, vec2<i32>(p.x+2, p.y+3), 0)) * wx[2]
+           + to_linear_exact(textureLoad(tex, vec2<i32>(p.x+3, p.y+3), 0)) * wx[3];
+    return r0 * wy[0] + r1 * wy[1] + r2 * wy[2] + r3 * wy[3];
+}
+
+fn load_safe_linear1(pos: vec2<i32>, max_coord: vec2<i32>) -> vec4<f32> {
+    if (pos.x >= 0 && pos.x <= max_coord.x && pos.y >= 0 && pos.y <= max_coord.y) {
+        return to_linear_exact(totalLoad1(pos));
     }
-    return totalLoad2(pos);
+    return vec4<f32>(0.0);
+}
+
+fn catmull_rom_slow1(s: vec2<i32>, m: vec2<i32>, wx: array<f32, 4>, wy: array<f32, 4>) -> vec4<f32> {
+    let r0 = load_safe_linear1(vec2<i32>(s.x, s.y), m) * wx[0] + load_safe_linear1(vec2<i32>(s.x+1, s.y), m) * wx[1]
+           + load_safe_linear1(vec2<i32>(s.x+2, s.y), m) * wx[2] + load_safe_linear1(vec2<i32>(s.x+3, s.y), m) * wx[3];
+    let r1 = load_safe_linear1(vec2<i32>(s.x, s.y+1), m) * wx[0] + load_safe_linear1(vec2<i32>(s.x+1, s.y+1), m) * wx[1]
+           + load_safe_linear1(vec2<i32>(s.x+2, s.y+1), m) * wx[2] + load_safe_linear1(vec2<i32>(s.x+3, s.y+1), m) * wx[3];
+    let r2 = load_safe_linear1(vec2<i32>(s.x, s.y+2), m) * wx[0] + load_safe_linear1(vec2<i32>(s.x+1, s.y+2), m) * wx[1]
+           + load_safe_linear1(vec2<i32>(s.x+2, s.y+2), m) * wx[2] + load_safe_linear1(vec2<i32>(s.x+3, s.y+2), m) * wx[3];
+    let r3 = load_safe_linear1(vec2<i32>(s.x, s.y+3), m) * wx[0] + load_safe_linear1(vec2<i32>(s.x+1, s.y+3), m) * wx[1]
+           + load_safe_linear1(vec2<i32>(s.x+2, s.y+3), m) * wx[2] + load_safe_linear1(vec2<i32>(s.x+3, s.y+3), m) * wx[3];
+    return r0 * wy[0] + r1 * wy[1] + r2 * wy[2] + r3 * wy[3];
+}
+
+// Image 2 sampling functions
+fn catmull_rom_fast2(tex: texture_2d<f32>, p: vec2<i32>, wx: array<f32, 4>, wy: array<f32, 4>) -> vec4<f32> {
+    let r0 = to_linear_exact(textureLoad(tex, vec2<i32>(p.x, p.y), 0)) * wx[0]
+           + to_linear_exact(textureLoad(tex, vec2<i32>(p.x+1, p.y), 0)) * wx[1]
+           + to_linear_exact(textureLoad(tex, vec2<i32>(p.x+2, p.y), 0)) * wx[2]
+           + to_linear_exact(textureLoad(tex, vec2<i32>(p.x+3, p.y), 0)) * wx[3];
+    let r1 = to_linear_exact(textureLoad(tex, vec2<i32>(p.x, p.y+1), 0)) * wx[0]
+           + to_linear_exact(textureLoad(tex, vec2<i32>(p.x+1, p.y+1), 0)) * wx[1]
+           + to_linear_exact(textureLoad(tex, vec2<i32>(p.x+2, p.y+1), 0)) * wx[2]
+           + to_linear_exact(textureLoad(tex, vec2<i32>(p.x+3, p.y+1), 0)) * wx[3];
+    let r2 = to_linear_exact(textureLoad(tex, vec2<i32>(p.x, p.y+2), 0)) * wx[0]
+           + to_linear_exact(textureLoad(tex, vec2<i32>(p.x+1, p.y+2), 0)) * wx[1]
+           + to_linear_exact(textureLoad(tex, vec2<i32>(p.x+2, p.y+2), 0)) * wx[2]
+           + to_linear_exact(textureLoad(tex, vec2<i32>(p.x+3, p.y+2), 0)) * wx[3];
+    let r3 = to_linear_exact(textureLoad(tex, vec2<i32>(p.x, p.y+3), 0)) * wx[0]
+           + to_linear_exact(textureLoad(tex, vec2<i32>(p.x+1, p.y+3), 0)) * wx[1]
+           + to_linear_exact(textureLoad(tex, vec2<i32>(p.x+2, p.y+3), 0)) * wx[2]
+           + to_linear_exact(textureLoad(tex, vec2<i32>(p.x+3, p.y+3), 0)) * wx[3];
+    return r0 * wy[0] + r1 * wy[1] + r2 * wy[2] + r3 * wy[3];
+}
+
+fn load_safe_linear2(pos: vec2<i32>, max_coord: vec2<i32>) -> vec4<f32> {
+    if (pos.x >= 0 && pos.x <= max_coord.x && pos.y >= 0 && pos.y <= max_coord.y) {
+        return to_linear_exact(totalLoad2(pos));
+    }
+    return vec4<f32>(0.0);
+}
+
+fn catmull_rom_slow2(s: vec2<i32>, m: vec2<i32>, wx: array<f32, 4>, wy: array<f32, 4>) -> vec4<f32> {
+    let r0 = load_safe_linear2(vec2<i32>(s.x, s.y), m) * wx[0] + load_safe_linear2(vec2<i32>(s.x+1, s.y), m) * wx[1]
+           + load_safe_linear2(vec2<i32>(s.x+2, s.y), m) * wx[2] + load_safe_linear2(vec2<i32>(s.x+3, s.y), m) * wx[3];
+    let r1 = load_safe_linear2(vec2<i32>(s.x, s.y+1), m) * wx[0] + load_safe_linear2(vec2<i32>(s.x+1, s.y+1), m) * wx[1]
+           + load_safe_linear2(vec2<i32>(s.x+2, s.y+1), m) * wx[2] + load_safe_linear2(vec2<i32>(s.x+3, s.y+1), m) * wx[3];
+    let r2 = load_safe_linear2(vec2<i32>(s.x, s.y+2), m) * wx[0] + load_safe_linear2(vec2<i32>(s.x+1, s.y+2), m) * wx[1]
+           + load_safe_linear2(vec2<i32>(s.x+2, s.y+2), m) * wx[2] + load_safe_linear2(vec2<i32>(s.x+3, s.y+2), m) * wx[3];
+    let r3 = load_safe_linear2(vec2<i32>(s.x, s.y+3), m) * wx[0] + load_safe_linear2(vec2<i32>(s.x+1, s.y+3), m) * wx[1]
+           + load_safe_linear2(vec2<i32>(s.x+2, s.y+3), m) * wx[2] + load_safe_linear2(vec2<i32>(s.x+3, s.y+3), m) * wx[3];
+    return r0 * wy[0] + r1 * wy[1] + r2 * wy[2] + r3 * wy[3];
+}
+
+fn textureSampleCatmullRom1(uv: vec2<f32>) -> vec4<f32> {
+    let tex_size_u = totalDimensions1();
+    let tex_size = vec2<f32>(tex_size_u);
+    let pixel_coord = uv * tex_size - 0.5;
+    let base_coord = vec2<i32>(floor(pixel_coord));
+    let f = fract(pixel_coord);
+    let wx = catmull_rom_weights(f.x);
+    let wy = catmull_rom_weights(f.y);
+    let max_coord = vec2<i32>(tex_size_u) - 1;
+    let ts = i32(u.tile_size1);
+    let start_i = base_coord - vec2<i32>(1);
+    let end_i = base_coord + vec2<i32>(2);
+    let canvas_in_bounds = start_i.x >= 0 && start_i.y >= 0 && end_i.x <= max_coord.x && end_i.y <= max_coord.y;
+    let tile_TL = start_i / ts;
+    let tile_BR = end_i / ts;
+    let is_single_tile = all(tile_TL == tile_BR) && canvas_in_bounds;
+    var final_color_linear = vec4<f32>(0.0);
+    if (is_single_tile) {
+        let idx = tile_TL.y * 2 + tile_TL.x;
+        let local_offset = -tile_TL * ts;
+        let p_start = start_i + local_offset;
+        if (idx == 0) { final_color_linear = catmull_rom_fast1(tex1_0, p_start, wx, wy); }
+        else if (idx == 1) { final_color_linear = catmull_rom_fast1(tex1_1, p_start, wx, wy); }
+        else if (idx == 2) { final_color_linear = catmull_rom_fast1(tex1_2, p_start, wx, wy); }
+        else { final_color_linear = catmull_rom_fast1(tex1_3, p_start, wx, wy); }
+    } else {
+        final_color_linear = catmull_rom_slow1(start_i, max_coord, wx, wy);
+    }
+    return clamp(to_srgb_exact(final_color_linear), vec4(0.0), vec4(1.0));
+}
+
+fn textureSampleCatmullRom2(uv: vec2<f32>) -> vec4<f32> {
+    let tex_size_u = totalDimensions2();
+    let tex_size = vec2<f32>(tex_size_u);
+    let pixel_coord = uv * tex_size - 0.5;
+    let base_coord = vec2<i32>(floor(pixel_coord));
+    let f = fract(pixel_coord);
+    let wx = catmull_rom_weights(f.x);
+    let wy = catmull_rom_weights(f.y);
+    let max_coord = vec2<i32>(tex_size_u) - 1;
+    let ts = i32(u.tile_size2);
+    let start_i = base_coord - vec2<i32>(1);
+    let end_i = base_coord + vec2<i32>(2);
+    let canvas_in_bounds = start_i.x >= 0 && start_i.y >= 0 && end_i.x <= max_coord.x && end_i.y <= max_coord.y;
+    let tile_TL = start_i / ts;
+    let tile_BR = end_i / ts;
+    let is_single_tile = all(tile_TL == tile_BR) && canvas_in_bounds;
+    var final_color_linear = vec4<f32>(0.0);
+    if (is_single_tile) {
+        let idx = tile_TL.y * 2 + tile_TL.x;
+        let local_offset = -tile_TL * ts;
+        let p_start = start_i + local_offset;
+        if (idx == 0) { final_color_linear = catmull_rom_fast2(tex2_0, p_start, wx, wy); }
+        else if (idx == 1) { final_color_linear = catmull_rom_fast2(tex2_1, p_start, wx, wy); }
+        else if (idx == 2) { final_color_linear = catmull_rom_fast2(tex2_2, p_start, wx, wy); }
+        else { final_color_linear = catmull_rom_fast2(tex2_3, p_start, wx, wy); }
+    } else {
+        final_color_linear = catmull_rom_slow2(start_i, max_coord, wx, wy);
+    }
+    return clamp(to_srgb_exact(final_color_linear), vec4(0.0), vec4(1.0));
+}
+
+fn loop_over_tile1(tex: texture_2d<f32>, start_i: vec2<i32>, end_i: vec2<i32>, src_start: vec2<f32>, src_end: vec2<f32>, local_offset: vec2<i32>) -> vec4<f32> {
+    var color_sum = vec4<f32>(0.0);
+    var weight_sum = 0.0;
+    for (var y: i32 = start_i.y; y < end_i.y; y++) {
+        let y_f = f32(y);
+        var y_overlap = 1.0;
+        if (y == start_i.y) { y_overlap = min(y_f + 1.0, src_end.y) - src_start.y; }
+        else if (y == end_i.y - 1) { y_overlap = src_end.y - max(y_f, src_start.y); }
+        y_overlap = max(0.0, y_overlap);
+        let py = y + local_offset.y;
+        for (var x: i32 = start_i.x; x < end_i.x; x++) {
+            let x_f = f32(x);
+            var x_overlap = 1.0;
+            if (x == start_i.x) { x_overlap = min(x_f + 1.0, src_end.x) - src_start.x; }
+            else if (x == end_i.x - 1) { x_overlap = src_end.x - max(x_f, src_start.x); }
+            x_overlap = max(0.0, x_overlap);
+            let weight = x_overlap * y_overlap;
+            let px = x + local_offset.x;
+            let texel = to_linear_exact(textureLoad(tex, vec2<i32>(px, py), 0));
+            color_sum += texel * weight;
+            weight_sum += weight;
+        }
+    }
+    return color_sum / max(weight_sum, 0.0001);
+}
+
+fn downsample1(src_start: vec2<f32>, scale: vec2<f32>) -> vec4<f32> {
+    let src_size_f = vec2<f32>(totalDimensions1());
+    let src_end = src_start + scale;
+    let start_i = vec2<i32>(clamp(floor(src_start), vec2<f32>(0.0), src_size_f));
+    let end_i = vec2<i32>(clamp(ceil(src_end), vec2<f32>(0.0), src_size_f));
+    let ts = i32(u.tile_size1);
+    let tile_TL = start_i / ts;
+    let tile_BR = (end_i - 1) / ts;
+    let in_bounds = start_i.x >= 0 && start_i.y >= 0 && (end_i.x - 1) < ts * 2 && (end_i.y - 1) < ts * 2;
+    let is_single_tile = all(tile_TL == tile_BR) && in_bounds;
+    if (is_single_tile) {
+        let idx = tile_TL.y * 2 + tile_TL.x;
+        let local_offset = -tile_TL * ts;
+        var avg_color = vec4<f32>(0.0);
+        if (idx == 0) { avg_color = loop_over_tile1(tex1_0, start_i, end_i, src_start, src_end, local_offset); }
+        else if (idx == 1) { avg_color = loop_over_tile1(tex1_1, start_i, end_i, src_start, src_end, local_offset); }
+        else if (idx == 2) { avg_color = loop_over_tile1(tex1_2, start_i, end_i, src_start, src_end, local_offset); }
+        else { avg_color = loop_over_tile1(tex1_3, start_i, end_i, src_start, src_end, local_offset); }
+        return to_srgb_exact(avg_color);
+    } else {
+        var color_sum = vec4<f32>(0.0);
+        var weight_sum = 0.0;
+        for (var y: i32 = start_i.y; y < end_i.y; y++) {
+            let y_f = f32(y);
+            var y_overlap = 1.0;
+            if (y == start_i.y) { y_overlap = min(y_f + 1.0, src_end.y) - src_start.y; }
+            else if (y == end_i.y - 1) { y_overlap = src_end.y - max(y_f, src_start.y); }
+            y_overlap = max(0.0, y_overlap);
+            for (var x: i32 = start_i.x; x < end_i.x; x++) {
+                let x_f = f32(x);
+                var x_overlap = 1.0;
+                if (x == start_i.x) { x_overlap = min(x_f + 1.0, src_end.x) - src_start.x; }
+                else if (x == end_i.x - 1) { x_overlap = src_end.x - max(x_f, src_start.x); }
+                x_overlap = max(0.0, x_overlap);
+                let weight = x_overlap * y_overlap;
+                let texel = to_linear_exact(totalLoad1(vec2<i32>(x, y)));
+                color_sum += texel * weight;
+                weight_sum += weight;
+            }
+        }
+        return to_srgb_exact(color_sum / max(weight_sum, 0.0001));
+    }
+}
+
+fn loop_over_tile2(tex: texture_2d<f32>, start_i: vec2<i32>, end_i: vec2<i32>, src_start: vec2<f32>, src_end: vec2<f32>, local_offset: vec2<i32>) -> vec4<f32> {
+    var color_sum = vec4<f32>(0.0);
+    var weight_sum = 0.0;
+    for (var y: i32 = start_i.y; y < end_i.y; y++) {
+        let y_f = f32(y);
+        var y_overlap = 1.0;
+        if (y == start_i.y) { y_overlap = min(y_f + 1.0, src_end.y) - src_start.y; }
+        else if (y == end_i.y - 1) { y_overlap = src_end.y - max(y_f, src_start.y); }
+        y_overlap = max(0.0, y_overlap);
+        let py = y + local_offset.y;
+        for (var x: i32 = start_i.x; x < end_i.x; x++) {
+            let x_f = f32(x);
+            var x_overlap = 1.0;
+            if (x == start_i.x) { x_overlap = min(x_f + 1.0, src_end.x) - src_start.x; }
+            else if (x == end_i.x - 1) { x_overlap = src_end.x - max(x_f, src_start.x); }
+            x_overlap = max(0.0, x_overlap);
+            let weight = x_overlap * y_overlap;
+            let px = x + local_offset.x;
+            let texel = to_linear_exact(textureLoad(tex, vec2<i32>(px, py), 0));
+            color_sum += texel * weight;
+            weight_sum += weight;
+        }
+    }
+    return color_sum / max(weight_sum, 0.0001);
+}
+
+fn downsample2(src_start: vec2<f32>, scale: vec2<f32>) -> vec4<f32> {
+    let src_size_f = vec2<f32>(totalDimensions2());
+    let src_end = src_start + scale;
+    let start_i = vec2<i32>(clamp(floor(src_start), vec2<f32>(0.0), src_size_f));
+    let end_i = vec2<i32>(clamp(ceil(src_end), vec2<f32>(0.0), src_size_f));
+    let ts = i32(u.tile_size2);
+    let tile_TL = start_i / ts;
+    let tile_BR = (end_i - 1) / ts;
+    let in_bounds = start_i.x >= 0 && start_i.y >= 0 && (end_i.x - 1) < ts * 2 && (end_i.y - 1) < ts * 2;
+    let is_single_tile = all(tile_TL == tile_BR) && in_bounds;
+    if (is_single_tile) {
+        let idx = tile_TL.y * 2 + tile_TL.x;
+        let local_offset = -tile_TL * ts;
+        var avg_color = vec4<f32>(0.0);
+        if (idx == 0) { avg_color = loop_over_tile2(tex2_0, start_i, end_i, src_start, src_end, local_offset); }
+        else if (idx == 1) { avg_color = loop_over_tile2(tex2_1, start_i, end_i, src_start, src_end, local_offset); }
+        else if (idx == 2) { avg_color = loop_over_tile2(tex2_2, start_i, end_i, src_start, src_end, local_offset); }
+        else { avg_color = loop_over_tile2(tex2_3, start_i, end_i, src_start, src_end, local_offset); }
+        return to_srgb_exact(avg_color);
+    } else {
+        var color_sum = vec4<f32>(0.0);
+        var weight_sum = 0.0;
+        for (var y: i32 = start_i.y; y < end_i.y; y++) {
+            let y_f = f32(y);
+            var y_overlap = 1.0;
+            if (y == start_i.y) { y_overlap = min(y_f + 1.0, src_end.y) - src_start.y; }
+            else if (y == end_i.y - 1) { y_overlap = src_end.y - max(y_f, src_start.y); }
+            y_overlap = max(0.0, y_overlap);
+            for (var x: i32 = start_i.x; x < end_i.x; x++) {
+                let x_f = f32(x);
+                var x_overlap = 1.0;
+                if (x == start_i.x) { x_overlap = min(x_f + 1.0, src_end.x) - src_start.x; }
+                else if (x == end_i.x - 1) { x_overlap = src_end.x - max(x_f, src_start.x); }
+                x_overlap = max(0.0, x_overlap);
+                let weight = x_overlap * y_overlap;
+                let texel = to_linear_exact(totalLoad2(vec2<i32>(x, y)));
+                color_sum += texel * weight;
+                weight_sum += weight;
+            }
+        }
+        return to_srgb_exact(color_sum / max(weight_sum, 0.0001));
+    }
+}
+
+fn sampleImage1(uv: vec2<f32>, scale_factor: f32) -> vec4<f32> {
+    let src_size_f = vec2<f32>(totalDimensions1());
+    if (scale_factor > 1.0) {
+        let src_start = uv * src_size_f;
+        return downsample1(src_start, vec2<f32>(scale_factor));
+    } else {
+        return textureSampleCatmullRom1(uv);
+    }
+}
+
+fn sampleImage2(uv: vec2<f32>, scale_factor: f32) -> vec4<f32> {
+    let src_size_f = vec2<f32>(totalDimensions2());
+    if (scale_factor > 1.0) {
+        let src_start = uv * src_size_f;
+        return downsample2(src_start, vec2<f32>(scale_factor));
+    } else {
+        return textureSampleCatmullRom2(uv);
+    }
 }
 
 @vertex
@@ -152,15 +447,12 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     let uv = uvs[vertex_index];
     let dst_size_f = vec2<f32>(u.dst_width, u.dst_height);
     
-    // Use full screen quad
     let ndc_x = uv.x * 2.0 - 1.0;
     let ndc_y = 1.0 - uv.y * 2.0;
     
-    // Calculate UV for each image based on their transforms
     let src_size1 = vec2<f32>(totalDimensions1());
     let src_size2 = vec2<f32>(totalDimensions2());
     
-    // Convert screen UV to image UV
     let screen_pos = uv * dst_size_f;
     let uv1 = (screen_pos / u.scale1 - u.offset1 * dst_size_f) / src_size1;
     let uv2 = (screen_pos / u.scale2 - u.offset2 * dst_size_f) / src_size2;
@@ -174,18 +466,18 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let col1 = sampleImage1(in.uv1);
-    let col2 = sampleImage2(in.uv2);
+    let scale_factor1 = 1.0 / u.scale1;
+    let scale_factor2 = 1.0 / u.scale2;
     
-    // Convert to linear for proper blending
+    let col1 = sampleImage1(in.uv1, scale_factor1);
+    let col2 = sampleImage2(in.uv2, scale_factor2);
+    
     let linear1 = to_linear_exact(col1);
     let linear2 = to_linear_exact(col2);
     
-    // Blend in linear space
     let t = u.blend;
     let blended = mix(linear1, linear2, t);
     
-    // Convert back to sRGB
     let result = to_srgb_exact(blended);
     return vec4<f32>(result.rgb * result.a, result.a);
 }"""
