@@ -145,7 +145,7 @@ open class ImageViewerState(var isVertical: Boolean = false) {
     var onPageChange: ((Int) -> Unit)? = null
     var onTap: ((Offset) -> Unit)? = null
     var onLongTap: ((Offset) -> Unit)? = null
-    
+
     /** Override for the "from" page during far navigation animation */
     var transitionFromPage: ImagePage? = null
 

@@ -5,7 +5,6 @@ import android.util.Log
 import androidx.webgpu.BufferUsage
 import androidx.webgpu.GPUBindGroupDescriptor
 import androidx.webgpu.GPUBindGroupEntry
-import androidx.webgpu.GPUBuffer
 import androidx.webgpu.GPUBufferDescriptor
 import androidx.webgpu.GPUComputePipeline
 import androidx.webgpu.GPUComputePipelineDescriptor
@@ -33,7 +32,7 @@ import kotlin.time.Duration.Companion.milliseconds
 class Trim {
     companion object {
         private const val TAG = "Trim"
-        
+
         val device get() = WebGpuRenderer.device
         val instance get() = WebGpuRenderer.instance
 
@@ -99,19 +98,26 @@ class Trim {
                 findInContext(device, image, r, g, b, threshold)
             }
         }
-        
+
         /**
          * Find trim bounds when already inside a GPU context. Avoids extra context switch.
          * Returns a Rect with 0,0,width,height if trim detection fails.
          */
-        suspend fun findInContext(device: GPUDevice, image: Image, r: Float, g: Float, b: Float, threshold: Float): Rect {
+        suspend fun findInContext(
+            device: GPUDevice,
+            image: Image,
+            r: Float,
+            g: Float,
+            b: Float,
+            threshold: Float
+        ): Rect {
             if (image.mipmaps.isEmpty()) {
                 Log.w(TAG, "findInContext: image has no mipmaps, returning full bounds")
                 return Rect(0, 0, image.width, image.height)
             }
-            
+
             val mipmap = image.mipmaps[0]
-            
+
             if (mipmap.textures.isEmpty()) {
                 Log.w(TAG, "findInContext: mipmap has no textures, returning full bounds")
                 return Rect(0, 0, image.width, image.height)
@@ -128,7 +134,7 @@ class Trim {
                 Rect(0, 0, image.width, image.height)
             }
         }
-        
+
         private suspend fun findSingleTile(
             texture: GPUTexture,
             r: Float, g: Float, b: Float, threshold: Float
@@ -148,7 +154,7 @@ class Trim {
                 job.cancel()
             }
         }
-        
+
         private suspend fun findMultiTile(
             mipmap: Mipmap,
             r: Float, g: Float, b: Float, threshold: Float
@@ -161,24 +167,60 @@ class Trim {
             for (row in 0 until mipmap.tilesRows) {
                 val leftIdx = row * mipmap.tilesCols
                 val rightIdx = row * mipmap.tilesCols + mipmap.tilesCols - 1
-                
+
                 if (leftIdx < mipmap.textures.size) {
-                    left.add(dispatchTrimCompute(mipmap.textures[leftIdx], pipelineLeft, r, g, b, threshold))
+                    left.add(
+                        dispatchTrimCompute(
+                            mipmap.textures[leftIdx],
+                            pipelineLeft,
+                            r,
+                            g,
+                            b,
+                            threshold
+                        )
+                    )
                 }
                 if (rightIdx < mipmap.textures.size) {
-                    right.add(dispatchTrimCompute(mipmap.textures[rightIdx], pipelineRight, r, g, b, threshold))
+                    right.add(
+                        dispatchTrimCompute(
+                            mipmap.textures[rightIdx],
+                            pipelineRight,
+                            r,
+                            g,
+                            b,
+                            threshold
+                        )
+                    )
                 }
             }
 
             for (col in 0 until mipmap.tilesCols) {
                 val topIdx = col
                 val bottomIdx = (mipmap.tilesRows - 1) * mipmap.tilesCols + col
-                
+
                 if (topIdx < mipmap.textures.size) {
-                    top.add(dispatchTrimCompute(mipmap.textures[topIdx], pipelineTop, r, g, b, threshold))
+                    top.add(
+                        dispatchTrimCompute(
+                            mipmap.textures[topIdx],
+                            pipelineTop,
+                            r,
+                            g,
+                            b,
+                            threshold
+                        )
+                    )
                 }
                 if (bottomIdx < mipmap.textures.size) {
-                    bottom.add(dispatchTrimCompute(mipmap.textures[bottomIdx], pipelineBottom, r, g, b, threshold))
+                    bottom.add(
+                        dispatchTrimCompute(
+                            mipmap.textures[bottomIdx],
+                            pipelineBottom,
+                            r,
+                            g,
+                            b,
+                            threshold
+                        )
+                    )
                 }
             }
 
@@ -194,14 +236,14 @@ class Trim {
                 val topResults = top.awaitAll()
                 val rightResults = right.awaitAll()
                 val bottomResults = bottom.awaitAll()
-                
+
                 Rect(
                     leftResults.minOfOrNull { it.left } ?: 0,
                     topResults.minOfOrNull { it.top } ?: 0,
-                    (rightResults.maxOfOrNull { it.right } ?: mipmap.tilesize) + 
-                        mipmap.tilesize * (mipmap.tilesCols - 1),
-                    (bottomResults.maxOfOrNull { it.bottom } ?: mipmap.tilesize) + 
-                        mipmap.tilesize * (mipmap.tilesRows - 1),
+                    (rightResults.maxOfOrNull { it.right } ?: mipmap.tilesize) +
+                            mipmap.tilesize * (mipmap.tilesCols - 1),
+                    (bottomResults.maxOfOrNull { it.bottom } ?: mipmap.tilesize) +
+                            mipmap.tilesize * (mipmap.tilesRows - 1),
                 )
             } finally {
                 job.cancel()
@@ -318,7 +360,10 @@ class Trim {
             return res
         }
 
-        @Deprecated("Use find() or findInContext() instead", ReplaceWith("find(image, r, g, b, threshold)"))
+        @Deprecated(
+            "Use find() or findInContext() instead",
+            ReplaceWith("find(image, r, g, b, threshold)")
+        )
         fun find(
             texture: GPUTexture,
             pipeline: GPUComputePipeline,

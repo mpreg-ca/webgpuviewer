@@ -45,7 +45,7 @@ class WebGpuRenderer {
         val dispatcher = Executors.newSingleThreadExecutor { runnable ->
             Thread(runnable, "WebGPU-Render-Thread")
         }.asCoroutineDispatcher()
-        
+
         // Frame time profiling
         var profilingEnabled = false
         private var frameCount = 0L
@@ -55,22 +55,23 @@ class WebGpuRenderer {
         private var lastFrameTimeNs = 0L
         private val recentFrameTimes = LongArray(60)
         private var recentFrameIndex = 0
-        
+
         val lastFrameTimeMs: Float get() = lastFrameTimeNs / 1_000_000f
         val avgFrameTimeMs: Float get() = if (frameCount > 0) totalFrameTimeNs / frameCount / 1_000_000f else 0f
         val minFrameTimeMs: Float get() = if (minFrameTimeNs == Long.MAX_VALUE) 0f else minFrameTimeNs / 1_000_000f
         val maxFrameTimeMs: Float get() = maxFrameTimeNs / 1_000_000f
-        val recentAvgFrameTimeMs: Float get() {
-            val count = minOf(frameCount.toInt(), 60)
-            if (count == 0) return 0f
-            var sum = 0L
-            for (i in 0 until count) {
-                sum += recentFrameTimes[i]
+        val recentAvgFrameTimeMs: Float
+            get() {
+                val count = minOf(frameCount.toInt(), 60)
+                if (count == 0) return 0f
+                var sum = 0L
+                for (i in 0 until count) {
+                    sum += recentFrameTimes[i]
+                }
+                return sum.toFloat() / count / 1_000_000f
             }
-            return sum.toFloat() / count / 1_000_000f
-        }
         val estimatedFps: Float get() = if (lastFrameTimeNs > 0) 1_000_000_000f / lastFrameTimeNs else 0f
-        
+
         fun resetProfiling() {
             frameCount = 0
             totalFrameTimeNs = 0
@@ -80,7 +81,7 @@ class WebGpuRenderer {
             recentFrameIndex = 0
             recentFrameTimes.fill(0)
         }
-        
+
         internal fun recordFrameTime(timeNs: Long) {
             if (!profilingEnabled) return
             frameCount++
@@ -176,15 +177,17 @@ class WebGpuRenderer {
             device.queue.submit(arrayOf(encoder.finish()))
             surface.present()
         }
-        
+
         if (profilingEnabled) {
             val frameTime = System.nanoTime() - startTime
             recordFrameTime(frameTime)
-            android.util.Log.d("WebGpuRenderer", "Frame: %.2fms | Avg: %.2fms | FPS: %.1f".format(
-                frameTime / 1_000_000f,
-                recentAvgFrameTimeMs,
-                estimatedFps
-            ))
+            android.util.Log.d(
+                "WebGpuRenderer", "Frame: %.2fms | Avg: %.2fms | FPS: %.1f".format(
+                    frameTime / 1_000_000f,
+                    recentAvgFrameTimeMs,
+                    estimatedFps
+                )
+            )
         }
     }
 
