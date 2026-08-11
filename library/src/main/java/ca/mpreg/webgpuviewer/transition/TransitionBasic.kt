@@ -379,11 +379,57 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         val res = image.prepareForRender(dst, page.x + x, page.y + y, page.scale * scale) ?: return
 
         // Draw background color behind the image
-        val srcWidth = res.mipmap.width.toFloat()
-        val finalScale = res.scale
-        val x1 = finalScale * res.x
-        val x2 = finalScale * (res.x + srcWidth / dst.width)
-        Draw.rect(encoder, dst, x1, 0f, x2, 1f, image.backgroundColor)
+        // Fade out background when scale is below minScale or panned past bounds
+        val parent = page.parent
+        val minScale = page.minScale
+        val currentScale = page.scale * scale
+
+        var bgAlpha = 1f
+
+        // Fade over 50 pixels of movement past bounds (in screen coordinates)
+        val fadeDistancePixels = 50f
+
+        // Fade based on scale - equivalent to 50 pixels of size reduction
+        if (parent != null && currentScale < minScale && minScale > 0f) {
+            // Calculate how many pixels the image has shrunk from minScale size
+            val imageSize = (page.width.coerceAtLeast(page.height)).toFloat()
+            val sizeAtMinScale = imageSize * minScale
+            val currentSize = imageSize * currentScale
+            val shrinkPixels = sizeAtMinScale - currentSize
+            bgAlpha *= (1f - shrinkPixels / fadeDistancePixels).coerceIn(0f, 1f)
+        }
+
+        // Fade based on Y pan position
+        if (parent != null && parent.height > 0) {
+            val minY = parent.minY(page.height, page.scale, page.homeY)
+            val maxY = parent.maxY(page.height, page.scale, page.homeY)
+            val currentY = page.y
+            val fadeDistance = fadeDistancePixels / parent.height / page.scale
+
+            if (currentY < minY) {
+                val overflow = minY - currentY
+                bgAlpha *= (1f - overflow / fadeDistance).coerceIn(0f, 1f)
+            } else if (currentY > maxY) {
+                val overflow = currentY - maxY
+                bgAlpha *= (1f - overflow / fadeDistance).coerceIn(0f, 1f)
+            }
+        }
+
+        if (bgAlpha > 0f) {
+            val srcWidth = res.mipmap.width.toFloat()
+            val finalScale = res.scale
+            val x1 = finalScale * res.x
+            val x2 = finalScale * (res.x + srcWidth / dst.width)
+            // Fade color toward black based on bgAlpha
+            val origR = (image.backgroundColor shr 16) and 0xFF
+            val origG = (image.backgroundColor shr 8) and 0xFF
+            val origB = image.backgroundColor and 0xFF
+            val r = (origR * bgAlpha).toInt()
+            val g = (origG * bgAlpha).toInt()
+            val b = (origB * bgAlpha).toInt()
+            val bgColor = 0xFF000000.toInt() or (r shl 16) or (g shl 8) or b
+            Draw.rect(encoder, dst, x1, 0f, x2, 1f, bgColor)
+        }
 
         // Render the image on top
         render(image, encoder, dst, res)
