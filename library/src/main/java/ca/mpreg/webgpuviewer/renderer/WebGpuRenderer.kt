@@ -1,5 +1,6 @@
 package ca.mpreg.webgpuviewer.renderer
 
+import android.util.Log
 import android.view.Surface
 import androidx.webgpu.DeviceLostCallback
 import androidx.webgpu.DeviceLostException
@@ -37,7 +38,7 @@ class WebGpuRenderer {
         var instance: GPUInstance
         var adapter: GPUAdapter
         var device: GPUDevice
-        val mutex = Mutex()
+        private val mutex = Mutex()
 
         var offsetX: Float = 0f
         var offsetY: Float = 0f
@@ -137,7 +138,10 @@ class WebGpuRenderer {
         this.width = width
         this.height = height
 
-        runBlocking(dispatcher) {
+        // Check if already on dispatcher thread to avoid deadlock
+        val isOnDispatcherThread = Thread.currentThread().name == "WebGPU-Render-Thread"
+
+        val initSurface = {
             this@WebGpuRenderer.surface = surface.let {
                 instance.createSurface(
                     GPUSurfaceDescriptor(
@@ -152,10 +156,18 @@ class WebGpuRenderer {
                             width,
                             height,
                             TextureFormat.RGBA8Unorm,
-                            TextureUsage.RenderAttachment or TextureUsage.StorageBinding
+                            TextureUsage.RenderAttachment
                         )
                     )
                 }
+            }
+        }
+
+        if (isOnDispatcherThread) {
+            initSurface()
+        } else {
+            runBlocking(dispatcher) {
+                initSurface()
             }
         }
     }
@@ -181,7 +193,7 @@ class WebGpuRenderer {
         if (profilingEnabled) {
             val frameTime = System.nanoTime() - startTime
             recordFrameTime(frameTime)
-            android.util.Log.d(
+            Log.d(
                 "WebGpuRenderer", "Frame: %.2fms | Avg: %.2fms | FPS: %.1f".format(
                     frameTime / 1_000_000f,
                     recentAvgFrameTimeMs,
@@ -192,10 +204,24 @@ class WebGpuRenderer {
     }
 
     fun cleanup() {
-        runBlocking(dispatcher) {
+        // Check if already on dispatcher thread to avoid deadlock
+        val isOnDispatcherThread = Thread.currentThread().name == "WebGPU-Render-Thread"
+
+        val doCleanup: suspend () -> Unit = {
             mutex.withLock {
                 surface?.close()
                 surface = null
+            }
+        }
+
+        if (isOnDispatcherThread) {
+            // Already on dispatcher, run synchronously
+            runBlocking {
+                doCleanup()
+            }
+        } else {
+            runBlocking(dispatcher) {
+                doCleanup()
             }
         }
     }

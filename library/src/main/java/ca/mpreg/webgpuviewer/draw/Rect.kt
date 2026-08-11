@@ -1,62 +1,108 @@
 package ca.mpreg.webgpuviewer.draw
 
+import androidx.webgpu.BlendFactor
+import androidx.webgpu.BlendOperation
 import androidx.webgpu.BufferUsage
 import androidx.webgpu.GPUBindGroupDescriptor
 import androidx.webgpu.GPUBindGroupEntry
+import androidx.webgpu.GPUBlendComponent
+import androidx.webgpu.GPUBlendState
 import androidx.webgpu.GPUBufferDescriptor
+import androidx.webgpu.GPUColorTargetState
 import androidx.webgpu.GPUCommandEncoder
-import androidx.webgpu.GPUComputePipeline
-import androidx.webgpu.GPUComputePipelineDescriptor
-import androidx.webgpu.GPUComputeState
+import androidx.webgpu.GPUFragmentState
+import androidx.webgpu.GPUPrimitiveState
+import androidx.webgpu.GPURenderPassColorAttachment
+import androidx.webgpu.GPURenderPassDescriptor
+import androidx.webgpu.GPURenderPipeline
+import androidx.webgpu.GPURenderPipelineDescriptor
 import androidx.webgpu.GPUShaderModuleDescriptor
 import androidx.webgpu.GPUShaderSourceWGSL
 import androidx.webgpu.GPUTexture
+import androidx.webgpu.GPUVertexState
+import androidx.webgpu.LoadOp
+import androidx.webgpu.PrimitiveTopology
+import androidx.webgpu.StoreOp
+import androidx.webgpu.TextureFormat
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import kotlin.math.ceil
 
 private val device get() = WebGpuRenderer.device
 
-private val pipeline: GPUComputePipeline by lazy {
-    device.createComputePipeline(
-        GPUComputePipelineDescriptor(
-            GPUComputeState(
-                device.createShaderModule(
-                    GPUShaderModuleDescriptor(
-                        shaderSourceWGSL = GPUShaderSourceWGSL(RECT_SHADER)
+private val pipeline: GPURenderPipeline by lazy {
+    val shaderModule = device.createShaderModule(
+        GPUShaderModuleDescriptor(
+            shaderSourceWGSL = GPUShaderSourceWGSL(RECT_SHADER)
+        )
+    )
+    device.createRenderPipeline(
+        GPURenderPipelineDescriptor(
+            vertex = GPUVertexState(module = shaderModule, entryPoint = "vs_main"),
+            fragment = GPUFragmentState(
+                module = shaderModule, entryPoint = "fs_main", targets = arrayOf(
+                    GPUColorTargetState(
+                        format = TextureFormat.RGBA8Unorm, blend = GPUBlendState(
+                            color = GPUBlendComponent(
+                                srcFactor = BlendFactor.SrcAlpha,
+                                dstFactor = BlendFactor.OneMinusSrcAlpha,
+                                operation = BlendOperation.Add
+                            ), alpha = GPUBlendComponent(
+                                srcFactor = BlendFactor.One,
+                                dstFactor = BlendFactor.OneMinusSrcAlpha,
+                                operation = BlendOperation.Add
+                            )
+                        )
                     )
                 )
-            )
+            ),
+            primitive = GPUPrimitiveState(topology = PrimitiveTopology.TriangleList)
         )
     )
 }
 
 private const val RECT_SHADER = """
 struct Params {
-    rect: vec4<f32>,
+    rect: vec4<f32>,  // left, top, right, bottom in NDC
     color: vec4<f32>,
 }
 
-@group(0) @binding(0) var output_tex: texture_storage_2d<rgba8unorm, write>;
-@group(0) @binding(1) var<uniform> params: Params;
+@group(0) @binding(0) var<uniform> params: Params;
 
-@compute @workgroup_size(8, 8, 1)
-fn main(@builtin(global_invocation_id) id: vec3<u32>) {
-    let dims = textureDimensions(output_tex);
-    if (id.x >= dims.x || id.y >= dims.y) { return; }
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+}
 
-    let x = f32(id.x);
-    let y = f32(id.y);
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
+    // Two triangles forming a quad
+    var positions = array<vec2<f32>, 6>(
+        vec2<f32>(0.0, 0.0), // Top-left
+        vec2<f32>(0.0, 1.0), // Bottom-left
+        vec2<f32>(1.0, 0.0), // Top-right
+        vec2<f32>(1.0, 0.0), // Top-right
+        vec2<f32>(0.0, 1.0), // Bottom-left
+        vec2<f32>(1.0, 1.0)  // Bottom-right
+    );
     
-    let left = params.rect.x;
-    let top = params.rect.y;
-    let right = params.rect.z;
-    let bottom = params.rect.w;
+    let pos = positions[vertex_index];
     
-    if (x >= left && x < right && y >= top && y < bottom) {
-        textureStore(output_tex, vec2<i32>(id.xy), params.color);
-    }
+    // Interpolate between rect bounds (in normalized 0-1 coords stored in params)
+    let x = mix(params.rect.x, params.rect.z, pos.x);
+    let y = mix(params.rect.y, params.rect.w, pos.y);
+    
+    // Convert to NDC [-1, 1]
+    let ndc_x = x * 2.0 - 1.0;
+    let ndc_y = 1.0 - y * 2.0;
+    
+    var out: VertexOutput;
+    out.position = vec4<f32>(ndc_x, ndc_y, 0.0, 1.0);
+    return out;
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    return params.color;
 }
 """
 
@@ -83,45 +129,45 @@ fun Draw.rect(
     val b = (color and 0xFF) / 255f
     val a = ((color ushr 24) and 0xFF) / 255f
 
-    val left = x1 * texture.width
-    val top = y1 * texture.height
-    val right = x2 * texture.width
-    val bottom = y2 * texture.height
-
     val byteBuffer = byteBufferLocal.get()
     byteBuffer.clear()
-    byteBuffer.putFloat(left)
-    byteBuffer.putFloat(top)
-    byteBuffer.putFloat(right)
-    byteBuffer.putFloat(bottom)
+    byteBuffer.putFloat(x1)
+    byteBuffer.putFloat(y1)
+    byteBuffer.putFloat(x2)
+    byteBuffer.putFloat(y2)
     byteBuffer.putFloat(r)
     byteBuffer.putFloat(g)
     byteBuffer.putFloat(b)
     byteBuffer.putFloat(a)
     byteBuffer.flip()
 
-    // Buffer is created per-call because it must persist until GPU work completes.
-    // WebGPU drivers efficiently pool small uniform buffers.
     val uniformBuffer = device.createBuffer(
         GPUBufferDescriptor(size = 32, usage = BufferUsage.Uniform or BufferUsage.CopyDst)
     )
     device.queue.writeBuffer(uniformBuffer, 0, byteBuffer)
 
-    val dispatchW = ceil(texture.width / 8f).toInt()
-    val dispatchH = ceil(texture.height / 8f).toInt()
-
-    val pass = encoder.beginComputePass()
+    val pass = encoder.beginRenderPass(
+        GPURenderPassDescriptor(
+            colorAttachments = arrayOf(
+                GPURenderPassColorAttachment(
+                    view = texture.createView(),
+                    loadOp = LoadOp.Load,
+                    storeOp = StoreOp.Store,
+                    clearValue = androidx.webgpu.GPUColor(0.0, 0.0, 0.0, 0.0)
+                )
+            )
+        )
+    )
     pass.setPipeline(pipeline)
     pass.setBindGroup(
         0, device.createBindGroup(
             GPUBindGroupDescriptor(
                 layout = pipeline.getBindGroupLayout(0), entries = arrayOf(
-                    GPUBindGroupEntry(0, textureView = texture.createView()),
-                    GPUBindGroupEntry(1, buffer = uniformBuffer),
+                    GPUBindGroupEntry(0, buffer = uniformBuffer)
                 )
             )
         )
     )
-    pass.dispatchWorkgroups(dispatchW, dispatchH)
+    pass.draw(6)
     pass.end()
 }
