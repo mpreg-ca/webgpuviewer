@@ -9,7 +9,6 @@ import androidx.webgpu.GPUBufferDescriptor
 import androidx.webgpu.GPUComputePipeline
 import androidx.webgpu.GPUComputePipelineDescriptor
 import androidx.webgpu.GPUComputeState
-import androidx.webgpu.GPUDevice
 import androidx.webgpu.GPURequestCallback
 import androidx.webgpu.GPUShaderModuleDescriptor
 import androidx.webgpu.GPUShaderSourceWGSL
@@ -33,10 +32,383 @@ class Trim {
     companion object {
         private const val TAG = "Trim"
 
-        val device get() = WebGpuRenderer.device
-        val instance get() = WebGpuRenderer.instance
+        private val device get() = WebGpuRenderer.device
+        private val instance get() = WebGpuRenderer.instance
 
-        val pipelineAll: GPUComputePipeline by lazy {
+        /**
+         * Detect background color by checking if any edge has low variance (solid color).
+         * Returns the detected color or 0xFFFFFF (white) if no solid edge found.
+         */
+        suspend fun detectBackgroundInContext(
+            image: Image, 
+            threshold: Float = 0.05f
+        ): Int {
+            if (image.mipmaps.isEmpty()) return 0xFFFFFF
+            val mipmap = image.mipmaps[0]
+            if (mipmap.textures.isEmpty()) return 0xFFFFFF
+
+            return coroutineScope {
+                // Collect results grouped by edge direction
+                val leftResults = mutableListOf<Deferred<EdgeResult>>()
+                val rightResults = mutableListOf<Deferred<EdgeResult>>()
+                val topResults = mutableListOf<Deferred<EdgeResult>>()
+                val bottomResults = mutableListOf<Deferred<EdgeResult>>()
+                
+                // Left edge: first column of tiles
+                for (row in 0 until mipmap.tilesRows) {
+                    val idx = row * mipmap.tilesCols
+                    if (idx < mipmap.textures.size) {
+                        leftResults.add(dispatchEdgeDetect(mipmap.textures[idx], Edge.LEFT, threshold))
+                    }
+                }
+                
+                // Right edge: last column of tiles
+                for (row in 0 until mipmap.tilesRows) {
+                    val idx = row * mipmap.tilesCols + mipmap.tilesCols - 1
+                    if (idx < mipmap.textures.size) {
+                        rightResults.add(dispatchEdgeDetect(mipmap.textures[idx], Edge.RIGHT, threshold))
+                    }
+                }
+                
+                // Top edge: first row of tiles
+                for (col in 0 until mipmap.tilesCols) {
+                    val idx = col
+                    if (idx < mipmap.textures.size) {
+                        topResults.add(dispatchEdgeDetect(mipmap.textures[idx], Edge.TOP, threshold))
+                    }
+                }
+                
+                // Bottom edge: last row of tiles
+                for (col in 0 until mipmap.tilesCols) {
+                    val idx = (mipmap.tilesRows - 1) * mipmap.tilesCols + col
+                    if (idx < mipmap.textures.size) {
+                        bottomResults.add(dispatchEdgeDetect(mipmap.textures[idx], Edge.BOTTOM, threshold))
+                    }
+                }
+
+                val job = launch {
+                    while (true) {
+                        instance.processEvents()
+                        delay(1.milliseconds)
+                    }
+                }
+
+                try {
+                    // Aggregate results per edge direction
+                    val edges = listOf(
+                        leftResults.awaitAll(),
+                        rightResults.awaitAll(),
+                        topResults.awaitAll(),
+                        bottomResults.awaitAll()
+                    )
+                    
+                    // Collect solid edges with their colors
+                    val solidEdges = mutableListOf<Int>()
+                    
+                    for (edgeTiles in edges) {
+                        if (edgeTiles.isEmpty()) continue
+                        
+                        // Check if all tiles in this edge are solid
+                        val allSolid = edgeTiles.all { it.isSolid }
+                        if (!allSolid) continue
+                        
+                        // Calculate weighted average color across all tiles
+                        var totalPixels = 0
+                        var sumR = 0f
+                        var sumG = 0f
+                        var sumB = 0f
+                        
+                        for (result in edgeTiles) {
+                            totalPixels += result.total
+                            sumR += result.sumR
+                            sumG += result.sumG
+                            sumB += result.sumB
+                        }
+                        
+                        if (totalPixels > 0) {
+                            val avgR = ((sumR / totalPixels) * 255).toInt().coerceIn(0, 255)
+                            val avgG = ((sumG / totalPixels) * 255).toInt().coerceIn(0, 255)
+                            val avgB = ((sumB / totalPixels) * 255).toInt().coerceIn(0, 255)
+                            solidEdges.add((avgR shl 16) or (avgG shl 8) or avgB)
+                        }
+                    }
+                    
+                    // Rule: any white edge -> white
+                    for (color in solidEdges) {
+                        val r = (color shr 16) and 0xFF
+                        val g = (color shr 8) and 0xFF
+                        val b = color and 0xFF
+                        // Check if close to white (threshold ~13 out of 255, i.e. 0.05 * 255)
+                        if (r >= 242 && g >= 242 && b >= 242) {
+                            return@coroutineScope 0xFFFFFF
+                        }
+                    }
+                    
+                    // Rule: any color edge -> that color
+                    if (solidEdges.isNotEmpty()) {
+                        return@coroutineScope solidEdges.first()
+                    }
+                    
+                    // Rule: else -> white
+                    0xFFFFFF
+                } finally {
+                    job.cancel()
+                }
+            }
+        }
+
+        private enum class Edge { LEFT, RIGHT, TOP, BOTTOM }
+        
+        private data class EdgeResult(
+            val isSolid: Boolean,
+            val total: Int,
+            val sumR: Float,
+            val sumG: Float,
+            val sumB: Float
+        )
+
+        private val edgeDetectModule by lazy {
+            device.createShaderModule(
+                GPUShaderModuleDescriptor(
+                    shaderSourceWGSL = GPUShaderSourceWGSL(EDGE_DETECT_SHADER)
+                )
+            )
+        }
+
+        private val pipelineEdgeLeft by lazy {
+            device.createComputePipeline(
+                GPUComputePipelineDescriptor(
+                    GPUComputeState(module = edgeDetectModule, entryPoint = "edge_left")
+                )
+            )
+        }
+
+        private val pipelineEdgeRight by lazy {
+            device.createComputePipeline(
+                GPUComputePipelineDescriptor(
+                    GPUComputeState(module = edgeDetectModule, entryPoint = "edge_right")
+                )
+            )
+        }
+
+        private val pipelineEdgeTop by lazy {
+            device.createComputePipeline(
+                GPUComputePipelineDescriptor(
+                    GPUComputeState(module = edgeDetectModule, entryPoint = "edge_top")
+                )
+            )
+        }
+
+        private val pipelineEdgeBottom by lazy {
+            device.createComputePipeline(
+                GPUComputePipelineDescriptor(
+                    GPUComputeState(module = edgeDetectModule, entryPoint = "edge_bottom")
+                )
+            )
+        }
+
+        private fun dispatchEdgeDetect(
+            texture: GPUTexture,
+            edge: Edge,
+            threshold: Float
+        ): Deferred<EdgeResult> {
+            val pipeline = when (edge) {
+                Edge.LEFT -> pipelineEdgeLeft
+                Edge.RIGHT -> pipelineEdgeRight
+                Edge.TOP -> pipelineEdgeTop
+                Edge.BOTTOM -> pipelineEdgeBottom
+            }
+
+            val uniformBuffer = device.createBuffer(
+                GPUBufferDescriptor(
+                    size = 16, usage = BufferUsage.Uniform or BufferUsage.CopyDst
+                )
+            )
+            // Result: sum_r, sum_g, sum_b, total, sum_sq_r, sum_sq_g, sum_sq_b, padding (8 x u32 = 32 bytes)
+            val resultBuffer = device.createBuffer(
+                GPUBufferDescriptor(
+                    size = 32,
+                    usage = BufferUsage.Storage or BufferUsage.CopySrc or BufferUsage.CopyDst
+                )
+            )
+            val stagingBuffer = device.createBuffer(
+                GPUBufferDescriptor(
+                    size = 32, usage = BufferUsage.CopyDst or BufferUsage.MapRead
+                )
+            )
+
+            val byteBuffer = ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder())
+            byteBuffer.putFloat(0, threshold)
+            byteBuffer.putInt(4, texture.width)
+            byteBuffer.putInt(8, texture.height)
+            byteBuffer.putInt(12, 0)
+
+            device.queue.writeBuffer(uniformBuffer, 0, byteBuffer)
+
+            // Initialize result buffer to zeros
+            val initBuffer = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder())
+            for (i in 0 until 8) initBuffer.putInt(0)
+            initBuffer.flip()
+            device.queue.writeBuffer(resultBuffer, 0L, initBuffer)
+
+            val encoder = device.createCommandEncoder()
+            val pass = encoder.beginComputePass()
+            pass.setPipeline(pipeline)
+            pass.setBindGroup(
+                0, device.createBindGroup(
+                    GPUBindGroupDescriptor(
+                        layout = pipeline.getBindGroupLayout(0), entries = arrayOf(
+                            GPUBindGroupEntry(0, textureView = texture.createView()),
+                            GPUBindGroupEntry(1, buffer = resultBuffer),
+                            GPUBindGroupEntry(2, buffer = uniformBuffer),
+                        )
+                    )
+                )
+            )
+
+            val dispatchSize = when (edge) {
+                Edge.LEFT, Edge.RIGHT -> ceil(texture.height / 64.0).toInt()
+                Edge.TOP, Edge.BOTTOM -> ceil(texture.width / 64.0).toInt()
+            }
+            pass.dispatchWorkgroups(dispatchSize)
+            pass.end()
+
+            encoder.copyBufferToBuffer(resultBuffer, 0, stagingBuffer, 0, 32)
+            device.queue.submit(arrayOf(encoder.finish()))
+
+            val res = CompletableDeferred<EdgeResult>()
+
+            stagingBuffer.mapAsync(
+                MapMode.Read,
+                0,
+                32,
+                { it.run() },
+                object : GPURequestCallback<Unit> {
+                    override fun onResult(result: Unit) {
+                        try {
+                            val output = stagingBuffer.getConstMappedRange()
+                            output.order(ByteOrder.nativeOrder())
+                            
+                            // Fixed point 16.16 -> float
+                            val sumR = output.getInt(0) / 65536f
+                            val sumG = output.getInt(4) / 65536f
+                            val sumB = output.getInt(8) / 65536f
+                            val total = output.getInt(12)
+                            val sumSqR = output.getInt(16) / 65536f
+                            val sumSqG = output.getInt(20) / 65536f
+                            val sumSqB = output.getInt(24) / 65536f
+                            
+                            stagingBuffer.unmap()
+                            
+                            if (total == 0) {
+                                res.complete(EdgeResult(false, 1, 0f, 0f, 0f))
+                            } else {
+                                // Calculate average color
+                                val avgR = sumR / total
+                                val avgG = sumG / total
+                                val avgB = sumB / total
+                                
+                                // Calculate variance: E[X^2] - E[X]^2
+                                val varR = (sumSqR / total) - (avgR * avgR)
+                                val varG = (sumSqG / total) - (avgG * avgG)
+                                val varB = (sumSqB / total) - (avgB * avgB)
+                                
+                                // Edge is solid if variance is below threshold^2
+                                val maxVar = maxOf(varR, varG, varB)
+                                val isSolid = maxVar < threshold * threshold
+                                
+                                res.complete(EdgeResult(isSolid, total, sumR, sumG, sumB))
+                            }
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Error reading edge detect result", e)
+                            res.complete(EdgeResult(false, 1, 0f, 0f, 0f))
+                        } finally {
+                            uniformBuffer.destroy()
+                            resultBuffer.destroy()
+                            stagingBuffer.destroy()
+                        }
+                    }
+
+                    override fun onError(exception: Exception) {
+                        Log.e(TAG, "Error in edge detect mapAsync", exception)
+                        res.complete(EdgeResult(false, 1, 0f, 0f, 0f))
+                        uniformBuffer.destroy()
+                        resultBuffer.destroy()
+                        stagingBuffer.destroy()
+                    }
+                })
+
+            return res
+        }
+
+        private const val EDGE_DETECT_SHADER = """
+struct Params {
+    threshold: f32,
+    width: u32,
+    height: u32,
+    padding: u32,
+}
+
+struct Result {
+    sum_r: atomic<u32>,
+    sum_g: atomic<u32>,
+    sum_b: atomic<u32>,
+    total: atomic<u32>,
+    sum_sq_r: atomic<u32>,
+    sum_sq_g: atomic<u32>,
+    sum_sq_b: atomic<u32>,
+    padding: u32,
+}
+
+@group(0) @binding(0) var input_tex: texture_2d<f32>;
+@group(0) @binding(1) var<storage, read_write> result: Result;
+@group(0) @binding(2) var<uniform> params: Params;
+
+fn to_fixed(f: f32) -> u32 {
+    return u32(clamp(f, 0.0, 1.0) * 65536.0);
+}
+
+fn process_pixel(color: vec3<f32>) {
+    // Accumulate color sum and sum of squares for variance calculation
+    atomicAdd(&result.sum_r, to_fixed(color.r));
+    atomicAdd(&result.sum_g, to_fixed(color.g));
+    atomicAdd(&result.sum_b, to_fixed(color.b));
+    atomicAdd(&result.total, 1u);
+    atomicAdd(&result.sum_sq_r, to_fixed(color.r * color.r));
+    atomicAdd(&result.sum_sq_g, to_fixed(color.g * color.g));
+    atomicAdd(&result.sum_sq_b, to_fixed(color.b * color.b));
+}
+
+@compute @workgroup_size(64)
+fn edge_left(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (id.x >= params.height) { return; }
+    let color = textureLoad(input_tex, vec2<i32>(0, i32(id.x)), 0).rgb;
+    process_pixel(color);
+}
+
+@compute @workgroup_size(64)
+fn edge_right(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (id.x >= params.height) { return; }
+    let color = textureLoad(input_tex, vec2<i32>(i32(params.width) - 1, i32(id.x)), 0).rgb;
+    process_pixel(color);
+}
+
+@compute @workgroup_size(64)
+fn edge_top(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (id.x >= params.width) { return; }
+    let color = textureLoad(input_tex, vec2<i32>(i32(id.x), 0), 0).rgb;
+    process_pixel(color);
+}
+
+@compute @workgroup_size(64)
+fn edge_bottom(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (id.x >= params.width) { return; }
+    let color = textureLoad(input_tex, vec2<i32>(i32(id.x), i32(params.height) - 1), 0).rgb;
+    process_pixel(color);
+}
+"""
+
+        private val pipelineAll: GPUComputePipeline by lazy {
             device.createComputePipeline(
                 GPUComputePipelineDescriptor(
                     GPUComputeState(
@@ -58,7 +430,7 @@ class Trim {
             )
         }
 
-        val pipelineLeft: GPUComputePipeline by lazy {
+        private val pipelineLeft: GPUComputePipeline by lazy {
             device.createComputePipeline(
                 GPUComputePipelineDescriptor(
                     GPUComputeState(module = singleModule, entryPoint = "find_left")
@@ -66,7 +438,7 @@ class Trim {
             )
         }
 
-        val pipelineRight: GPUComputePipeline by lazy {
+        private val pipelineRight: GPUComputePipeline by lazy {
             device.createComputePipeline(
                 GPUComputePipelineDescriptor(
                     GPUComputeState(module = singleModule, entryPoint = "find_right")
@@ -74,7 +446,7 @@ class Trim {
             )
         }
 
-        val pipelineTop: GPUComputePipeline by lazy {
+        private val pipelineTop: GPUComputePipeline by lazy {
             device.createComputePipeline(
                 GPUComputePipelineDescriptor(
                     GPUComputeState(module = singleModule, entryPoint = "find_top")
@@ -82,7 +454,7 @@ class Trim {
             )
         }
 
-        val pipelineBottom: GPUComputePipeline by lazy {
+        private val pipelineBottom: GPUComputePipeline by lazy {
             device.createComputePipeline(
                 GPUComputePipelineDescriptor(
                     GPUComputeState(module = singleModule, entryPoint = "find_bottom")
@@ -91,20 +463,51 @@ class Trim {
         }
 
         /**
-         * Find trim bounds. Call from within WebGpuRenderer.withContext for best performance.
+         * Find trim bounds for multiple background colors.
+         * Runs trim for each color and returns the smallest rect (tightest trim).
+         * @param colors List of RGB colors as FloatArrays [r, g, b] with values in 0-1 range
          */
-        suspend fun find(image: Image, r: Float, g: Float, b: Float, threshold: Float): Rect {
-            return WebGpuRenderer.withContext { device ->
-                findInContext(device, image, r, g, b, threshold)
+        suspend fun find(image: Image, colors: List<FloatArray>, threshold: Float): Rect {
+            require(colors.isNotEmpty()) { "colors must not be empty" }
+            require(colors.all { it.size >= 3 }) { "each color must have at least 3 elements [r, g, b]" }
+
+            return WebGpuRenderer.withContext {
+                findInContext(image, colors, threshold)
             }
         }
 
         /**
-         * Find trim bounds when already inside a GPU context. Avoids extra context switch.
-         * Returns a Rect with 0,0,width,height if trim detection fails.
+         * Find trim bounds for multiple background colors when already inside a GPU context.
+         * Runs trim for each color and returns the smallest rect (tightest trim).
          */
         suspend fun findInContext(
-            device: GPUDevice,
+            image: Image,
+            colors: List<FloatArray>,
+            threshold: Float
+        ): Rect {
+            val results = colors.map { color ->
+                findInContext(image, color[0], color[1], color[2], threshold)
+            }
+
+            // Return the smallest rect (tightest trim)
+            return results.minByOrNull { it.width() * it.height() }
+                ?: Rect(0, 0, image.width, image.height)
+        }
+
+        /**
+         * Find trim bounds for a single color.
+         */
+        suspend fun find(image: Image, r: Float, g: Float, b: Float, threshold: Float): Rect {
+            return WebGpuRenderer.withContext {
+                findInContext(image, r, g, b, threshold)
+            }
+        }
+
+        /**
+         * Find trim bounds when already inside a GPU context.
+         * Returns full bounds (0,0,width,height) if trim detection fails.
+         */
+        suspend fun findInContext(
             image: Image,
             r: Float,
             g: Float,
@@ -171,24 +574,14 @@ class Trim {
                 if (leftIdx < mipmap.textures.size) {
                     left.add(
                         dispatchTrimCompute(
-                            mipmap.textures[leftIdx],
-                            pipelineLeft,
-                            r,
-                            g,
-                            b,
-                            threshold
+                            mipmap.textures[leftIdx], pipelineLeft, r, g, b, threshold
                         )
                     )
                 }
                 if (rightIdx < mipmap.textures.size) {
                     right.add(
                         dispatchTrimCompute(
-                            mipmap.textures[rightIdx],
-                            pipelineRight,
-                            r,
-                            g,
-                            b,
-                            threshold
+                            mipmap.textures[rightIdx], pipelineRight, r, g, b, threshold
                         )
                     )
                 }
@@ -201,24 +594,14 @@ class Trim {
                 if (topIdx < mipmap.textures.size) {
                     top.add(
                         dispatchTrimCompute(
-                            mipmap.textures[topIdx],
-                            pipelineTop,
-                            r,
-                            g,
-                            b,
-                            threshold
+                            mipmap.textures[topIdx], pipelineTop, r, g, b, threshold
                         )
                     )
                 }
                 if (bottomIdx < mipmap.textures.size) {
                     bottom.add(
                         dispatchTrimCompute(
-                            mipmap.textures[bottomIdx],
-                            pipelineBottom,
-                            r,
-                            g,
-                            b,
-                            threshold
+                            mipmap.textures[bottomIdx], pipelineBottom, r, g, b, threshold
                         )
                     )
                 }
@@ -251,8 +634,8 @@ class Trim {
         }
 
         /**
-         * Dispatch a trim compute operation. Always creates fresh buffers to avoid
-         * concurrency issues with buffer reuse during async operations.
+         * Dispatch a trim compute operation. Creates fresh buffers for each call
+         * to avoid concurrency issues with buffer reuse during async operations.
          */
         private fun dispatchTrimCompute(
             texture: GPUTexture,
@@ -349,7 +732,6 @@ class Trim {
 
                     override fun onError(exception: Exception) {
                         Log.e(TAG, "Error in trim mapAsync", exception)
-                        // Complete with full bounds instead of leaving deferred hanging
                         res.complete(Rect(0, 0, texture.width, texture.height))
                         uniformBuffer.destroy()
                         resultBuffer.destroy()
@@ -359,18 +741,5 @@ class Trim {
 
             return res
         }
-
-        @Deprecated(
-            "Use find() or findInContext() instead",
-            ReplaceWith("find(image, r, g, b, threshold)")
-        )
-        fun find(
-            texture: GPUTexture,
-            pipeline: GPUComputePipeline,
-            r: Float,
-            g: Float,
-            b: Float,
-            threshold: Float
-        ): Deferred<Rect> = dispatchTrimCompute(texture, pipeline, r, g, b, threshold)
     }
 }

@@ -11,6 +11,8 @@ import androidx.webgpu.GPURenderPassDescriptor
 import androidx.webgpu.GPUTexture
 import androidx.webgpu.LoadOp
 import androidx.webgpu.StoreOp
+import ca.mpreg.webgpuviewer.draw.Draw
+import ca.mpreg.webgpuviewer.draw.rect
 import ca.mpreg.webgpuviewer.viewer.ImagePage
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -443,6 +445,23 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         val dx = pos2.x - pos1.x
         val sign = if (dx < 0f) -1f else 1f
         val foldAngle = (sign * (atan2(dy, abs(dx)) / 2)).fastCoerceAtMost(0f)
+
+        // Draw single background rect that transitions between colors
+        val t = if (frac > 0f) frac else -frac
+        val bg1 = page1.image?.backgroundColor ?: 0xFFFFFF
+        val bg2 = page2.image?.backgroundColor ?: 0xFFFFFF
+        val r1 = (bg1 shr 16) and 0xFF
+        val g1 = (bg1 shr 8) and 0xFF
+        val b1 = bg1 and 0xFF
+        val r2 = (bg2 shr 16) and 0xFF
+        val g2 = (bg2 shr 8) and 0xFF
+        val b2 = bg2 and 0xFF
+        val r = (r1 + (r2 - r1) * t).toInt().coerceIn(0, 255)
+        val g = (g1 + (g2 - g1) * t).toInt().coerceIn(0, 255)
+        val b = (b1 + (b2 - b1) * t).toInt().coerceIn(0, 255)
+        val blendedBg = 0xFF000000.toInt() or (r shl 16) or (g shl 8) or b
+        Draw.rect(encoder, dst, 0f, 0f, 1f, 1f, blendedBg)
+
         if (frac > 0f) {
             render(page1, encoder, dst, 0f, foldAngle)
             render(page2, encoder, dst, 1f - frac, foldAngle)

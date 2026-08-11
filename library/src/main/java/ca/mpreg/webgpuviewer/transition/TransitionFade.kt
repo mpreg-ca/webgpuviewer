@@ -30,6 +30,8 @@ struct Uniforms {
     dst_width: f32,
     dst_height: f32,
     blend: f32,
+    bg_color1: vec3<f32>,
+    bg_color2: vec3<f32>,
 }
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -469,8 +471,24 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let scale_factor1 = 1.0 / u.scale1;
     let scale_factor2 = 1.0 / u.scale2;
     
-    let col1 = sampleImage1(in.uv1, scale_factor1);
-    let col2 = sampleImage2(in.uv2, scale_factor2);
+    // Check if UVs are within image bounds
+    let in_bounds1 = in.uv1.x >= 0.0 && in.uv1.x <= 1.0 && in.uv1.y >= 0.0 && in.uv1.y <= 1.0;
+    let in_bounds2 = in.uv2.x >= 0.0 && in.uv2.x <= 1.0 && in.uv2.y >= 0.0 && in.uv2.y <= 1.0;
+    
+    // Sample image or use background color
+    var col1: vec4<f32>;
+    if (in_bounds1) {
+        col1 = sampleImage1(in.uv1, scale_factor1);
+    } else {
+        col1 = vec4<f32>(u.bg_color1, 1.0);
+    }
+    
+    var col2: vec4<f32>;
+    if (in_bounds2) {
+        col2 = sampleImage2(in.uv2, scale_factor2);
+    } else {
+        col2 = vec4<f32>(u.bg_color2, 1.0);
+    }
     
     let linear1 = to_linear_exact(col1);
     let linear2 = to_linear_exact(col2);
@@ -499,7 +517,19 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // blend: 0 = fully page1, 1 = fully page2
         val blend = if (frac > 0f) frac else -frac
 
-        val byteBuffer = ByteBuffer.allocateDirect(60).apply {
+        // Extract background colors as normalized sRGB
+        val bg1 = image1.backgroundColor
+        val bg2 = image2.backgroundColor
+        val bg1R = ((bg1 shr 16) and 0xFF) / 255f
+        val bg1G = ((bg1 shr 8) and 0xFF) / 255f
+        val bg1B = (bg1 and 0xFF) / 255f
+        val bg2R = ((bg2 shr 16) and 0xFF) / 255f
+        val bg2G = ((bg2 shr 8) and 0xFF) / 255f
+        val bg2B = (bg2 and 0xFF) / 255f
+
+        // Buffer: 60 bytes for existing uniforms + 24 bytes for bg colors (2 x vec3 with padding)
+        // vec3<f32> is 12 bytes but aligned to 16 bytes
+        val byteBuffer = ByteBuffer.allocateDirect(96).apply {
             order(ByteOrder.nativeOrder())
             // Image 1
             putFloat(0, res1.x)
@@ -519,6 +549,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             putFloat(48, dst.width.toFloat())
             putFloat(52, dst.height.toFloat())
             putFloat(56, blend)
+            // Padding to align bg_color1 to 16 bytes (offset 60 -> 64)
+            putFloat(60, 0f)
+            // bg_color1 (vec3<f32> at offset 64)
+            putFloat(64, bg1R)
+            putFloat(68, bg1G)
+            putFloat(72, bg1B)
+            // Padding for vec3 alignment
+            putFloat(76, 0f)
+            // bg_color2 (vec3<f32> at offset 80)
+            putFloat(80, bg2R)
+            putFloat(84, bg2G)
+            putFloat(88, bg2B)
         }
 
         device.queue.writeBuffer(image1.buffer, 0, byteBuffer)

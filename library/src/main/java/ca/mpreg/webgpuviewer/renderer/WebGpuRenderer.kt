@@ -152,7 +152,7 @@ class WebGpuRenderer {
                             width,
                             height,
                             TextureFormat.RGBA8Unorm,
-                            TextureUsage.RenderAttachment
+                            TextureUsage.RenderAttachment or TextureUsage.StorageBinding
                         )
                     )
                 }

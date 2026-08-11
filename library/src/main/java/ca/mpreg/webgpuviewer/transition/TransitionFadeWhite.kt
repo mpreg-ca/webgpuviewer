@@ -10,9 +10,12 @@ import androidx.webgpu.GPURenderPassDescriptor
 import androidx.webgpu.GPUTexture
 import androidx.webgpu.LoadOp
 import androidx.webgpu.StoreOp
+import ca.mpreg.webgpuviewer.draw.Draw
+import ca.mpreg.webgpuviewer.draw.rect
 import ca.mpreg.webgpuviewer.viewer.ImagePage
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import kotlin.math.pow
 
 object TransitionFadeWhite : Transition() {
     override val code = """
@@ -311,6 +314,43 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     ) {
         val image = page.image ?: return
         val res = image.prepareForRender(dst, page.x, page.y, page.scale) ?: return
+
+        // Draw background color behind the image, fading to white
+        val srcWidth = res.mipmap.width.toFloat()
+        val finalScale = res.scale
+        val x1 = finalScale * res.x
+        val x2 = finalScale * (res.x + srcWidth / dst.width)
+
+        // Blend background color towards white in linear color space (matching shader)
+        val bgR = ((image.backgroundColor shr 16) and 0xFF) / 255f
+        val bgG = ((image.backgroundColor shr 8) and 0xFF) / 255f
+        val bgB = (image.backgroundColor and 0xFF) / 255f
+
+        // sRGB to linear
+        fun toLinear(c: Float) =
+            if (c <= 0.04045f) c / 12.92f else ((c + 0.055f) / 1.055f).toDouble().pow(2.4).toFloat()
+
+        // linear to sRGB
+        fun toSrgb(c: Float) =
+            if (c <= 0.0031308f) c * 12.92f else 1.055f * c.toDouble().pow(1.0 / 2.4)
+                .toFloat() - 0.055f
+
+        val linR = toLinear(bgR)
+        val linG = toLinear(bgG)
+        val linB = toLinear(bgB)
+
+        // Blend with white (1.0) in linear space
+        val blendedR = linR + (1f - linR) * fadeToWhite
+        val blendedG = linG + (1f - linG) * fadeToWhite
+        val blendedB = linB + (1f - linB) * fadeToWhite
+
+        // Back to sRGB
+        val fadedR = (toSrgb(blendedR) * 255f).toInt().coerceIn(0, 255)
+        val fadedG = (toSrgb(blendedG) * 255f).toInt().coerceIn(0, 255)
+        val fadedB = (toSrgb(blendedB) * 255f).toInt().coerceIn(0, 255)
+        val fadedBg = 0xFF000000.toInt() or (fadedR shl 16) or (fadedG shl 8) or fadedB
+
+        Draw.rect(encoder, dst, x1, 0f, x2, 1f, fadedBg)
 
         val byteBuffer = ByteBuffer.allocateDirect(36).apply {
             order(ByteOrder.nativeOrder())

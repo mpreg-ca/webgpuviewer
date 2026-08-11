@@ -10,6 +10,8 @@ import androidx.webgpu.GPURenderPassDescriptor
 import androidx.webgpu.GPUTexture
 import androidx.webgpu.LoadOp
 import androidx.webgpu.StoreOp
+import ca.mpreg.webgpuviewer.draw.Draw
+import ca.mpreg.webgpuviewer.draw.rect
 import ca.mpreg.webgpuviewer.renderer.Image
 import ca.mpreg.webgpuviewer.viewer.ImagePage
 import java.nio.ByteBuffer
@@ -215,7 +217,7 @@ fn loop_over_tile(
 
     for (var y: i32 = start_i.y; y < end_i.y; y++) {
         let y_f = f32(y);
-        
+
         var y_overlap = 1.0;
         if (y == start_i.y) {
             y_overlap = min(y_f + 1.0, src_end.y) - src_start.y;
@@ -223,7 +225,7 @@ fn loop_over_tile(
             y_overlap = src_end.y - max(y_f, src_start.y);
         }
         y_overlap = max(0.0, y_overlap);
-        
+
         let py = y + local_offset.y;
 
         for (var x: i32 = start_i.x; x < end_i.x; x++) {
@@ -269,9 +271,9 @@ fn downsample(src_start: vec2<f32>, scale: vec2<f32>) -> vec4<f32> {
     if (is_single_tile) {
         let idx = tile_TL.y * 2 + tile_TL.x;
         let local_offset = -tile_TL * ts;
-        
+
         var avg_color = vec4<f32>(0.0);
-        
+
         if (idx == 0) {
             avg_color = loop_over_tile(src_tex0, start_i, end_i, src_start, src_end, local_offset);
         } else if (idx == 1) {
@@ -339,7 +341,7 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     // Y goes from [1.0, -1.0] (top to bottom)
     let ndc_x = (pixel_pos.x / dst_size_f.x) * 2.0 - 1.0;
     let ndc_y = 1.0 - (pixel_pos.y / dst_size_f.y) * 2.0;
-    
+
     var out: VertexOutput;
     out.position = vec4<f32>(ndc_x, ndc_y, 0.0, 1.0);
     out.uv = uv;
@@ -361,7 +363,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     } else {
         col = textureSampleCatmullRom(in.uv);
     }
-    
+
     return vec4<f32>(col.rgb * col.a, col.a);
 }"""
 
@@ -374,14 +376,29 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         scale: Float
     ) {
         val image = page.image ?: return
-        render(image, encoder, dst, page.x + x, page.y + y, page.scale * scale)
+        val res = image.prepareForRender(dst, page.x + x, page.y + y, page.scale * scale) ?: return
+
+        // Draw background color behind the image
+        val srcWidth = res.mipmap.width.toFloat()
+        val finalScale = res.scale
+        val x1 = finalScale * res.x
+        val x2 = finalScale * (res.x + srcWidth / dst.width)
+        Draw.rect(encoder, dst, x1, 0f, x2, 1f, image.backgroundColor or 0xFF000000.toInt())
+
+        // Render the image on top
+        render(image, encoder, dst, res)
     }
 
     internal fun render(
         image: Image, encoder: GPUCommandEncoder, dst: GPUTexture, x: Float, y: Float, scale: Float
     ) {
         val res = image.prepareForRender(dst, x, y, scale) ?: return
+        render(image, encoder, dst, res)
+    }
 
+    private fun render(
+        image: Image, encoder: GPUCommandEncoder, dst: GPUTexture, res: Image.MipMapForDraw
+    ) {
         val byteBuffer = ByteBuffer.allocateDirect(32).apply {
             order(ByteOrder.nativeOrder())
             putFloat(0, res.x)

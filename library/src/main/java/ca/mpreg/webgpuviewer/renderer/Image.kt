@@ -30,15 +30,24 @@ data class ImageWithTrim(val image: Image, val trim: Rect?)
 class Image private constructor(
     val width: Int, val height: Int, var x: Float = 0f, var y: Float = 0f
 ) {
+    /**
+     * Background color detected from image edges, in 0xRRGGBB format.
+     * Defaults to white (0xFFFFFF).
+     */
+    var backgroundColor: Int = 0xFF000000.toInt()
+        private set
+
     companion object {
         suspend fun createWithTrim(
             pixels: ByteBuffer, width: Int, height: Int,
             createMipMaps: Boolean = true,
-            trimColor: FloatArray? = null,
+            trimColors: List<FloatArray>? = null,
+            trimThreshold: Float = 0.05f,
+            backgroundColor: Int? = null,
         ): ImageWithTrim {
             require(width > 0 && height > 0) { "Image dimensions must be positive" }
-            require(trimColor == null || trimColor.size >= 4) {
-                "trimColor must have at least 4 elements [r, g, b, threshold]"
+            require(trimColors == null || trimColors.all { it.size >= 3 }) {
+                "each trimColor must have at least 3 elements [r, g, b]"
             }
 
             val image = Image(width, height)
@@ -108,11 +117,28 @@ class Image private constructor(
                         }
                     }
 
-                    if (trimColor != null && image.mipmaps.isNotEmpty()) {
-                        trimRect = Trim.findInContext(
-                            device, image, trimColor[0], trimColor[1], trimColor[2], trimColor[3]
-                        )
+                    if (trimColors != null && trimColors.isNotEmpty() && image.mipmaps.isNotEmpty()) {
+                        // Find trim for each color and pick the smallest rect
+                        val results = trimColors.map { color ->
+                            color to Trim.findInContext(
+                                image, color[0], color[1], color[2], trimThreshold
+                            )
+                        }
+                        val best = results.minByOrNull { it.second.width() * it.second.height() }
+                        if (best != null) {
+                            trimRect = best.second
+                            // Set background color from the winning trim color
+                            if (backgroundColor == null) {
+                                val c = best.first
+                                image.backgroundColor =
+                                    ((c[0] * 255).toInt() shl 16) or ((c[1] * 255).toInt() shl 8) or (c[2] * 255).toInt()
+                            }
+                        }
                     }
+
+                    // Use explicitly provided background color if given, otherwise detect
+                    image.backgroundColor =
+                        backgroundColor ?: Trim.detectBackgroundInContext(image)
                 } catch (e: Exception) {
                     Log.e("Renderer", "Error creating image with trim", e)
                     image.mipmaps.forEach { it.cleanup() }

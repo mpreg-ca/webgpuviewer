@@ -10,6 +10,8 @@ import androidx.webgpu.GPURenderPassDescriptor
 import androidx.webgpu.GPUTexture
 import androidx.webgpu.LoadOp
 import androidx.webgpu.StoreOp
+import ca.mpreg.webgpuviewer.draw.Draw
+import ca.mpreg.webgpuviewer.draw.rect
 import ca.mpreg.webgpuviewer.viewer.ImagePage
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -396,6 +398,30 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     ) {
         val image = page.image ?: return
         val res = image.prepareForRender(dst, page.x, page.y, page.scale) ?: return
+
+        // Project left and right edges through matrix to get screen x coordinates
+        // Matrix is column-major: mat[col*4 + row]
+        // local_pos for left edge: (-1, 0, 0, 1), right edge: (1, 0, 0, 1)
+        // transformed = mat * local_pos, ndc = transformed.xy / transformed.w
+        val phase = matrix[14] // mat[3][2] contains phase
+
+        // Left edge: x=-1
+        val leftW = matrix[3] * -1f + matrix[15]  // mat[0][3]*x + mat[3][3]
+        val leftX = (matrix[0] * -1f + matrix[12]) / leftW  // (mat[0][0]*x + mat[3][0]) / w
+        // Right edge: x=1
+        val rightW = matrix[3] * 1f + matrix[15]
+        val rightX = (matrix[0] * 1f + matrix[12]) / rightW
+
+        // Convert NDC (-1 to 1) to 0-1 range, interpolate with flat position based on phase
+        val srcWidth = res.mipmap.width.toFloat()
+        val flatX1 = res.scale * res.x
+        val flatX2 = res.scale * (res.x + srcWidth / dst.width)
+        val transX1 = (leftX + 1f) / 2f
+        val transX2 = (rightX + 1f) / 2f
+        val x1 = flatX1 + (transX1 - flatX1) * phase
+        val x2 = flatX2 + (transX2 - flatX2) * phase
+
+        Draw.rect(encoder, dst, x1, 0f, x2, 1f, image.backgroundColor or 0xFF000000.toInt())
 
         val byteBuffer = ByteBuffer.allocateDirect(96).apply {
             order(ByteOrder.nativeOrder())
