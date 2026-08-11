@@ -37,15 +37,15 @@ class Trim {
 
         /**
          * Detect background color by checking if any edge has low variance (solid color).
-         * Returns the detected color or 0xFFFFFF (white) if no solid edge found.
+         * Returns the detected color (0xAARRGGBB) or opaque white (0xFFFFFFFF) if no solid edge found.
          */
         suspend fun detectBackgroundInContext(
-            image: Image, 
+            image: Image,
             threshold: Float = 0.05f
         ): Int {
-            if (image.mipmaps.isEmpty()) return 0xFFFFFF
+            if (image.mipmaps.isEmpty()) return 0xFFFFFFFF.toInt()
             val mipmap = image.mipmaps[0]
-            if (mipmap.textures.isEmpty()) return 0xFFFFFF
+            if (mipmap.textures.isEmpty()) return 0xFFFFFFFF.toInt()
 
             return coroutineScope {
                 // Collect results grouped by edge direction
@@ -53,36 +53,60 @@ class Trim {
                 val rightResults = mutableListOf<Deferred<EdgeResult>>()
                 val topResults = mutableListOf<Deferred<EdgeResult>>()
                 val bottomResults = mutableListOf<Deferred<EdgeResult>>()
-                
+
                 // Left edge: first column of tiles
                 for (row in 0 until mipmap.tilesRows) {
                     val idx = row * mipmap.tilesCols
                     if (idx < mipmap.textures.size) {
-                        leftResults.add(dispatchEdgeDetect(mipmap.textures[idx], Edge.LEFT, threshold))
+                        leftResults.add(
+                            dispatchEdgeDetect(
+                                mipmap.textures[idx],
+                                Edge.LEFT,
+                                threshold
+                            )
+                        )
                     }
                 }
-                
+
                 // Right edge: last column of tiles
                 for (row in 0 until mipmap.tilesRows) {
                     val idx = row * mipmap.tilesCols + mipmap.tilesCols - 1
                     if (idx < mipmap.textures.size) {
-                        rightResults.add(dispatchEdgeDetect(mipmap.textures[idx], Edge.RIGHT, threshold))
+                        rightResults.add(
+                            dispatchEdgeDetect(
+                                mipmap.textures[idx],
+                                Edge.RIGHT,
+                                threshold
+                            )
+                        )
                     }
                 }
-                
+
                 // Top edge: first row of tiles
                 for (col in 0 until mipmap.tilesCols) {
                     val idx = col
                     if (idx < mipmap.textures.size) {
-                        topResults.add(dispatchEdgeDetect(mipmap.textures[idx], Edge.TOP, threshold))
+                        topResults.add(
+                            dispatchEdgeDetect(
+                                mipmap.textures[idx],
+                                Edge.TOP,
+                                threshold
+                            )
+                        )
                     }
                 }
-                
+
                 // Bottom edge: last row of tiles
                 for (col in 0 until mipmap.tilesCols) {
                     val idx = (mipmap.tilesRows - 1) * mipmap.tilesCols + col
                     if (idx < mipmap.textures.size) {
-                        bottomResults.add(dispatchEdgeDetect(mipmap.textures[idx], Edge.BOTTOM, threshold))
+                        bottomResults.add(
+                            dispatchEdgeDetect(
+                                mipmap.textures[idx],
+                                Edge.BOTTOM,
+                                threshold
+                            )
+                        )
                     }
                 }
 
@@ -101,30 +125,30 @@ class Trim {
                         topResults.awaitAll(),
                         bottomResults.awaitAll()
                     )
-                    
+
                     // Collect solid edges with their colors
                     val solidEdges = mutableListOf<Int>()
-                    
+
                     for (edgeTiles in edges) {
                         if (edgeTiles.isEmpty()) continue
-                        
+
                         // Check if all tiles in this edge are solid
                         val allSolid = edgeTiles.all { it.isSolid }
                         if (!allSolid) continue
-                        
+
                         // Calculate weighted average color across all tiles
                         var totalPixels = 0
                         var sumR = 0f
                         var sumG = 0f
                         var sumB = 0f
-                        
+
                         for (result in edgeTiles) {
                             totalPixels += result.total
                             sumR += result.sumR
                             sumG += result.sumG
                             sumB += result.sumB
                         }
-                        
+
                         if (totalPixels > 0) {
                             val avgR = ((sumR / totalPixels) * 255).toInt().coerceIn(0, 255)
                             val avgG = ((sumG / totalPixels) * 255).toInt().coerceIn(0, 255)
@@ -132,7 +156,7 @@ class Trim {
                             solidEdges.add((avgR shl 16) or (avgG shl 8) or avgB)
                         }
                     }
-                    
+
                     // Rule: any white edge -> white
                     for (color in solidEdges) {
                         val r = (color shr 16) and 0xFF
@@ -140,17 +164,17 @@ class Trim {
                         val b = color and 0xFF
                         // Check if close to white (threshold ~13 out of 255, i.e. 0.05 * 255)
                         if (r >= 242 && g >= 242 && b >= 242) {
-                            return@coroutineScope 0xFFFFFF
+                            return@coroutineScope 0xFFFFFFFF.toInt()
                         }
                     }
-                    
-                    // Rule: any color edge -> that color
+
+                    // Rule: any color edge -> that color (add alpha)
                     if (solidEdges.isNotEmpty()) {
-                        return@coroutineScope solidEdges.first()
+                        return@coroutineScope 0xFF000000.toInt() or solidEdges.first()
                     }
-                    
+
                     // Rule: else -> white
-                    0xFFFFFF
+                    0xFFFFFFFF.toInt()
                 } finally {
                     job.cancel()
                 }
@@ -158,7 +182,7 @@ class Trim {
         }
 
         private enum class Edge { LEFT, RIGHT, TOP, BOTTOM }
-        
+
         private data class EdgeResult(
             val isSolid: Boolean,
             val total: Int,
@@ -288,7 +312,7 @@ class Trim {
                         try {
                             val output = stagingBuffer.getConstMappedRange()
                             output.order(ByteOrder.nativeOrder())
-                            
+
                             // Fixed point 16.16 -> float
                             val sumR = output.getInt(0) / 65536f
                             val sumG = output.getInt(4) / 65536f
@@ -297,26 +321,26 @@ class Trim {
                             val sumSqR = output.getInt(16) / 65536f
                             val sumSqG = output.getInt(20) / 65536f
                             val sumSqB = output.getInt(24) / 65536f
-                            
+
                             stagingBuffer.unmap()
-                            
+
                             if (total == 0) {
-                                res.complete(EdgeResult(false, 1, 0f, 0f, 0f))
+                                res.complete(EdgeResult(false, 0, 0f, 0f, 0f))
                             } else {
                                 // Calculate average color
                                 val avgR = sumR / total
                                 val avgG = sumG / total
                                 val avgB = sumB / total
-                                
+
                                 // Calculate variance: E[X^2] - E[X]^2
                                 val varR = (sumSqR / total) - (avgR * avgR)
                                 val varG = (sumSqG / total) - (avgG * avgG)
                                 val varB = (sumSqB / total) - (avgB * avgB)
-                                
+
                                 // Edge is solid if variance is below threshold^2
                                 val maxVar = maxOf(varR, varG, varB)
                                 val isSolid = maxVar < threshold * threshold
-                                
+
                                 res.complete(EdgeResult(isSolid, total, sumR, sumG, sumB))
                             }
                         } catch (e: Exception) {

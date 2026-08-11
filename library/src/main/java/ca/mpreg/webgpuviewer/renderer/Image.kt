@@ -31,8 +31,8 @@ class Image private constructor(
     val width: Int, val height: Int, var x: Float = 0f, var y: Float = 0f
 ) {
     /**
-     * Background color detected from image edges, in 0xRRGGBB format.
-     * Defaults to white (0xFFFFFF).
+     * Background color detected from image edges, in 0xAARRGGBB format.
+     * Defaults to opaque black (0xFF000000).
      */
     var backgroundColor: Int = 0xFF000000.toInt()
         private set
@@ -130,8 +130,8 @@ class Image private constructor(
                             // Set background color from the winning trim color
                             if (backgroundColor == null) {
                                 val c = best.first
-                                image.backgroundColor =
-                                    ((c[0] * 255).toInt() shl 16) or ((c[1] * 255).toInt() shl 8) or (c[2] * 255).toInt()
+                                image.backgroundColor = 0xFF000000.toInt() or
+                                        ((c[0] * 255).toInt() shl 16) or ((c[1] * 255).toInt() shl 8) or (c[2] * 255).toInt()
                             }
                         }
                     }

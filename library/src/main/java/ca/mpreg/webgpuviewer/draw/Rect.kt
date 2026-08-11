@@ -3,6 +3,7 @@ package ca.mpreg.webgpuviewer.draw
 import androidx.webgpu.BufferUsage
 import androidx.webgpu.GPUBindGroupDescriptor
 import androidx.webgpu.GPUBindGroupEntry
+import androidx.webgpu.GPUBufferDescriptor
 import androidx.webgpu.GPUCommandEncoder
 import androidx.webgpu.GPUComputePipeline
 import androidx.webgpu.GPUComputePipelineDescriptor
@@ -59,6 +60,11 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 """
 
+// Thread-local ByteBuffer to avoid allocation per call
+private val byteBufferLocal = ThreadLocal.withInitial {
+    ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder())
+}
+
 /**
  * Draw a filled rectangle with the specified color.
  * Coordinates are in normalized [0, 1] range.
@@ -82,19 +88,23 @@ fun Draw.rect(
     val right = x2 * texture.width
     val bottom = y2 * texture.height
 
-    val byteBuffer = ByteBuffer.allocateDirect(32).apply {
-        order(ByteOrder.nativeOrder())
-        putFloat(0, left)
-        putFloat(4, top)
-        putFloat(8, right)
-        putFloat(12, bottom)
-        putFloat(16, r)
-        putFloat(20, g)
-        putFloat(24, b)
-        putFloat(28, a)
-    }
+    val byteBuffer = byteBufferLocal.get()
+    byteBuffer.clear()
+    byteBuffer.putFloat(left)
+    byteBuffer.putFloat(top)
+    byteBuffer.putFloat(right)
+    byteBuffer.putFloat(bottom)
+    byteBuffer.putFloat(r)
+    byteBuffer.putFloat(g)
+    byteBuffer.putFloat(b)
+    byteBuffer.putFloat(a)
+    byteBuffer.flip()
 
-    val uniformBuffer = createBuffer(32, BufferUsage.Uniform or BufferUsage.CopyDst)
+    // Buffer is created per-call because it must persist until GPU work completes.
+    // WebGPU drivers efficiently pool small uniform buffers.
+    val uniformBuffer = device.createBuffer(
+        GPUBufferDescriptor(size = 32, usage = BufferUsage.Uniform or BufferUsage.CopyDst)
+    )
     device.queue.writeBuffer(uniformBuffer, 0, byteBuffer)
 
     val dispatchW = ceil(texture.width / 8f).toInt()

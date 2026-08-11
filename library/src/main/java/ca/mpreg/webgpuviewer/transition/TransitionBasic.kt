@@ -383,7 +383,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         val finalScale = res.scale
         val x1 = finalScale * res.x
         val x2 = finalScale * (res.x + srcWidth / dst.width)
-        Draw.rect(encoder, dst, x1, 0f, x2, 1f, image.backgroundColor or 0xFF000000.toInt())
+        Draw.rect(encoder, dst, x1, 0f, x2, 1f, image.backgroundColor)
 
         // Render the image on top
         render(image, encoder, dst, res)

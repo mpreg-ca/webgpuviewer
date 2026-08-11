@@ -421,7 +421,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         val x1 = flatX1 + (transX1 - flatX1) * phase
         val x2 = flatX2 + (transX2 - flatX2) * phase
 
-        Draw.rect(encoder, dst, x1, 0f, x2, 1f, image.backgroundColor or 0xFF000000.toInt())
+        Draw.rect(encoder, dst, x1, 0f, x2, 1f, image.backgroundColor)
 
         val byteBuffer = ByteBuffer.allocateDirect(96).apply {
             order(ByteOrder.nativeOrder())
@@ -459,8 +459,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 GPUBindGroupDescriptor(
                     layout = pipeline.getBindGroupLayout(0), entries = arrayOf(
                         GPUBindGroupEntry(0, buffer = image.buffer),
-                    ).plus(res.quad.tiles.mapIndexed { i, value ->
-                        GPUBindGroupEntry(1 + i, textureView = value.createView())
+                    ).plus(res.quad.tileViews.mapIndexed { i, view ->
+                        GPUBindGroupEntry(1 + i, textureView = view)
                     })
                 )
             )
