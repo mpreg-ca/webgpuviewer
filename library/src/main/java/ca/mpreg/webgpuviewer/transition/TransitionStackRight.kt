@@ -15,12 +15,20 @@ object TransitionStackRight : Transition() {
         pos1: Offset,
         pos2: Offset,
     ) {
+        val cached1 = getCachedTexture(page1, true, encoder, dst.width, dst.height) { enc, tex ->
+            TransitionBasic.render(page1, enc, tex, 0f, 0f, 1f)
+        }
+
+        val cached2 = getCachedTexture(page2, false, encoder, dst.width, dst.height) { enc, tex ->
+            TransitionBasic.render(page2, enc, tex, 0f, 0f, 1f)
+        }
+
         if (frac > 0f) {
-            TransitionBasic.render(page1, encoder, dst, 0f, 0f, 1f)
-            TransitionBasic.render(page2, encoder, dst, (1f - frac) / page2.scale, 0f, 1f)
+            blitCached(encoder, dst, cached1, 0f, 0f, clearFirst = true)
+            blitCached(encoder, dst, cached2, 1f - frac, 0f)
         } else {
-            TransitionBasic.render(page2, encoder, dst, 0f, 0f, 1f)
-            TransitionBasic.render(page1, encoder, dst, -frac / page1.scale, 0f, 1f)
+            blitCached(encoder, dst, cached2, 0f, 0f, clearFirst = true)
+            blitCached(encoder, dst, cached1, -frac, 0f)
         }
     }
 }

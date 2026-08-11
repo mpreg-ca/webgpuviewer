@@ -17,6 +17,11 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 object TransitionSphere : Transition() {
+    // Thread-local ByteBuffer to avoid per-frame allocation
+    private val byteBufferLocal = ThreadLocal.withInitial {
+        ByteBuffer.allocateDirect(40).order(ByteOrder.nativeOrder())
+    }
+
     override val code = """
 struct Uniforms {
     offset: vec2<f32>,
@@ -333,19 +338,19 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         val image = page.image ?: return
         val res = image.prepareForRender(dst, page.x, page.y, page.scale) ?: return
 
-        val byteBuffer = ByteBuffer.allocateDirect(40).apply {
-            order(ByteOrder.nativeOrder())
-            putFloat(0, res.x)
-            putFloat(4, res.y)
-            putFloat(8, res.scale)
-            putFloat(12, res.mipmap.tilesize.toFloat())
-            putFloat(16, res.mipmap.tilesCols.toFloat())
-            putFloat(20, res.mipmap.tilesRows.toFloat())
-            putFloat(24, dst.width.toFloat())
-            putFloat(28, dst.height.toFloat())
-            putFloat(32, transition)
-            putFloat(36, isSecond)
-        }
+        val byteBuffer = byteBufferLocal.get()
+        byteBuffer.clear()
+        byteBuffer.putFloat(res.x)
+        byteBuffer.putFloat(res.y)
+        byteBuffer.putFloat(res.scale)
+        byteBuffer.putFloat(res.mipmap.tilesize.toFloat())
+        byteBuffer.putFloat(res.mipmap.tilesCols.toFloat())
+        byteBuffer.putFloat(res.mipmap.tilesRows.toFloat())
+        byteBuffer.putFloat(dst.width.toFloat())
+        byteBuffer.putFloat(dst.height.toFloat())
+        byteBuffer.putFloat(transition)
+        byteBuffer.putFloat(isSecond)
+        byteBuffer.flip()
 
         device.queue.writeBuffer(image.buffer, 0, byteBuffer)
 

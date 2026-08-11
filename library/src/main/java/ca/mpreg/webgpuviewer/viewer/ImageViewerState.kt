@@ -103,6 +103,11 @@ open class ImageViewerState(var isVertical: Boolean = false) {
             if (!haveNext) v = v.fastCoerceAtMost(1f)
             if (!havePrev) v = v.fastCoerceAtLeast(-1f)
 
+            // Invalidate transition cache when transition ends
+            if (field != 0f && v == 0f) {
+                Transition.invalidateCache()
+            }
+
             field = v
 
             if (pageDelta != 0) {

@@ -18,6 +18,11 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 object TransitionBasic : Transition() {
+    // Thread-local ByteBuffer to avoid per-frame allocation
+    private val byteBufferLocal = ThreadLocal.withInitial {
+        ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder())
+    }
+
     override val code = """
 struct Uniforms {
     offset: vec2<f32>,
@@ -445,17 +450,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     private fun render(
         image: Image, encoder: GPUCommandEncoder, dst: GPUTexture, res: Image.MipMapForDraw
     ) {
-        val byteBuffer = ByteBuffer.allocateDirect(32).apply {
-            order(ByteOrder.nativeOrder())
-            putFloat(0, res.x)
-            putFloat(4, res.y)
-            putFloat(8, res.scale)
-            putFloat(12, res.mipmap.tilesize.toFloat())
-            putFloat(16, res.mipmap.tilesCols.toFloat())
-            putFloat(20, res.mipmap.tilesRows.toFloat())
-            putFloat(24, dst.width.toFloat())
-            putFloat(28, dst.height.toFloat())
-        }
+        val byteBuffer = byteBufferLocal.get()
+        byteBuffer.clear()
+        byteBuffer.putFloat(res.x)
+        byteBuffer.putFloat(res.y)
+        byteBuffer.putFloat(res.scale)
+        byteBuffer.putFloat(res.mipmap.tilesize.toFloat())
+        byteBuffer.putFloat(res.mipmap.tilesCols.toFloat())
+        byteBuffer.putFloat(res.mipmap.tilesRows.toFloat())
+        byteBuffer.putFloat(dst.width.toFloat())
+        byteBuffer.putFloat(dst.height.toFloat())
+        byteBuffer.flip()
 
         device.queue.writeBuffer(image.buffer, 0, byteBuffer)
 
@@ -498,12 +503,20 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         pos1: Offset,
         pos2: Offset,
     ) {
+        val cached1 = getCachedTexture(page1, true, encoder, dst.width, dst.height) { enc, tex ->
+            render(page1, enc, tex, 0f, 0f, 1f)
+        }
+
+        val cached2 = getCachedTexture(page2, false, encoder, dst.width, dst.height) { enc, tex ->
+            render(page2, enc, tex, 0f, 0f, 1f)
+        }
+
         if (frac > 0f) {
-            render(page2, encoder, dst, (1f - frac) / page2.scale, 0f, 1f)
-            render(page1, encoder, dst, -frac / page1.scale, 0f, 1f)
+            blitCached(encoder, dst, cached2, 1f - frac, 0f, clearFirst = true)
+            blitCached(encoder, dst, cached1, -frac, 0f)
         } else {
-            render(page2, encoder, dst, -(frac + 1f) / page2.scale, 0f, 1f)
-            render(page1, encoder, dst, -frac / page1.scale, 0f, 1f)
+            blitCached(encoder, dst, cached2, -(frac + 1f), 0f, clearFirst = true)
+            blitCached(encoder, dst, cached1, -frac, 0f)
         }
     }
 
@@ -519,12 +532,22 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             pos1: Offset,
             pos2: Offset,
         ) {
+            val cached1 =
+                getCachedTexture(page1, true, encoder, dst.width, dst.height) { enc, tex ->
+                    render(page1, enc, tex, 0f, 0f, 1f)
+                }
+
+            val cached2 =
+                getCachedTexture(page2, false, encoder, dst.width, dst.height) { enc, tex ->
+                    render(page2, enc, tex, 0f, 0f, 1f)
+                }
+
             if (frac > 0f) {
-                render(page1, encoder, dst, 0f, -frac / page1.scale, 1f)
-                render(page2, encoder, dst, 0f, (1f - frac) / page2.scale, 1f)
+                blitCached(encoder, dst, cached1, 0f, -frac, clearFirst = true)
+                blitCached(encoder, dst, cached2, 0f, 1f - frac)
             } else {
-                render(page2, encoder, dst, 0f, -(frac + 1f) / page2.scale, 1f)
-                render(page1, encoder, dst, 0f, -frac / page1.scale, 1f)
+                blitCached(encoder, dst, cached2, 0f, -(frac + 1f), clearFirst = true)
+                blitCached(encoder, dst, cached1, 0f, -frac)
             }
         }
     }

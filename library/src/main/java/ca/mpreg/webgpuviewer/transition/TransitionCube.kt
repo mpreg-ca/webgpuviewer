@@ -19,6 +19,11 @@ import kotlin.math.cos
 import kotlin.math.sin
 
 object TransitionCube : Transition() {
+    // Thread-local ByteBuffer to avoid per-frame allocation
+    private val byteBufferLocal = ThreadLocal.withInitial {
+        ByteBuffer.allocateDirect(96).order(ByteOrder.nativeOrder())
+    }
+
     override val code = """
 struct Uniforms {
     offset: vec2<f32>,
@@ -423,20 +428,20 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
         Draw.rect(encoder, dst, x1, 0f, x2, 1f, image.backgroundColor)
 
-        val byteBuffer = ByteBuffer.allocateDirect(96).apply {
-            order(ByteOrder.nativeOrder())
-            putFloat(0, res.x)
-            putFloat(4, res.y)
-            putFloat(8, res.scale)
-            putFloat(12, res.mipmap.tilesize.toFloat())
-            putFloat(16, res.mipmap.tilesCols.toFloat())
-            putFloat(20, res.mipmap.tilesRows.toFloat())
-            putFloat(24, dst.width.toFloat())
-            putFloat(28, dst.height.toFloat())
-            for (i in matrix.indices) {
-                putFloat(32 + i * 4, matrix[i])
-            }
+        val byteBuffer = byteBufferLocal.get()
+        byteBuffer.clear()
+        byteBuffer.putFloat(res.x)
+        byteBuffer.putFloat(res.y)
+        byteBuffer.putFloat(res.scale)
+        byteBuffer.putFloat(res.mipmap.tilesize.toFloat())
+        byteBuffer.putFloat(res.mipmap.tilesCols.toFloat())
+        byteBuffer.putFloat(res.mipmap.tilesRows.toFloat())
+        byteBuffer.putFloat(dst.width.toFloat())
+        byteBuffer.putFloat(dst.height.toFloat())
+        for (i in matrix.indices) {
+            byteBuffer.putFloat(matrix[i])
         }
+        byteBuffer.flip()
 
         device.queue.writeBuffer(image.buffer, 0, byteBuffer)
 

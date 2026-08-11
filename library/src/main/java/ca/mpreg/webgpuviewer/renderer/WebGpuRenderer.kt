@@ -180,14 +180,19 @@ class WebGpuRenderer {
             val texture = try {
                 surface.getCurrentTexture().texture
             } catch (e: Exception) {
+                Log.w("WebGpuRenderer", "Failed to get current texture", e)
                 return
             }
-            val encoder = device.createCommandEncoder()
 
-            fn(encoder, texture)
-
-            device.queue.submit(arrayOf(encoder.finish()))
-            surface.present()
+            try {
+                val encoder = device.createCommandEncoder()
+                fn(encoder, texture)
+                device.queue.submit(arrayOf(encoder.finish()))
+                surface.present()
+            } catch (e: Exception) {
+                Log.e("WebGpuRenderer", "Render error", e)
+                // Don't rethrow - allow the app to continue rendering next frame
+            }
         }
 
         if (profilingEnabled) {
