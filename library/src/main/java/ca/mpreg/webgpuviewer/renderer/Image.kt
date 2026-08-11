@@ -35,7 +35,6 @@ class Image private constructor(
      * Defaults to opaque black (0xFF000000).
      */
     var backgroundColor: Int = 0xFF000000.toInt()
-        private set
 
     companion object {
         suspend fun createWithTrim(

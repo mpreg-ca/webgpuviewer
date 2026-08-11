@@ -420,19 +420,22 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             }
         }
 
-        if (bgAlpha > 0f) {
+        // Fade color toward black based on bgAlpha, respecting original alpha
+        val origA = (image.backgroundColor ushr 24) and 0xFF
+        val a = (origA * bgAlpha).toInt()
+        
+        if (a > 0) {
             val srcWidth = res.mipmap.width.toFloat()
             val finalScale = res.scale
             val x1 = finalScale * res.x
             val x2 = finalScale * (res.x + srcWidth / dst.width)
-            // Fade color toward black based on bgAlpha
             val origR = (image.backgroundColor shr 16) and 0xFF
             val origG = (image.backgroundColor shr 8) and 0xFF
             val origB = image.backgroundColor and 0xFF
             val r = (origR * bgAlpha).toInt()
             val g = (origG * bgAlpha).toInt()
             val b = (origB * bgAlpha).toInt()
-            val bgColor = 0xFF000000.toInt() or (r shl 16) or (g shl 8) or b
+            val bgColor = (a shl 24) or (r shl 16) or (g shl 8) or b
             Draw.rect(encoder, dst, x1, 0f, x2, 1f, bgColor)
         }
 
