@@ -64,6 +64,11 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 """
 
+// Thread-local ByteBuffer to avoid allocation per call
+private val byteBufferLocal = ThreadLocal.withInitial {
+    ByteBuffer.allocateDirect(48).order(ByteOrder.nativeOrder())
+}
+
 fun Draw.line(
     encoder: GPUCommandEncoder,
     texture: GPUTexture,
@@ -84,18 +89,17 @@ fun Draw.line(
     val px2 = x2 * texture.width
     val py2 = y2 * texture.height
 
-    val byteBuffer = ByteBuffer.allocateDirect(48).apply {
-        order(ByteOrder.nativeOrder())
-        putFloat(0, px1)
-        putFloat(4, py1)
-        putFloat(8, px2)
-        putFloat(12, py2)
-        putFloat(16, r)
-        putFloat(20, g)
-        putFloat(24, b)
-        putFloat(28, a)
-        putFloat(32, thickness)
-    }
+    val byteBuffer = byteBufferLocal.get()
+    byteBuffer.clear()
+    byteBuffer.putFloat(0, px1)
+    byteBuffer.putFloat(4, py1)
+    byteBuffer.putFloat(8, px2)
+    byteBuffer.putFloat(12, py2)
+    byteBuffer.putFloat(16, r)
+    byteBuffer.putFloat(20, g)
+    byteBuffer.putFloat(24, b)
+    byteBuffer.putFloat(28, a)
+    byteBuffer.putFloat(32, thickness)
 
     val uniformBuffer = createBuffer(48, BufferUsage.Uniform or BufferUsage.CopyDst)
     device.queue.writeBuffer(uniformBuffer, 0, byteBuffer)

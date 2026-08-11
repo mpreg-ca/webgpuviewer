@@ -122,6 +122,9 @@ class Mipmap(
 
     internal fun cleanup() {
         cachedQuad = null
+        lastQuad = null
+        lastQuadTX = -1
+        lastQuadTY = -1
         textureViews.clear()
         tileViews.clear()
         textures.forEach { tex -> tex.destroy() }
@@ -160,11 +163,13 @@ class Mipmap(
         val tiles: List<GPUTexture>, val tileViews: List<GPUTextureView>, val x: Int, val y: Int
     )
 
+    // Cache the last computed quad to avoid allocations when panning within the same tile region
+    private var lastQuadTX = -1
+    private var lastQuadTY = -1
+    private var lastQuad: Quad? = null
+
     fun getQuad(centerX: Int, centerY: Int): Quad {
         cachedQuad?.let { return it }
-
-        val quadTiles = mutableListOf<GPUTexture>()
-        val quadViews = mutableListOf<GPUTextureView>()
 
         val cX = centerX.toFloat()
         val cY = centerY.toFloat()
@@ -199,6 +204,16 @@ class Mipmap(
             }
         }.coerceIn(0, tilesRows - 1)
 
+        // Return cached quad if tile region hasn't changed
+        lastQuad?.let { cached ->
+            if (lastQuadTX == tX && lastQuadTY == tY) {
+                return cached
+            }
+        }
+
+        val quadTiles = mutableListOf<GPUTexture>()
+        val quadViews = mutableListOf<GPUTextureView>()
+
         for (row in 0 until 2) {
             val rowIdx = (tY + row).coerceAtMost(tilesRows - 1) * tilesCols
             for (col in 0 until 2) {
@@ -208,6 +223,10 @@ class Mipmap(
             }
         }
 
-        return Quad(quadTiles, quadViews, tX * quadTiles[0].width, tY * quadTiles[0].height)
+        val quad = Quad(quadTiles, quadViews, tX * quadTiles[0].width, tY * quadTiles[0].height)
+        lastQuadTX = tX
+        lastQuadTY = tY
+        lastQuad = quad
+        return quad
     }
 }
