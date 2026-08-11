@@ -263,6 +263,7 @@ fun ImageViewerContinuous(
 
                                 if (event.changes.size > 1 && event.changes.all { it.pressed }) {
                                     if (single) {
+                                        longPressJob.cancel()
                                         velocityTracker.resetTracking()
                                     }
                                     single = false
