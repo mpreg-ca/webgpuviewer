@@ -248,6 +248,7 @@ fun ImageViewer(
                                 var pointerCountChanged = false
                                 if (event.changes.size > 1 && event.changes.all { it.pressed }) {
                                     if (single && !pageTurning) {
+                                        longPressJob?.cancel()
                                         velocityTracker.resetTracking()
                                         acc = Offset.Zero
                                         pointerCountChanged = true
