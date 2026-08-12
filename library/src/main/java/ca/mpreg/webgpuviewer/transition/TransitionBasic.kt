@@ -380,7 +380,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     /**
-     * Render a Page to the destination texture.
+     * Render a Page to the destination texture with background.
      * Renders each image based on its position (LEFT, RIGHT, or SINGLE).
      */
     internal fun render(
@@ -391,92 +391,72 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         y: Float,
         scale: Float
     ) {
-        page.images.filterNotNull().forEach { image ->
+        val images = page.images.filterNotNull()
+        if (images.isEmpty()) return
+
+        // For each image, prepare render and draw background + image
+        images.forEach { image ->
             val offsetX = when (image.position) {
                 Image.Position.LEFT -> (-0.5f * image.width) / dst.width
                 Image.Position.RIGHT -> (0.5f * image.width) / dst.width
                 Image.Position.SINGLE -> 0f
             }
-            render(image, encoder, dst, page.x + x + offsetX, page.y + y, page.scale * scale)
-        }
-    }
+            val res =
+                image.prepareForRender(dst, page.x + x + offsetX, page.y + y, page.scale * scale)
+                    ?: return@forEach
 
-    /**
-     * Render a Page with background color handling.
-     */
-    internal fun render(
-        page: ImagePage,
-        encoder: GPUCommandEncoder,
-        dst: GPUTexture,
-        offsetX: Float,
-        offsetY: Float,
-        scale: Float,
-        drawBackground: Boolean
-    ) {
-        if (!drawBackground) {
-            render(page, encoder, dst, offsetX, offsetY, scale)
-            return
-        }
+            // Draw background color behind the image
+            val parent = page.parent
+            val minScale = page.minScale
+            val currentScale = page.scale * scale
 
-        // Draw background for the combined page area
-        val images = page.images.filterNotNull()
-        if (images.isEmpty()) return
+            var bgAlpha = 1f
+            val fadeDistancePixels = 50f
 
-        // Use first image's background color
-        val bgColor = images.firstOrNull()?.backgroundColor ?: return
-
-        // Calculate background fade based on scale and position
-        val parent = page.parent
-        val minScale = page.minScale
-        val currentScale = page.scale * scale
-        var bgAlpha = 1f
-        val fadeDistancePixels = 50f
-
-        if (parent != null && currentScale < minScale && minScale > 0f) {
-            val imageSize = (page.width.coerceAtLeast(page.height)).toFloat()
-            val sizeAtMinScale = imageSize * minScale
-            val currentSize = imageSize * currentScale
-            val shrinkPixels = sizeAtMinScale - currentSize
-            bgAlpha *= (1f - shrinkPixels / fadeDistancePixels).coerceIn(0f, 1f)
-        }
-
-        if (parent != null && parent.height > 0) {
-            val minY = page.minY(page.scale)
-            val maxY = page.maxY(page.scale)
-            val currentY = page.y
-            val fadeDistance = fadeDistancePixels / parent.height / page.scale
-
-            if (currentY < minY) {
-                val overflow = minY - currentY
-                bgAlpha *= (1f - overflow / fadeDistance).coerceIn(0f, 1f)
-            } else if (currentY > maxY) {
-                val overflow = currentY - maxY
-                bgAlpha *= (1f - overflow / fadeDistance).coerceIn(0f, 1f)
+            if (parent != null && currentScale < minScale && minScale > 0f) {
+                val imageSize = (page.width.coerceAtLeast(page.height)).toFloat()
+                val sizeAtMinScale = imageSize * minScale
+                val currentSize = imageSize * currentScale
+                val shrinkPixels = sizeAtMinScale - currentSize
+                bgAlpha *= (1f - shrinkPixels / fadeDistancePixels).coerceIn(0f, 1f)
             }
+
+            if (parent != null && parent.height > 0) {
+                val minY = page.minY(page.scale)
+                val maxY = page.maxY(page.scale)
+                val currentY = page.y
+                val fadeDistance = fadeDistancePixels / parent.height / page.scale
+
+                if (currentY < minY) {
+                    val overflow = minY - currentY
+                    bgAlpha *= (1f - overflow / fadeDistance).coerceIn(0f, 1f)
+                } else if (currentY > maxY) {
+                    val overflow = currentY - maxY
+                    bgAlpha *= (1f - overflow / fadeDistance).coerceIn(0f, 1f)
+                }
+            }
+
+            val origA = (image.backgroundColor ushr 24) and 0xFF
+            val a = (origA * bgAlpha).toInt()
+
+            if (a > 0) {
+                val srcWidth = res.mipmap.width.toFloat()
+                val finalScale = res.scale
+                val x1 = finalScale * res.x
+                val x2 = finalScale * (res.x + srcWidth / dst.width)
+                val origR = (image.backgroundColor shr 16) and 0xFF
+                val origG = (image.backgroundColor shr 8) and 0xFF
+                val origB = image.backgroundColor and 0xFF
+                val r = (origR * bgAlpha).toInt()
+                val g = (origG * bgAlpha).toInt()
+                val b = (origB * bgAlpha).toInt()
+                val bgColor = (a shl 24) or (r shl 16) or (g shl 8) or b
+                Draw.rect(encoder, dst, x1, 0f, x2, 1f, bgColor)
+            }
+
+            // Render the image on top
+            render(image, encoder, dst, res)
         }
-
-        val origA = (bgColor ushr 24) and 0xFF
-        val a = (origA * bgAlpha).toInt()
-
-        if (a > 0) {
-            val origR = (bgColor shr 16) and 0xFF
-            val origG = (bgColor shr 8) and 0xFF
-            val origB = bgColor and 0xFF
-            val r = (origR * bgAlpha).toInt()
-            val g = (origG * bgAlpha).toInt()
-            val b = (origB * bgAlpha).toInt()
-            val fadedBgColor = (a shl 24) or (r shl 16) or (g shl 8) or b
-
-            // Calculate x bounds for background
-            val finalScale = page.scale * scale
-            val pageX = page.x + offsetX
-            val halfWidth = page.width.toFloat() / 2f / dst.width
-            val x1 = finalScale * (pageX + 0.5f - halfWidth)
-            val x2 = finalScale * (pageX + 0.5f + halfWidth)
-            Draw.rect(encoder, dst, x1, 0f, x2, 1f, fadedBgColor)
-        }
-
-        render(page, encoder, dst, offsetX, offsetY, scale)
     }
 
     private fun render(
