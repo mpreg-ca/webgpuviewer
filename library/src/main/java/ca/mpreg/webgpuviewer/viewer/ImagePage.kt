@@ -119,26 +119,27 @@ open class ImagePage(var image: Image?) {
 
     var trim: Rect? = null
 
+    private val contentWidth: Float
+        get() = parent?.width?.toFloat() ?: 0f
+
+    private val contentHeight: Float
+        get() {
+            val parent = parent ?: return 0f
+            return if (parent.avoidCutout && parent.cutoutTopPx > 0f) {
+                parent.height - parent.cutoutTopPx
+            } else {
+                parent.height.toFloat()
+            }
+        }
+
     val homeScale: Float
         get() {
-            val parent = parent ?: return minScale
-            val baseScale = trim?.let { parent.getMinScale(it.width(), it.height()) } ?: minScale
-
-            val cutoutPx = parent.cutoutTopPx
-            if (cutoutPx > 0f) {
-                val imageHeight = (trim?.height() ?: height).toFloat()
-                val imageHeightOnScreen = imageHeight * baseScale
-                val centeredTopY = (parent.height - imageHeightOnScreen) / 2f
-
-                // Reduce scale if always avoiding cutout, or if image would overlap
-                if (parent.alwaysAvoidCutout || centeredTopY < cutoutPx) {
-                    val availableHeight = parent.height - cutoutPx
-                    val maxScaleForCutout = availableHeight / imageHeight
-                    return minOf(baseScale, maxScaleForCutout).coerceAtLeast(0.01f)
-                }
-            }
-
-            return baseScale
+            if (contentWidth <= 0f || contentHeight <= 0f) return 0.01f
+            val imageWidth = (trim?.width() ?: width).toFloat()
+            val imageHeight = (trim?.height() ?: height).toFloat()
+            return minOf(
+                contentWidth / imageWidth, contentHeight / imageHeight
+            ).coerceAtLeast(0.01f)
         }
 
     val homeX: Float
@@ -146,22 +147,18 @@ open class ImagePage(var image: Image?) {
             val trim = trim ?: return 0f
             val parent = parent ?: return 0f
             val center = (trim.left + trim.right) / 2f
-            val maxX = parent.maxX(width, homeScale)
+            val maxX = maxX(homeScale)
             return ((0.5f * width - center) / parent.width).fastCoerceIn(-maxX, maxX)
         }
 
     val homeY: Float
         get() {
             val parent = parent ?: return 0f
-            val trim = trim
 
             // trimBaseY centers the trim on screen
-            val trimBaseY = if (trim != null) {
-                val trimCenter = (trim.top + trim.bottom) / 2f
-                (0.5f * height - trimCenter) / parent.height
-            } else {
-                0f
-            }
+            val trimBaseY = trim?.let {
+                (0.5f * height - (it.top + it.bottom) / 2f) / parent.height
+            } ?: 0f
 
             val cutoutPx = parent.cutoutTopPx
             if (cutoutPx > 0f && parent.height > 0) {
@@ -180,13 +177,12 @@ open class ImagePage(var image: Image?) {
                 }
             }
 
-            val minY = parent.minY(height, homeScale)
-            val maxY = parent.maxY(height, homeScale)
-            return trimBaseY.fastCoerceIn(minY, maxY)
+            val halfRange = max(0f, (height.toFloat() / parent.height - 1 / homeScale) / 2)
+            return trimBaseY.fastCoerceIn(-halfRange, halfRange)
         }
 
-    val atHome
-        get(): Boolean {
+    val atHome: Boolean
+        get() {
             val eps = 0.0001f
             return abs(x - homeX) < eps && abs(y - homeY) < eps && abs(scale - homeScale) < eps
         }
@@ -196,7 +192,11 @@ open class ImagePage(var image: Image?) {
     var parent: ImageViewerState? = null
 
     var minScale = -1f
-        get() = if (field > 0) field else parent?.getMinScale(width, height) ?: 1f
+        get() {
+            if (field > 0) return field
+            if (contentWidth <= 0f || contentHeight <= 0f) return 0.01f
+            return minOf(contentWidth / width, contentHeight / height).coerceAtLeast(0.01f)
+        }
 
     var dpi = Resources.getSystem().displayMetrics.densityDpi / 100f
 
@@ -204,6 +204,23 @@ open class ImagePage(var image: Image?) {
 
     var maxScale = -1f
         get() = if (field > 0) field else max(doubleTapScale * 2, 2f)
+
+    fun maxX(scale: Float): Float {
+        val parent = parent ?: return 0f
+        return max(0f, (width.toFloat() / parent.width - 1 / scale) / 2)
+    }
+
+    fun minY(scale: Float): Float {
+        if (scale == homeScale) return homeY
+        val parent = parent ?: return 0f
+        return -max(0f, (height.toFloat() / parent.height - 1 / scale) / 2)
+    }
+
+    fun maxY(scale: Float): Float {
+        if (scale == homeScale) return homeY
+        val parent = parent ?: return 0f
+        return max(0f, (height.toFloat() / parent.height - 1 / scale) / 2)
+    }
 
     fun setPos(x: Float = this.x, y: Float = this.y, scale: Float = this.scale) {
         if (this.x == x && this.y == y && this.scale == scale) {
@@ -237,9 +254,9 @@ open class ImagePage(var image: Image?) {
 
         @Suppress("NAME_SHADOWING") val targetScale = targetScale.fastCoerceIn(minScale, maxScale)
 
-        val maxX = parent?.maxX(width, targetScale) ?: 0f
-        val minY = parent?.minY(height, targetScale, homeY) ?: 0f
-        val maxY = parent?.maxY(height, targetScale, homeY) ?: 0f
+        val maxX = maxX(targetScale)
+        val minY = minY(targetScale)
+        val maxY = maxY(targetScale)
 
         val scaleChanging = targetScale != startScale
         val diffEnd = if (scaleChanging) 1 / targetScale - 1 / startScale else 1f

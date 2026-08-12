@@ -194,9 +194,9 @@ fun ImageViewer(
                                         val x = (originalX + px * diff).orZero()
                                         val y = (originalY + py * diff).orZero()
 
-                                        val maxX = state.maxX(page.width, page.scale)
-                                        val minY = state.minY(page.height, page.scale, page.homeY)
-                                        val maxY = state.maxY(page.height, page.scale, page.homeY)
+                                        val maxX = page.maxX(page.scale)
+                                        val minY = page.minY(page.scale)
+                                        val maxY = page.maxY(page.scale)
 
                                         page.setPos(
                                             x.fastCoerceIn(-maxX, maxX), y.fastCoerceIn(minY, maxY)
@@ -296,9 +296,9 @@ fun ImageViewer(
                                         x += (centroid.x / state.width - 0.5f) * diff
                                         y += (centroid.y / state.height - 0.5f) * diff
 
-                                        val maxX = state.maxX(page.width, newScale)
-                                        val minY = state.minY(page.height, newScale, page.homeY)
-                                        val maxY = state.maxY(page.height, newScale, page.homeY)
+                                        val maxX = page.maxX(newScale)
+                                        val minY = page.minY(newScale)
+                                        val maxY = page.maxY(newScale)
 
                                         if (single) {
                                             val clampedX = x.fastCoerceIn(-maxX, maxX)
@@ -362,9 +362,9 @@ fun ImageViewer(
                                 }
                             }
                         } else {
-                            val maxX = state.maxX(page.width, page.scale)
-                            val minY = state.minY(page.height, page.scale, page.homeY)
-                            val maxY = state.maxY(page.height, page.scale, page.homeY)
+                            val maxX = page.maxX(page.scale)
+                            val minY = page.minY(page.scale)
+                            val maxY = page.maxY(page.scale)
 
                             val velocity = velocityTracker.calculateVelocity()
                             if ((page.scale >= page.homeScale) && (page.scale <= page.maxScale) && (lastEventTime - lastMoveTime) < 100 && (abs(

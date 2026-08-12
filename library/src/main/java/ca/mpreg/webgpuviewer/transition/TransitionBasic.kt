@@ -406,8 +406,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
         // Fade based on Y pan position
         if (parent != null && parent.height > 0) {
-            val minY = parent.minY(page.height, page.scale, page.homeY)
-            val maxY = parent.maxY(page.height, page.scale, page.homeY)
+            val minY = page.minY(page.scale)
+            val maxY = page.maxY(page.scale)
             val currentY = page.y
             val fadeDistance = fadeDistancePixels / parent.height / page.scale
 
@@ -423,7 +423,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // Fade color toward black based on bgAlpha, respecting original alpha
         val origA = (image.backgroundColor ushr 24) and 0xFF
         val a = (origA * bgAlpha).toInt()
-        
+
         if (a > 0) {
             val srcWidth = res.mipmap.width.toFloat()
             val finalScale = res.scale

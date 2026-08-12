@@ -25,8 +25,6 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlin.math.max
-import kotlin.math.min
 
 open class ImageViewerState(var isVertical: Boolean = false) {
     val renderer = WebGpuRenderer()
@@ -55,32 +53,6 @@ open class ImageViewerState(var isVertical: Boolean = false) {
 
     /** When true, always shift images below cutout. When false, only shift if image would overlap cutout. */
     var alwaysAvoidCutout: Boolean by mutableStateOf(false)
-
-    fun getMinScale(width: Int, height: Int): Float {
-        val ratioX = this.width.toFloat() / width.toFloat()
-        val ratioY = this.height.toFloat() / height.toFloat()
-        return max(0.01f, min(ratioX, ratioY))
-    }
-
-    fun maxX(width: Int, scale: Float): Float {
-        return max(0f, (width.toFloat() / this.width - 1 / scale) / 2)
-    }
-
-    fun minY(height: Int, scale: Float): Float {
-        return -max(0f, (height.toFloat() / this.height - 1 / scale) / 2)
-    }
-
-    fun minY(height: Int, scale: Float, homeY: Float): Float {
-        return min(minY(height, scale), homeY)
-    }
-
-    fun maxY(height: Int, scale: Float): Float {
-        return max(0f, (height.toFloat() / this.height - 1 / scale) / 2)
-    }
-
-    fun maxY(height: Int, scale: Float, homeY: Float): Float {
-        return max(maxY(height, scale), homeY)
-    }
 
     private var suppressPageChange = false
 
@@ -224,20 +196,12 @@ open class ImageViewerState(var isVertical: Boolean = false) {
     )
 
     protected open suspend fun renderSnapshot(
-        encoder: GPUCommandEncoder,
-        texture: GPUTexture,
-        snapshot: Any
+        encoder: GPUCommandEncoder, texture: GPUTexture, snapshot: Any
     ) {
         val s = snapshot as RenderSnapshot
         if (s.adjacentPage != null && s.offset != 0f) {
             s.transition.render(
-                s.currentPage,
-                s.adjacentPage,
-                encoder,
-                texture,
-                s.offset,
-                s.firstPos,
-                s.currentPos
+                s.currentPage, s.adjacentPage, encoder, texture, s.offset, s.firstPos, s.currentPos
             )
         } else {
             TransitionBasic.render(s.currentPage, encoder, texture, 0f, 0f, 1f)
