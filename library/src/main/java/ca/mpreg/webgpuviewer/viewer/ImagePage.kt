@@ -351,8 +351,7 @@ open class ImagePage(val images: List<Image?>) {
         animationJob = scope?.launch {
             animate(
                 0f, 1f, animationSpec = spring(
-                    stiffness = Spring.StiffnessMediumLow,
-                    visibilityThreshold = 0.001f
+                    stiffness = Spring.StiffnessMediumLow, visibilityThreshold = 0.001f
                 )
             ) { value, _ ->
                 val currentScale = startScale + (targetScale - startScale) * value
