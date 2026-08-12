@@ -17,7 +17,7 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
     var scrollY = 0f
 
     fun getPageHeight(page: ImagePage): Float {
-        page.image ?: return page.height.toFloat()
+        if (page.images.all { it == null }) return page.height.toFloat()
         val fitWidth = width.toFloat() / page.width.toFloat()
         return page.height * fitWidth
     }
@@ -64,7 +64,10 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
         animationJob = scope?.launch {
             var lastValue = 0f
             animate(
-                0f, deltaPixels, animationSpec = spring(stiffness = Spring.StiffnessMediumLow)
+                0f, deltaPixels, animationSpec = spring(
+                    stiffness = Spring.StiffnessMediumLow,
+                    visibilityThreshold = 0.001f
+                )
             ) { value, _ ->
                 scrollBy(value - lastValue)
                 lastValue = value
@@ -103,7 +106,7 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
             val pageScale = screenW / page.width
             val offsetY = (0.5f * page.height + y / pageScale) / screenH - 0.5f / pageScale
 
-            page.image?.let {
+            if (page.images.any { it != null }) {
                 images.add(Pair(page, offsetY))
             }
 
@@ -123,11 +126,25 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
     ) {
         val s = snapshot as ContinuousRenderSnapshot
         s.images.forEach { pair ->
-            pair.first.image?.let {
-                val pageScale = s.screenW / pair.first.width
-                TransitionBasic.render(
-                    it, encoder, texture, s.offsetX / pageScale, pair.second, pageScale * s.scale
-                )
+            val page = pair.first
+            if (page.images.any { it != null }) {
+                val pageScale = s.screenW / page.width
+                // Render each image in the page
+                page.images.forEachIndexed { i, image ->
+                    if (image != null) {
+                        val offsetX = if (page.images.size == 2) {
+                            ((0.5f - i) * image.width) / texture.width
+                        } else 0f
+                        TransitionBasic.render(
+                            image,
+                            encoder,
+                            texture,
+                            s.offsetX / pageScale + offsetX,
+                            pair.second,
+                            pageScale * s.scale
+                        )
+                    }
+                }
             }
         }
     }

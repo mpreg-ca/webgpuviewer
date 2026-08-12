@@ -100,17 +100,21 @@ open class ImageViewerState(var isVertical: Boolean = false) {
             invalidate()
             try {
                 Animatable(direction.toFloat()).animateTo(
-                    0f, animationSpec = spring(stiffness = Spring.StiffnessMediumLow)
+                    0f, animationSpec = spring(
+                        stiffness = Spring.StiffnessMediumLow,
+                        visibilityThreshold = 0.001f
+                    )
                 ) {
                     setPageOffsetDirect(value)
                     invalidate()
                 }
             } finally {
-                // Ensure we snap to exactly 0 and clear override
-                setPageOffsetDirect(0f)
+                // Always clear transitionFromPage - if cancelled, getPage will provide the right page
                 transitionFromPage = null
-                invalidate()
             }
+            // Only snap to 0 when animation completes normally
+            setPageOffsetDirect(0f)
+            invalidate()
         }
     }
 
@@ -127,12 +131,10 @@ open class ImageViewerState(var isVertical: Boolean = false) {
     var transitionFromPage: ImagePage? = null
 
     fun getPage(index: Int): ImagePage? {
-        return fetchPage?.invoke(index)?.apply {
-            parent = this@ImageViewerState
-            scope = this@ImageViewerState.scope
-            onInvalidate = {
-                invalidate()
-            }
+        return fetchPage?.invoke(index)?.also { page ->
+            page.parent = this
+            page.scope = this.scope
+            page.onInvalidate = { invalidate() }
         }
     }
 

@@ -27,6 +27,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.input.pointer.util.addPointerInputChange
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.util.fastCoerceIn
@@ -52,7 +53,15 @@ fun ImageViewer(
     val view = LocalView.current
     val density = LocalDensity.current
     val cutoutTop = WindowInsets.displayCutout.asPaddingValues().calculateTopPadding()
-    val cutoutPx = with(density) { cutoutTop.toPx() }
+    var cutoutPx = with(density) { cutoutTop.toPx() }
+    cutoutPx = if (cutoutPx == 0f) {
+        val context = LocalContext.current
+        val resourceId = context.resources.getIdentifier("status_bar_height", "dimen", "android")
+        context.resources.getDimensionPixelSize(resourceId).toFloat()
+    } else {
+        cutoutPx
+
+    }
 
     LaunchedEffect(state.avoidCutout, cutoutPx) {
         state.cutoutTopPx = if (state.avoidCutout) cutoutPx else 0f
@@ -99,8 +108,10 @@ fun ImageViewer(
                             if (state.pageOffset != 0f) {
                                 state.animationJob = scope.launch {
                                     Animatable(state.pageOffset).animateTo(
-                                        0f,
-                                        animationSpec = spring(stiffness = Spring.StiffnessMediumLow)
+                                        0f, animationSpec = spring(
+                                            stiffness = Spring.StiffnessMediumLow,
+                                            visibilityThreshold = 0.001f
+                                        )
                                     ) {
                                         state.pageOffset = value
                                         state.invalidate()
@@ -224,6 +235,11 @@ fun ImageViewer(
                         var single = true
                         var pageTurning = wasScrolling
 
+                        // If grabbing mid-animation, update firstPos so panning continues smoothly
+                        if (wasScrolling) {
+                            state.firstPos = firstDown.position
+                        }
+
                         val velocityTracker = VelocityTracker()
                         velocityTracker.addPointerInputChange(firstDown)
 
@@ -341,7 +357,12 @@ fun ImageViewer(
                             val initialVelocity =
                                 if (state.isVertical) -velocity.y / state.height else -velocity.x / state.width
 
+                            // Flicking opposite to current direction = go back to 0
+                            val flickingOpposite =
+                                (state.pageOffset > 0f && initialVelocity < -0.5f) || (state.pageOffset < 0f && initialVelocity > 0.5f)
+
                             val target = when {
+                                flickingOpposite -> 0f
                                 initialVelocity > 1f && state.haveNext -> 1f
                                 initialVelocity < -1f && state.havePrev -> -1f
                                 state.pageOffset > 0.5f && state.haveNext -> 1f
@@ -355,7 +376,10 @@ fun ImageViewer(
                                 anim.animateTo(
                                     target,
                                     initialVelocity = initialVelocity,
-                                    animationSpec = spring(stiffness = Spring.StiffnessMediumLow)
+                                    animationSpec = spring(
+                                        stiffness = Spring.StiffnessMediumLow,
+                                        visibilityThreshold = 0.001f
+                                    )
                                 ) {
                                     state.pageOffset = value
                                     state.invalidate()

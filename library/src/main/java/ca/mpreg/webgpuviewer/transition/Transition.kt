@@ -244,7 +244,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
         /**
          * Get cached texture view for a page, rendering if needed.
-         * Returns null only if the page has no image.
+         * Returns null only if the page has no images.
          */
         internal fun getCachedTexture(
             page: ImagePage,
@@ -254,7 +254,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             dstHeight: Int,
             renderPage: (GPUCommandEncoder, GPUTexture) -> Unit
         ): GPUTextureView? {
-            if (page.image == null) return null
+            if (page.images.all { it == null }) return null
 
             val pageX = page.x
             val pageY = page.y

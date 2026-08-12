@@ -305,8 +305,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     ) {
         // Draw single background rect that transitions between colors
         val t = if (frac > 0f) frac else -frac
-        val bg1 = page1.image?.backgroundColor ?: 0xFFFFFF
-        val bg2 = page2.image?.backgroundColor ?: 0xFFFFFF
+        val bg1 = page1.images.firstOrNull()?.backgroundColor ?: 0xFFFFFF
+        val bg2 = page2.images.firstOrNull()?.backgroundColor ?: 0xFFFFFF
         val r1 = (bg1 shr 16) and 0xFF
         val g1 = (bg1 shr 8) and 0xFF
         val b1 = bg1 and 0xFF
@@ -335,7 +335,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         transition: Float,
         isSecond: Float,
     ) {
-        val image = page.image ?: return
+        // For sphere transitions, use first image (TODO: support dual page sphere)
+        val image = page.images.firstOrNull() ?: return
         val res = image.prepareForRender(dst, page.x, page.y, page.scale) ?: return
 
         val byteBuffer = byteBufferLocal.get()

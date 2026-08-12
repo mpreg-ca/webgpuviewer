@@ -22,11 +22,6 @@ import kotlin.math.round
 
 const val BUFFER_SIZE = 96L
 
-/**
- * Result of image creation, includes optional trim bounds if requested
- */
-data class ImageWithTrim(val image: Image, val trim: Rect?)
-
 class Image private constructor(
     val width: Int, val height: Int, var x: Float = 0f, var y: Float = 0f
 ) {
@@ -36,6 +31,22 @@ class Image private constructor(
      */
     var backgroundColor: Int = 0xFF000000.toInt()
 
+    /**
+     * Trim bounds detected from image content, or null if not trimmed.
+     */
+    var trim: Rect? = null
+
+    /**
+     * Position of this image in a spread.
+     */
+    enum class Position {
+        LEFT,
+        RIGHT,
+        SINGLE
+    }
+
+    var position: Position = Position.SINGLE
+
     companion object {
         suspend fun createWithTrim(
             pixels: ByteBuffer, width: Int, height: Int,
@@ -43,7 +54,7 @@ class Image private constructor(
             trimColors: List<FloatArray>? = null,
             trimThreshold: Float = 0.05f,
             backgroundColor: Int? = null,
-        ): ImageWithTrim {
+        ): Image {
             require(width > 0 && height > 0) { "Image dimensions must be positive" }
             require(trimColors == null || trimColors.all { it.size >= 3 }) {
                 "each trimColor must have at least 3 elements [r, g, b]"
@@ -116,16 +127,18 @@ class Image private constructor(
                         }
                     }
 
-                    if (trimColors != null && trimColors.isNotEmpty() && image.mipmaps.isNotEmpty()) {
+                    if (!trimColors.isNullOrEmpty() && image.mipmaps.isNotEmpty()) {
                         // Find trim for each color and pick the smallest rect
                         val results = trimColors.map { color ->
                             color to Trim.findInContext(
                                 image, color[0], color[1], color[2], trimThreshold
                             )
                         }
+
                         val best = results.minByOrNull { it.second.width() * it.second.height() }
                         if (best != null) {
                             trimRect = best.second
+                            image.trim = trimRect  // Store trim on image
                             // Set background color from the winning trim color
                             if (backgroundColor == null) {
                                 val c = best.first
@@ -146,13 +159,13 @@ class Image private constructor(
                 }
             }
 
-            return ImageWithTrim(image, trimRect)
+            return image
         }
 
         suspend operator fun invoke(
             pixels: ByteBuffer, width: Int, height: Int, createMipMaps: Boolean = true
         ): Image {
-            return createWithTrim(pixels, width, height, createMipMaps, null).image
+            return createWithTrim(pixels, width, height, createMipMaps, null)
         }
 
         suspend operator fun invoke(width: Int, height: Int): Image {

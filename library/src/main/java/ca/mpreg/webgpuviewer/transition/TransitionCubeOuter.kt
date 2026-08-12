@@ -132,8 +132,8 @@ object TransitionCubeOuter : Transition() {
             sidePage = page1
         }
 
-        val frontImg = frontPage.image
-        val sideImg = sidePage.image
+        val frontImg = frontPage.images.firstOrNull()
+        val sideImg = sidePage.images.firstOrNull()
 
         val frontMat = buildFaceMatrix(
             rotAngle, screenAspect,

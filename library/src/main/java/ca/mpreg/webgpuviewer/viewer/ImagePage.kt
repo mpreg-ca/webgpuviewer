@@ -2,7 +2,6 @@ package ca.mpreg.webgpuviewer.viewer
 
 import android.content.res.Resources
 import android.graphics.Bitmap
-import android.graphics.Rect
 import android.util.Log
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animate
@@ -23,9 +22,26 @@ import kotlin.math.abs
 import kotlin.math.max
 import kotlin.time.Duration.Companion.milliseconds
 
-open class ImagePage(var image: Image?) {
-    class Dummy(override val width: Int, override val height: Int) : ImagePage(null)
+/**
+ * ImagePage holds one or two images with shared transform (x, y, scale).
+ * 
+ * For single page: images = [image]
+ * For dual page spread: images = [leftImage, rightImage]
+ * 
+ * Handles:
+ * - Transform state (x, y, scale) and home position calculations
+ * - Animation (pan/zoom animations, animated image frame loops)
+ * - Image lifecycle (cleanup)
+ */
+open class ImagePage(val images: List<Image?>) {
 
+    constructor(image: Image?) : this(listOf(image))
+    constructor(left: Image?, right: Image?) : this(listOf(left, right))
+
+    /** Placeholder page with dimensions but no image data */
+    class Dummy(override val width: Int, override val height: Int) : ImagePage(emptyList())
+
+    /** Drawable page for rendering progress indicators */
     class Draw private constructor(image: Image) : ImagePage(image) {
         companion object {
             suspend operator fun invoke(width: Int, height: Int): Draw {
@@ -33,10 +49,9 @@ open class ImagePage(var image: Image?) {
             }
         }
 
-        val texture: GPUTexture? get() = image?.mipmaps?.firstOrNull()?.textures?.firstOrNull()
+        val texture: GPUTexture?
+            get() = images.firstOrNull()?.mipmaps?.firstOrNull()?.textures?.firstOrNull()
     }
-
-    val isDecoded: Boolean get() = this !is Dummy && this !is Draw
 
     companion object {
         suspend operator fun invoke(
@@ -51,73 +66,104 @@ open class ImagePage(var image: Image?) {
             return ImagePage(buf, bitmap.width, bitmap.height, createMipMaps)
         }
 
-        suspend operator fun invoke(width: Int, height: Int): ImagePage {
-            return Draw(width, height)
-        }
+        suspend fun drawable(width: Int, height: Int): Draw = Draw(width, height)
     }
+
+    val isDecoded: Boolean
+        get() = this !is Dummy && this !is Draw && images.any { it != null }
+
+    var destroyed = false
+        private set
+
+    /** If true, this page owns its images and will clean them up. If false, images are borrowed. */
+    var ownsImages: Boolean = true
 
     var scale: Float = 1f
     var x: Float = 0f
     var y: Float = 0f
 
+    fun setPos(x: Float = this.x, y: Float = this.y, scale: Float = this.scale) {
+        if (this.x == x && this.y == y && this.scale == scale) return
+        this.x = x
+        this.y = y
+        this.scale = scale
+        onInvalidate?.invoke()
+    }
+
+    /** Total width (sum of image widths) */
+    open val width: Int
+        get() = images.filterNotNull().sumOf { it.width }
+
+    /** Total height (max of image heights) */
+    open val height: Int
+        get() = images.filterNotNull().maxOfOrNull { it.height } ?: 0
+
+    /** 
+     * Visible width after trim. For dual pages, inner edges are ignored.
+     */
+    val trimWidth: Int
+        get() {
+            if (images.size == 2) {
+                val left = images[0]
+                val right = images[1]
+                // Left: from left trim to full width (ignore right trim)
+                val leftW = left?.let { it.width - (it.trim?.left ?: 0) } ?: 0
+                // Right: from 0 to right trim (ignore left trim)
+                val rightW = right?.let { it.trim?.right ?: it.width } ?: 0
+                return leftW + rightW
+            }
+            return images.sumOf { it?.trim?.width() ?: it?.width ?: 0 }
+        }
+
+    /** Visible height after trim (max of trim heights) */
+    val trimHeight: Int
+        get() = images.maxOfOrNull { it?.trim?.height() ?: it?.height ?: 0 } ?: 0
+
     var animationJob: Job? = null
-    var animationLoop: Job? = null
-    var pages: List<Pair<Image, Int>>? = null
 
-    var destroyed = false
+    private var animationLoop: Job? = null
+    private var frames: List<Pair<Image, Int>>? = null
+    private var currentFrameImage: Image? = null
 
-    fun cleanup() {
-        destroyed = true
+    /** Current image for rendering (may change during animation) */
+    val image: Image?
+        get() = currentFrameImage ?: images.firstOrNull()
+
+    fun startAnimationLoop(frames: List<Pair<Image, Int>>, invalidate: () -> Unit) {
         animationLoop?.cancel()
-        animationLoop = null
-        animationJob?.cancel()
-        animationJob = null
+        this.frames = frames
+        currentFrameImage = frames.firstOrNull()?.first
 
-        // Capture references before nulling
-        val imageToCleanup = image
-        val pagesToCleanup = pages
-        image = null
-        pages = null
-
-        if (imageToCleanup != null || pagesToCleanup != null) {
-            CoroutineScope(Dispatchers.Default).launch {
-                try {
-                    WebGpuRenderer.withContext {
-                        // If pages exist, they contain all frames including the first one (which is also image)
-                        // So only clean pages OR image, not both, to avoid double cleanup
-                        if (pagesToCleanup != null) {
-                            pagesToCleanup.forEach { it.first.cleanup() }
-                        } else {
-                            imageToCleanup?.cleanup()
-                        }
-                    }
-                } catch (e: Exception) {
-                    Log.e("ImagePage", "Error during cleanup", e)
-                }
-            }
-        }
-    }
-
-    fun startAnimationLoop(pages: List<Pair<Image, Int>>, invalidate: () -> Unit) {
-        animationLoop?.cancel()
-        this.pages = pages
-        animationLoop = CoroutineScope(Dispatchers.Default).launch {
-            var frame = 0
+        // Use the page's scope if available, otherwise create a new one
+        // The loop checks this.frames which becomes null on cleanup, causing it to exit
+        val loopScope = scope ?: CoroutineScope(Dispatchers.Default)
+        animationLoop = loopScope.launch {
+            var frameIndex = 0
             while (true) {
-                this@ImagePage.pages?.get(frame)?.let { image ->
-                    this@ImagePage.image = image.first
+                this@ImagePage.frames?.getOrNull(frameIndex)?.let { (img, duration) ->
+                    currentFrameImage = img
                     invalidate()
-                    delay(image.second.coerceAtLeast(0).milliseconds)
-                }
-                frame = (frame + 1) % (this@ImagePage.pages?.size ?: 1)
+                    delay(duration.coerceAtLeast(0).milliseconds)
+                } ?: break
+                frameIndex = (frameIndex + 1) % (this@ImagePage.frames?.size ?: 1)
             }
         }
     }
 
-    open val width get() = image?.width ?: 0
-    open val height get() = image?.height ?: 0
+    var parent: ImageViewerState? = null
+        set(value) {
+            val wasNull = field == null
+            field = value
+            // Initialize to home when parent first set
+            if (wasNull && value != null && x == 0f && y == 0f && scale == 1f) {
+                x = homeX
+                y = homeY
+                scale = homeScale
+            }
+        }
 
-    var trim: Rect? = null
+    var scope: CoroutineScope? = null
+    var onInvalidate: (() -> Unit)? = null
 
     private val contentWidth: Float
         get() = parent?.width?.toFloat() ?: 0f
@@ -125,27 +171,43 @@ open class ImagePage(var image: Image?) {
     private val contentHeight: Float
         get() {
             val parent = parent ?: return 0f
-            return if (parent.avoidCutout && parent.cutoutTopPx > 0f) {
-                parent.height - parent.cutoutTopPx
-            } else {
-                parent.height.toFloat()
-            }
+            return if (parent.avoidCutout && parent.cutoutTopPx > 0f) parent.height - parent.cutoutTopPx else parent.height.toFloat()
+        }
+
+    /** True if this page uses half-screen layout (dual page or single LEFT/RIGHT) */
+    private val isHalfWidth: Boolean
+        get() = images.size == 2 || images.firstOrNull()?.position.let {
+            it == Image.Position.LEFT || it == Image.Position.RIGHT
         }
 
     val homeScale: Float
         get() {
             if (contentWidth <= 0f || contentHeight <= 0f) return 0.01f
-            val imageWidth = (trim?.width() ?: width).toFloat()
-            val imageHeight = (trim?.height() ?: height).toFloat()
-            return minOf(
-                contentWidth / imageWidth, contentHeight / imageHeight
-            ).coerceAtLeast(0.01f)
+
+            if (isHalfWidth) {
+                // Half-width layout: each image fits in half screen, no trim
+                val halfWidth = contentWidth / 2f
+                return images.filterNotNull().minOfOrNull { img ->
+                    minOf(halfWidth / img.width, contentHeight / img.height)
+                }?.coerceAtLeast(0.01f) ?: 0.01f
+            }
+
+            // Single SINGLE page: fit trim to full screen
+            val w = trimWidth.toFloat().takeIf { it > 0f } ?: return 0.01f
+            val h = trimHeight.toFloat().takeIf { it > 0f } ?: return 0.01f
+            return minOf(contentWidth / w, contentHeight / h).coerceAtLeast(0.01f)
         }
 
     val homeX: Float
         get() {
-            val trim = trim ?: return 0f
             val parent = parent ?: return 0f
+
+            // Half-width layout: no trim offset
+            if (isHalfWidth) return 0f
+
+            // Single SINGLE page: center the trim
+            if (images.all { it?.trim == null }) return 0f
+            val trim = images.firstOrNull()?.trim ?: return 0f
             val center = (trim.left + trim.right) / 2f
             val maxX = maxX(homeScale)
             return ((0.5f * width - center) / parent.width).fastCoerceIn(-maxX, maxX)
@@ -155,23 +217,40 @@ open class ImagePage(var image: Image?) {
         get() {
             val parent = parent ?: return 0f
 
-            // trimBaseY centers the trim on screen
-            val trimBaseY = trim?.let {
-                (0.5f * height - (it.top + it.bottom) / 2f) / parent.height
-            } ?: 0f
+            // Half-width layout: no trim, just cutout
+            if (isHalfWidth) {
+                if (parent.cutoutTopPx > 0f && parent.height > 0) {
+                    val imageOnScreen = height * homeScale
+                    val imageTopY = (parent.height - imageOnScreen) / 2f
+                    val cutoutOffset = when {
+                        parent.alwaysAvoidCutout -> parent.cutoutTopPx / 2f
+                        imageTopY < parent.cutoutTopPx -> parent.cutoutTopPx - imageTopY
+                        else -> 0f
+                    }
+                    if (cutoutOffset > 0f) {
+                        return cutoutOffset / parent.height / homeScale
+                    }
+                }
+                return 0f
+            }
 
-            val cutoutPx = parent.cutoutTopPx
-            if (cutoutPx > 0f && parent.height > 0) {
-                val visibleHeight = (trim?.height() ?: height).toFloat()
-                val trimHeightOnScreen = visibleHeight * homeScale
-                val trimTopY = (parent.height - trimHeightOnScreen) / 2f
+            // Single SINGLE page: use trim
+            val trimTop = images.mapNotNull { it?.trim?.top ?: it?.let { 0 } }.minOrNull() ?: 0
+            val trimBottom =
+                images.mapNotNull { it?.trim?.bottom ?: it?.height }.maxOrNull() ?: height
 
+            val trimBaseY = if (images.any { it?.trim != null }) {
+                (0.5f * height - (trimTop + trimBottom) / 2f) / parent.height
+            } else 0f
+
+            if (parent.cutoutTopPx > 0f && parent.height > 0) {
+                val trimOnScreen = trimHeight * homeScale
+                val trimTopY = (parent.height - trimOnScreen) / 2f
                 val cutoutOffset = when {
-                    parent.alwaysAvoidCutout -> cutoutPx / 2f
-                    trimTopY < cutoutPx -> cutoutPx - trimTopY
+                    parent.alwaysAvoidCutout -> parent.cutoutTopPx / 2f
+                    trimTopY < parent.cutoutTopPx -> parent.cutoutTopPx - trimTopY
                     else -> 0f
                 }
-
                 if (cutoutOffset > 0f) {
                     return trimBaseY + cutoutOffset / parent.height / homeScale
                 }
@@ -187,23 +266,28 @@ open class ImagePage(var image: Image?) {
             return abs(x - homeX) < eps && abs(y - homeY) < eps && abs(scale - homeScale) < eps
         }
 
-    var onInvalidate: (() -> Unit)? = null
-
-    var parent: ImageViewerState? = null
-
     var minScale = -1f
         get() {
             if (field > 0) return field
             if (contentWidth <= 0f || contentHeight <= 0f) return 0.01f
+
+            if (isHalfWidth) {
+                // Half-width layout: each image fits in half screen
+                val halfWidth = contentWidth / 2f
+                return images.filterNotNull().minOfOrNull { img ->
+                    minOf(halfWidth / img.width, contentHeight / img.height)
+                }?.coerceAtLeast(0.01f) ?: 0.01f
+            }
+
+            // Single SINGLE page
             return minOf(contentWidth / width, contentHeight / height).coerceAtLeast(0.01f)
         }
 
-    var dpi = Resources.getSystem().displayMetrics.densityDpi / 100f
-
-    val doubleTapScale get() = max(dpi, minScale * 2)
-
     var maxScale = -1f
         get() = if (field > 0) field else max(doubleTapScale * 2, 2f)
+
+    private val dpi = Resources.getSystem().displayMetrics.densityDpi / 100f
+    val doubleTapScale: Float get() = max(dpi, minScale * 2)
 
     fun maxX(scale: Float): Float {
         val parent = parent ?: return 0f
@@ -222,20 +306,6 @@ open class ImagePage(var image: Image?) {
         return max(0f, (height.toFloat() / parent.height - 1 / scale) / 2)
     }
 
-    fun setPos(x: Float = this.x, y: Float = this.y, scale: Float = this.scale) {
-        if (this.x == x && this.y == y && this.scale == scale) {
-            return
-        }
-
-        this.x = x
-        this.y = y
-        this.scale = scale
-
-        onInvalidate?.invoke()
-    }
-
-    var scope: CoroutineScope? = null
-
     fun home() {
         animateTo(targetScale = homeScale)
     }
@@ -252,7 +322,7 @@ open class ImagePage(var image: Image?) {
         val startX = x
         val startY = y
 
-        @Suppress("NAME_SHADOWING") val targetScale = targetScale.fastCoerceIn(minScale, maxScale)
+        val targetScale = targetScale.fastCoerceIn(minScale, maxScale)
 
         val maxX = maxX(targetScale)
         val minY = minY(targetScale)
@@ -261,23 +331,29 @@ open class ImagePage(var image: Image?) {
         val scaleChanging = targetScale != startScale
         val diffEnd = if (scaleChanging) 1 / targetScale - 1 / startScale else 1f
 
-        val endX: Float
-        val endY: Float
+        val endX = when {
+            origin != null && scaleChanging -> (startX + (origin.x - 0.5f) * diffEnd).fastCoerceIn(
+                -maxX, maxX
+            )
 
-        if (origin != null && scaleChanging) {
-            endX = (startX + (origin.x - 0.5f) * diffEnd).fastCoerceIn(-maxX, maxX)
-            endY = (startY + (origin.y - 0.5f) * diffEnd).fastCoerceIn(minY, maxY)
-        } else if (origin != null) {
-            endX = x.fastCoerceIn(-maxX, maxX)
-            endY = y.fastCoerceIn(minY, maxY)
-        } else {
-            endX = targetX
-            endY = targetY
+            origin != null -> x.fastCoerceIn(-maxX, maxX)
+            else -> targetX
+        }
+        val endY = when {
+            origin != null && scaleChanging -> (startY + (origin.y - 0.5f) * diffEnd).fastCoerceIn(
+                minY, maxY
+            )
+
+            origin != null -> y.fastCoerceIn(minY, maxY)
+            else -> targetY
         }
 
         animationJob = scope?.launch {
             animate(
-                0f, 1f, animationSpec = spring(stiffness = Spring.StiffnessMediumLow)
+                0f, 1f, animationSpec = spring(
+                    stiffness = Spring.StiffnessMediumLow,
+                    visibilityThreshold = 0.001f
+                )
             ) { value, _ ->
                 val currentScale = startScale + (targetScale - startScale) * value
                 val c = if (scaleChanging) {
@@ -294,4 +370,44 @@ open class ImagePage(var image: Image?) {
             }
         }
     }
+
+    @Synchronized
+    fun cleanup() {
+        if (destroyed) return
+        destroyed = true
+
+        animationLoop?.cancel()
+        animationLoop = null
+        animationJob?.cancel()
+        animationJob = null
+
+        // Only clean images if we own them
+        if (!ownsImages) {
+            frames = null
+            currentFrameImage = null
+            return
+        }
+
+        val framesToClean = frames
+        frames = null
+        currentFrameImage = null
+
+        // Frames include all images; otherwise clean individual images
+        val imagesToClean = framesToClean?.map { it.first } ?: images.filterNotNull()
+
+        if (imagesToClean.isNotEmpty()) {
+            CoroutineScope(Dispatchers.Default).launch {
+                try {
+                    WebGpuRenderer.withContext {
+                        imagesToClean.forEach { it.cleanup() }
+                    }
+                } catch (e: Exception) {
+                    Log.e("ImagePage", "Cleanup error", e)
+                }
+            }
+        }
+    }
+
+    /** Alias for cleanup() */
+    fun destroy() = cleanup()
 }

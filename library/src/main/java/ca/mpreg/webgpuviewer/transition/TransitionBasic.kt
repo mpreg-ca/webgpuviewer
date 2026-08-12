@@ -373,6 +373,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 }"""
 
     internal fun render(
+        image: Image, encoder: GPUCommandEncoder, dst: GPUTexture, x: Float, y: Float, scale: Float
+    ) {
+        val res = image.prepareForRender(dst, x, y, scale) ?: return
+        render(image, encoder, dst, res)
+    }
+
+    /**
+     * Render a Page to the destination texture.
+     * Renders each image based on its position (LEFT, RIGHT, or SINGLE).
+     */
+    internal fun render(
         page: ImagePage,
         encoder: GPUCommandEncoder,
         dst: GPUTexture,
@@ -380,23 +391,48 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         y: Float,
         scale: Float
     ) {
-        val image = page.image ?: return
-        val res = image.prepareForRender(dst, page.x + x, page.y + y, page.scale * scale) ?: return
+        page.images.filterNotNull().forEach { image ->
+            val offsetX = when (image.position) {
+                Image.Position.LEFT -> (-0.5f * image.width) / dst.width
+                Image.Position.RIGHT -> (0.5f * image.width) / dst.width
+                Image.Position.SINGLE -> 0f
+            }
+            render(image, encoder, dst, page.x + x + offsetX, page.y + y, page.scale * scale)
+        }
+    }
 
-        // Draw background color behind the image
-        // Fade out background when scale is below minScale or panned past bounds
+    /**
+     * Render a Page with background color handling.
+     */
+    internal fun render(
+        page: ImagePage,
+        encoder: GPUCommandEncoder,
+        dst: GPUTexture,
+        offsetX: Float,
+        offsetY: Float,
+        scale: Float,
+        drawBackground: Boolean
+    ) {
+        if (!drawBackground) {
+            render(page, encoder, dst, offsetX, offsetY, scale)
+            return
+        }
+
+        // Draw background for the combined page area
+        val images = page.images.filterNotNull()
+        if (images.isEmpty()) return
+
+        // Use first image's background color
+        val bgColor = images.firstOrNull()?.backgroundColor ?: return
+
+        // Calculate background fade based on scale and position
         val parent = page.parent
         val minScale = page.minScale
         val currentScale = page.scale * scale
-
         var bgAlpha = 1f
-
-        // Fade over 50 pixels of movement past bounds (in screen coordinates)
         val fadeDistancePixels = 50f
 
-        // Fade based on scale - equivalent to 50 pixels of size reduction
         if (parent != null && currentScale < minScale && minScale > 0f) {
-            // Calculate how many pixels the image has shrunk from minScale size
             val imageSize = (page.width.coerceAtLeast(page.height)).toFloat()
             val sizeAtMinScale = imageSize * minScale
             val currentSize = imageSize * currentScale
@@ -404,7 +440,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             bgAlpha *= (1f - shrinkPixels / fadeDistancePixels).coerceIn(0f, 1f)
         }
 
-        // Fade based on Y pan position
         if (parent != null && parent.height > 0) {
             val minY = page.minY(page.scale)
             val maxY = page.maxY(page.scale)
@@ -420,34 +455,28 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             }
         }
 
-        // Fade color toward black based on bgAlpha, respecting original alpha
-        val origA = (image.backgroundColor ushr 24) and 0xFF
+        val origA = (bgColor ushr 24) and 0xFF
         val a = (origA * bgAlpha).toInt()
 
         if (a > 0) {
-            val srcWidth = res.mipmap.width.toFloat()
-            val finalScale = res.scale
-            val x1 = finalScale * res.x
-            val x2 = finalScale * (res.x + srcWidth / dst.width)
-            val origR = (image.backgroundColor shr 16) and 0xFF
-            val origG = (image.backgroundColor shr 8) and 0xFF
-            val origB = image.backgroundColor and 0xFF
+            val origR = (bgColor shr 16) and 0xFF
+            val origG = (bgColor shr 8) and 0xFF
+            val origB = bgColor and 0xFF
             val r = (origR * bgAlpha).toInt()
             val g = (origG * bgAlpha).toInt()
             val b = (origB * bgAlpha).toInt()
-            val bgColor = (a shl 24) or (r shl 16) or (g shl 8) or b
-            Draw.rect(encoder, dst, x1, 0f, x2, 1f, bgColor)
+            val fadedBgColor = (a shl 24) or (r shl 16) or (g shl 8) or b
+
+            // Calculate x bounds for background
+            val finalScale = page.scale * scale
+            val pageX = page.x + offsetX
+            val halfWidth = page.width.toFloat() / 2f / dst.width
+            val x1 = finalScale * (pageX + 0.5f - halfWidth)
+            val x2 = finalScale * (pageX + 0.5f + halfWidth)
+            Draw.rect(encoder, dst, x1, 0f, x2, 1f, fadedBgColor)
         }
 
-        // Render the image on top
-        render(image, encoder, dst, res)
-    }
-
-    internal fun render(
-        image: Image, encoder: GPUCommandEncoder, dst: GPUTexture, x: Float, y: Float, scale: Float
-    ) {
-        val res = image.prepareForRender(dst, x, y, scale) ?: return
-        render(image, encoder, dst, res)
+        render(page, encoder, dst, offsetX, offsetY, scale)
     }
 
     private fun render(

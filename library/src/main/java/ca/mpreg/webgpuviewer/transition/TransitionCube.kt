@@ -367,8 +367,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             sidePage = page1
         }
 
-        val frontImg = frontPage.image
-        val sideImg = sidePage.image
+        val frontImg = frontPage.images.firstOrNull()
+        val sideImg = sidePage.images.firstOrNull()
 
         val frontMat = buildFaceMatrix(
             rotAngle, screenAspect,
@@ -401,7 +401,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         dst: GPUTexture,
         matrix: FloatArray,
     ) {
-        val image = page.image ?: return
+        // For cube transitions, use first image (TODO: support dual page cube)
+        val image = page.images.firstOrNull() ?: return
         val res = image.prepareForRender(dst, page.x, page.y, page.scale) ?: return
 
         // Project left and right edges through matrix to get screen x coordinates
