@@ -308,13 +308,13 @@ open class ImagePage(val images: List<Image?>) {
     }
 
     fun minY(scale: Float): Float {
-        if (scale == homeScale) return homeY
+        if (abs(scale - homeScale) < 0.0001f) return homeY
         val parent = parent ?: return 0f
         return -max(0f, (height.toFloat() / parent.height - 1 / scale) / 2)
     }
 
     fun maxY(scale: Float): Float {
-        if (scale == homeScale) return homeY
+        if (abs(scale - homeScale) < 0.0001f) return homeY
         val parent = parent ?: return 0f
         return max(0f, (height.toFloat() / parent.height - 1 / scale) / 2)
     }
