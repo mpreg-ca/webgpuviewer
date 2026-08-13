@@ -128,6 +128,8 @@ open class ImagePage(val images: List<Image?>) {
     var animationJob: Job? = null
 
     var homeScaleOverride: Float? = null
+    var homeXOverride: Float? = null
+    var homeYOverride: Float? = null
 
     private var animationLoop: Job? = null
     private var frames: List<Pair<Image, Int>>? = null
@@ -189,7 +191,7 @@ open class ImagePage(val images: List<Image?>) {
 
     val homeScale: Float
         get() {
-            homeScaleOverride?.let { return it }
+            homeScaleOverride?.let { return it.coerceAtLeast(0.01f) }
 
             if (contentWidth <= 0f || contentHeight <= 0f) return 0.01f
 
@@ -209,6 +211,7 @@ open class ImagePage(val images: List<Image?>) {
 
     val homeX: Float
         get() {
+            homeXOverride?.let { return it }
             val parent = parent ?: return 0f
 
             // Half-width layout: no trim offset
@@ -224,6 +227,7 @@ open class ImagePage(val images: List<Image?>) {
 
     val homeY: Float
         get() {
+            homeYOverride?.let { return it }
             val parent = parent ?: return 0f
 
             // Half-width layout: no trim, just cutout
