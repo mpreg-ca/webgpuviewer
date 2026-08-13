@@ -127,6 +127,8 @@ open class ImagePage(val images: List<Image?>) {
 
     var animationJob: Job? = null
 
+    var homeScaleOverride: Float? = null
+
     private var animationLoop: Job? = null
     private var frames: List<Pair<Image, Int>>? = null
     private var currentFrameImage: Image? = null
@@ -187,6 +189,8 @@ open class ImagePage(val images: List<Image?>) {
 
     val homeScale: Float
         get() {
+            homeScaleOverride?.let { return it }
+
             if (contentWidth <= 0f || contentHeight <= 0f) return 0.01f
 
             if (isHalfWidth) {
