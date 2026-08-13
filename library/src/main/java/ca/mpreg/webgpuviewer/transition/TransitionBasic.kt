@@ -391,11 +391,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         y: Float,
         scale: Float
     ) {
-        val images = page.images.filterNotNull()
-        if (images.isEmpty()) return
+        if (page.images.all { it == null }) return
 
         // For each image, prepare render and draw background + image
-        images.forEach { image ->
+        page.images.forEach { image ->
+            image ?: return@forEach
             val offsetX = when (image.position) {
                 Image.Position.LEFT -> (-0.5f * image.width) / dst.width
                 Image.Position.RIGHT -> (0.5f * image.width) / dst.width

@@ -54,6 +54,12 @@ open class ImagePage(val images: List<Image?>) {
     }
 
     companion object {
+        /**
+         * Shared scope for fire-and-forget GPU cleanup work.
+         * Lives for the application lifetime; individual cleanups are tiny and non-cancellable anyway.
+         */
+        private val cleanupScope = CoroutineScope(Dispatchers.Default)
+
         suspend operator fun invoke(
             pixels: ByteBuffer, width: Int, height: Int, createMipMaps: Boolean = true
         ): ImagePage {
@@ -134,9 +140,8 @@ open class ImagePage(val images: List<Image?>) {
         this.frames = frames
         currentFrameImage = frames.firstOrNull()?.first
 
-        // Use the page's scope if available, otherwise create a new one
-        // The loop checks this.frames which becomes null on cleanup, causing it to exit
-        val loopScope = scope ?: CoroutineScope(Dispatchers.Default)
+        // Use the page's scope if available, otherwise use the shared background scope
+        val loopScope = scope ?: cleanupScope
         animationLoop = loopScope.launch {
             var frameIndex = 0
             while (true) {
@@ -221,6 +226,7 @@ open class ImagePage(val images: List<Image?>) {
             if (isHalfWidth) {
                 if (parent.cutoutTopPx > 0f && parent.height > 0) {
                     val imageOnScreen = height * homeScale
+                    // homeScale fits to contentHeight; image is centered in full parent.height
                     val imageTopY = (parent.height - imageOnScreen) / 2f
                     val cutoutOffset = when {
                         parent.alwaysAvoidCutout -> parent.cutoutTopPx / 2f
@@ -228,14 +234,15 @@ open class ImagePage(val images: List<Image?>) {
                         else -> 0f
                     }
                     if (cutoutOffset > 0f) {
-                        return cutoutOffset / parent.height / homeScale
+                        return cutoutOffset / (homeScale * parent.height)
                     }
                 }
                 return 0f
             }
 
             // Single SINGLE page: use trim
-            val trimTop = images.mapNotNull { it?.trim?.top ?: it?.let { 0 } }.minOrNull() ?: 0
+            val trimTop =
+                images.mapNotNull { img -> img?.let { it.trim?.top ?: 0 } }.minOrNull() ?: 0
             val trimBottom =
                 images.mapNotNull { it?.trim?.bottom ?: it?.height }.maxOrNull() ?: height
 
@@ -244,15 +251,18 @@ open class ImagePage(val images: List<Image?>) {
             } else 0f
 
             if (parent.cutoutTopPx > 0f && parent.height > 0) {
-                val trimOnScreen = trimHeight * homeScale
-                val trimTopY = (parent.height - trimOnScreen) / 2f
+                val imageOnScreen = height * homeScale
+                // Image top in screen pixels when centered in full parent.height at y=0
+                val imageTopY = (parent.height - imageOnScreen) / 2f
+                // Trim top = image top + trimTop scaled to screen pixels
+                val trimTopY = imageTopY + trimTop * homeScale
                 val cutoutOffset = when {
                     parent.alwaysAvoidCutout -> parent.cutoutTopPx / 2f
                     trimTopY < parent.cutoutTopPx -> parent.cutoutTopPx - trimTopY
                     else -> 0f
                 }
                 if (cutoutOffset > 0f) {
-                    return trimBaseY + cutoutOffset / parent.height / homeScale
+                    return cutoutOffset / (homeScale * parent.height)
                 }
             }
 
@@ -395,7 +405,7 @@ open class ImagePage(val images: List<Image?>) {
         val imagesToClean = framesToClean?.map { it.first } ?: images.filterNotNull()
 
         if (imagesToClean.isNotEmpty()) {
-            CoroutineScope(Dispatchers.Default).launch {
+            cleanupScope.launch {
                 try {
                     WebGpuRenderer.withContext {
                         imagesToClean.forEach { it.cleanup() }

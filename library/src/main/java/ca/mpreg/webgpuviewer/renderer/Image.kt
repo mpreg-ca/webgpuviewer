@@ -103,7 +103,7 @@ class Image private constructor(
 
                     if (createMipMaps && mipmapDataList.isNotEmpty()) {
                         var scale = mipmapDataList.last().scale
-                        while (width * scale > maxWidth && height * scale > maxHeight) {
+                        while (width * scale > maxWidth || height * scale > maxHeight) {
                             scale /= 2
                             val newWidth = floor(width * scale).toInt()
                             val newHeight = floor(height * scale).toInt()
@@ -182,19 +182,12 @@ class Image private constructor(
         }
     }
 
-    private var _buffer: GPUBuffer? = null
+    private var _buffer: GPUBuffer? = WebGpuRenderer.device.createBuffer(
+        GPUBufferDescriptor(size = BUFFER_SIZE, usage = BufferUsage.CopyDst or BufferUsage.Uniform)
+    )
 
     val buffer: GPUBuffer
-        get() {
-            if (_buffer == null) {
-                _buffer = WebGpuRenderer.device.createBuffer(
-                    GPUBufferDescriptor(
-                        size = BUFFER_SIZE, usage = BufferUsage.CopyDst or BufferUsage.Uniform
-                    )
-                )
-            }
-            return _buffer!!
-        }
+        get() = _buffer ?: error("Image buffer accessed after cleanup")
 
     val mipmaps: MutableList<Mipmap> = mutableListOf()
 

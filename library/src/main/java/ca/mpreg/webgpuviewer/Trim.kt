@@ -231,6 +231,13 @@ class Trim {
             )
         }
 
+        private val edgeUniformByteBuffer = ThreadLocal.withInitial {
+            ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder())
+        }
+        private val edgeInitByteBuffer = ThreadLocal.withInitial {
+            ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder())
+        }
+
         private fun dispatchEdgeDetect(
             texture: GPUTexture,
             edge: Edge,
@@ -261,17 +268,19 @@ class Trim {
                 )
             )
 
-            val byteBuffer = ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder())
-            byteBuffer.putFloat(0, threshold)
-            byteBuffer.putInt(4, texture.width)
-            byteBuffer.putInt(8, texture.height)
-            byteBuffer.putInt(12, 0)
-
+            val byteBuffer = edgeUniformByteBuffer.get()
+            byteBuffer.clear()
+            byteBuffer.putFloat(threshold)
+            byteBuffer.putInt(texture.width)
+            byteBuffer.putInt(texture.height)
+            byteBuffer.putInt(0)
+            byteBuffer.flip()
             device.queue.writeBuffer(uniformBuffer, 0, byteBuffer)
 
             // Initialize result buffer to zeros
-            val initBuffer = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder())
-            for (i in 0 until 8) initBuffer.putInt(0)
+            val initBuffer = edgeInitByteBuffer.get()
+            initBuffer.clear()
+            repeat(8) { initBuffer.putInt(0) }
             initBuffer.flip()
             device.queue.writeBuffer(resultBuffer, 0L, initBuffer)
 
@@ -657,8 +666,15 @@ fn edge_bottom(@builtin(global_invocation_id) id: vec3<u32>) {
             }
         }
 
+        private val trimUniformByteBuffer = ThreadLocal.withInitial {
+            ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder())
+        }
+        private val trimInitByteBuffer = ThreadLocal.withInitial {
+            ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder())
+        }
+
         /**
-         * Dispatch a trim compute operation. Creates fresh buffers for each call
+         * Dispatch a trim compute operation. Creates fresh GPU buffers for each call
          * to avoid concurrency issues with buffer reuse during async operations.
          */
         private fun dispatchTrimCompute(
@@ -683,21 +699,22 @@ fn edge_bottom(@builtin(global_invocation_id) id: vec3<u32>) {
                 )
             )
 
-            val byteBuffer = ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder())
-            byteBuffer.putFloat(0, r)
-            byteBuffer.putFloat(4, g)
-            byteBuffer.putFloat(8, b)
-            byteBuffer.putFloat(12, threshold)
-
+            val byteBuffer = trimUniformByteBuffer.get()
+            byteBuffer.clear()
+            byteBuffer.putFloat(r)
+            byteBuffer.putFloat(g)
+            byteBuffer.putFloat(b)
+            byteBuffer.putFloat(threshold)
+            byteBuffer.flip()
             device.queue.writeBuffer(uniformBuffer, 0, byteBuffer)
 
-            val initBuffer = ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder())
+            val initBuffer = trimInitByteBuffer.get()
+            initBuffer.clear()
             initBuffer.putInt(texture.width)
             initBuffer.putInt(texture.height)
             initBuffer.putInt(0)
             initBuffer.putInt(0)
             initBuffer.flip()
-
             device.queue.writeBuffer(resultBuffer, 0L, initBuffer)
 
             val encoder = device.createCommandEncoder()

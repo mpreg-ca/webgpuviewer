@@ -101,7 +101,7 @@ fun Draw.line(
     byteBuffer.putFloat(28, a)
     byteBuffer.putFloat(32, thickness)
 
-    val uniformBuffer = createBuffer(48, BufferUsage.Uniform or BufferUsage.CopyDst)
+    val uniformBuffer = createBuffer(48L, BufferUsage.Uniform or BufferUsage.CopyDst)
     device.queue.writeBuffer(uniformBuffer, 0, byteBuffer)
 
     val dispatchW = ceil(texture.width / 8f).toInt()

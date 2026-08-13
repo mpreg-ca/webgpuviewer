@@ -12,7 +12,6 @@ import androidx.compose.foundation.gestures.calculateCentroid
 import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
@@ -52,15 +51,15 @@ fun ImageViewer(
 
     val view = LocalView.current
     val density = LocalDensity.current
-    val cutoutTop = WindowInsets.displayCutout.asPaddingValues().calculateTopPadding()
-    var cutoutPx = with(density) { cutoutTop.toPx() }
-    cutoutPx = if (cutoutPx == 0f) {
-        val context = LocalContext.current
-        val resourceId = context.resources.getIdentifier("status_bar_height", "dimen", "android")
-        context.resources.getDimensionPixelSize(resourceId).toFloat()
-    } else {
-        cutoutPx
-
+    // Get cutout top directly in px
+    val cutoutPx = WindowInsets.displayCutout.getTop(density).let { px ->
+        if (px == 0) {
+            val context = LocalContext.current
+            val resourceId = context.resources.getIdentifier("status_bar_height", "dimen", "android")
+            context.resources.getDimensionPixelSize(resourceId).toFloat()
+        } else {
+            px.toFloat()
+        }
     }
 
     LaunchedEffect(state.avoidCutout, cutoutPx) {

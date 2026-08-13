@@ -211,19 +211,18 @@ class Mipmap(
             }
         }
 
-        val quadTiles = mutableListOf<GPUTexture>()
-        val quadViews = mutableListOf<GPUTextureView>()
+        // Build a 2x2 quad from the tile grid at (tX, tY) without mutableList overhead
+        val r0 = (tY).coerceAtMost(tilesRows - 1) * tilesCols
+        val r1 = (tY + 1).coerceAtMost(tilesRows - 1) * tilesCols
+        val c0 = (tX).coerceAtMost(tilesCols - 1)
+        val c1 = (tX + 1).coerceAtMost(tilesCols - 1)
 
-        for (row in 0 until 2) {
-            val rowIdx = (tY + row).coerceAtMost(tilesRows - 1) * tilesCols
-            for (col in 0 until 2) {
-                val i = rowIdx + (tX + col).coerceAtMost(tilesCols - 1)
-                quadTiles.add(textures[i])
-                quadViews.add(textureViews[i])
-            }
-        }
+        val t00 = textures[r0 + c0]; val v00 = textureViews[r0 + c0]
+        val t01 = textures[r0 + c1]; val v01 = textureViews[r0 + c1]
+        val t10 = textures[r1 + c0]; val v10 = textureViews[r1 + c0]
+        val t11 = textures[r1 + c1]; val v11 = textureViews[r1 + c1]
 
-        val quad = Quad(quadTiles, quadViews, tX * quadTiles[0].width, tY * quadTiles[0].height)
+        val quad = Quad(listOf(t00, t01, t10, t11), listOf(v00, v01, v10, v11), tX * t00.width, tY * t00.height)
         lastQuadTX = tX
         lastQuadTY = tY
         lastQuad = quad

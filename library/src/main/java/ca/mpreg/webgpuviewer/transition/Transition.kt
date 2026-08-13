@@ -260,7 +260,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             val pageY = page.y
             val pageScale = page.scale
 
-            synchronized(cacheLock) {
+            // Check cache validity and ensure textures exist (lock only for metadata).
+            // GPU command recording does not need the lock - it always runs on the single
+            // GPU render thread, and cacheLock only guards against invalidateCache() from UI thread.
+            val (texture, view, needsRender) = synchronized(cacheLock) {
                 ensureTexturesLocked(dstWidth, dstHeight)
 
                 val texture = if (isPage1) texture1!! else texture2!!
@@ -270,30 +273,32 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 val cachedY = if (isPage1) cachedY1 else cachedY2
                 val cachedScale = if (isPage1) cachedScale1 else cachedScale2
 
-                // Return cached if valid
-                if (cachedPage === page &&
+                val cacheHit = cachedPage === page &&
                     cachedX == pageX && cachedY == pageY && cachedScale == pageScale
-                ) {
-                    return view
-                }
 
-                // Clear and render
-                encoder.beginRenderPass(
-                    GPURenderPassDescriptor(
-                        colorAttachments = arrayOf(
-                            GPURenderPassColorAttachment(
-                                view = view,
-                                loadOp = LoadOp.Clear,
-                                storeOp = StoreOp.Store,
-                                clearValue = GPUColor(0.0, 0.0, 0.0, 0.0)
-                            )
+                Triple(texture, view, !cacheHit)
+            }
+
+            if (!needsRender) return view
+
+            // Record GPU commands outside the lock - GPU thread is single-threaded
+            encoder.beginRenderPass(
+                GPURenderPassDescriptor(
+                    colorAttachments = arrayOf(
+                        GPURenderPassColorAttachment(
+                            view = view,
+                            loadOp = LoadOp.Clear,
+                            storeOp = StoreOp.Store,
+                            clearValue = GPUColor(0.0, 0.0, 0.0, 0.0)
                         )
                     )
-                ).end()
+                )
+            ).end()
 
-                renderPage(encoder, texture)
+            renderPage(encoder, texture)
 
-                // Update cache metadata
+            // Update cache metadata
+            synchronized(cacheLock) {
                 if (isPage1) {
                     cachedPage1 = page
                     cachedX1 = pageX
@@ -305,9 +310,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                     cachedY2 = pageY
                     cachedScale2 = pageScale
                 }
-
-                return view
             }
+
+            return view
         }
 
         /**

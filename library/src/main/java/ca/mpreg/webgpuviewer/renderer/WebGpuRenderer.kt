@@ -173,10 +173,11 @@ class WebGpuRenderer {
     }
 
     suspend fun render(fn: suspend (GPUCommandEncoder, GPUTexture) -> Unit) {
-        val surface = surface ?: return
         val startTime = if (profilingEnabled) System.nanoTime() else 0L
 
         mutex.withLock {
+            val surface = surface ?: return
+
             val texture = try {
                 surface.getCurrentTexture().texture
             } catch (e: Exception) {

@@ -130,11 +130,14 @@ open class ImageViewerState(var isVertical: Boolean = false) {
     /** Override for the "from" page during far navigation animation */
     var transitionFromPage: ImagePage? = null
 
+    // Pre-allocated invalidate lambda - same for the lifetime of this state
+    private val invalidateCallback: () -> Unit = { invalidate() }
+
     fun getPage(index: Int): ImagePage? {
         return fetchPage?.invoke(index)?.also { page ->
-            page.parent = this
-            page.scope = this.scope
-            page.onInvalidate = { invalidate() }
+            if (page.parent !== this) page.parent = this
+            if (page.scope !== this.scope) page.scope = this.scope
+            if (page.onInvalidate !== invalidateCallback) page.onInvalidate = invalidateCallback
         }
     }
 
@@ -194,7 +197,7 @@ open class ImageViewerState(var isVertical: Boolean = false) {
         val offset: Float,
         val transition: Transition,
         val firstPos: Offset,
-        val currentPos: Offset
+        val currentPos: Offset,
     )
 
     protected open suspend fun renderSnapshot(

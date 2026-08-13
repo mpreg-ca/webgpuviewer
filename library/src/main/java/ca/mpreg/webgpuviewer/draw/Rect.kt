@@ -142,7 +142,7 @@ fun Draw.rect(
     byteBuffer.flip()
 
     val uniformBuffer = device.createBuffer(
-        GPUBufferDescriptor(size = 32, usage = BufferUsage.Uniform or BufferUsage.CopyDst)
+        GPUBufferDescriptor(size = 32L, usage = BufferUsage.Uniform or BufferUsage.CopyDst)
     )
     device.queue.writeBuffer(uniformBuffer, 0, byteBuffer)
 
