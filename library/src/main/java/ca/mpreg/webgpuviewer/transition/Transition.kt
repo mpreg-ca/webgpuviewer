@@ -274,7 +274,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 val cachedScale = if (isPage1) cachedScale1 else cachedScale2
 
                 val cacheHit = cachedPage === page &&
-                    cachedX == pageX && cachedY == pageY && cachedScale == pageScale
+                        cachedX == pageX && cachedY == pageY && cachedScale == pageScale
 
                 Triple(texture, view, !cacheHit)
             }

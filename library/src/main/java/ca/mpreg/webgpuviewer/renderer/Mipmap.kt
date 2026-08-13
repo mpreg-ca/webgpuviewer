@@ -217,12 +217,21 @@ class Mipmap(
         val c0 = (tX).coerceAtMost(tilesCols - 1)
         val c1 = (tX + 1).coerceAtMost(tilesCols - 1)
 
-        val t00 = textures[r0 + c0]; val v00 = textureViews[r0 + c0]
-        val t01 = textures[r0 + c1]; val v01 = textureViews[r0 + c1]
-        val t10 = textures[r1 + c0]; val v10 = textureViews[r1 + c0]
-        val t11 = textures[r1 + c1]; val v11 = textureViews[r1 + c1]
+        val t00 = textures[r0 + c0]
+        val v00 = textureViews[r0 + c0]
+        val t01 = textures[r0 + c1]
+        val v01 = textureViews[r0 + c1]
+        val t10 = textures[r1 + c0]
+        val v10 = textureViews[r1 + c0]
+        val t11 = textures[r1 + c1]
+        val v11 = textureViews[r1 + c1]
 
-        val quad = Quad(listOf(t00, t01, t10, t11), listOf(v00, v01, v10, v11), tX * t00.width, tY * t00.height)
+        val quad = Quad(
+            listOf(t00, t01, t10, t11),
+            listOf(v00, v01, v10, v11),
+            tX * t00.width,
+            tY * t00.height
+        )
         lastQuadTX = tX
         lastQuadTY = tY
         lastQuad = quad

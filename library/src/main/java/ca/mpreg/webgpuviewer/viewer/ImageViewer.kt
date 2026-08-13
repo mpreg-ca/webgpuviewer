@@ -55,7 +55,8 @@ fun ImageViewer(
     val cutoutPx = WindowInsets.displayCutout.getTop(density).let { px ->
         if (px == 0) {
             val context = LocalContext.current
-            val resourceId = context.resources.getIdentifier("status_bar_height", "dimen", "android")
+            val resourceId =
+                context.resources.getIdentifier("status_bar_height", "dimen", "android")
             context.resources.getDimensionPixelSize(resourceId).toFloat()
         } else {
             px.toFloat()

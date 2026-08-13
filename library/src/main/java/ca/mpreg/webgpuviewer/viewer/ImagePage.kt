@@ -266,7 +266,10 @@ open class ImagePage(val images: List<Image?>) {
                 }
             }
 
-            val halfRange = max(0f, (height.toFloat() / parent.height - 1 / homeScale) / 2)
+            // Clamp trimBaseY so the image edge doesn't go past the screen edge.
+            // When image is smaller than screen, the blank margin on each side limits the shift.
+            // When image is larger than screen, any trim centering is valid (full scroll range available).
+            val halfRange = max(0f, (1 / homeScale - height.toFloat() / parent.height) / 2)
             return trimBaseY.fastCoerceIn(-halfRange, halfRange)
         }
 
