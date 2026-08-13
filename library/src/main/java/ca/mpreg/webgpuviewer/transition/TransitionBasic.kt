@@ -134,10 +134,8 @@ fn catmull_rom_fast_unrolled(
 }
 
 fn load_safe_linear(pos: vec2<i32>, max_coord: vec2<i32>) -> vec4<f32> {
-    if (pos.x >= 0 && pos.x <= max_coord.x && pos.y >= 0 && pos.y <= max_coord.y) {
-        return to_linear_exact(totalLoad(pos));
-    }
-    return vec4<f32>(0.0);
+    let clamped = clamp(pos, vec2<i32>(0), max_coord);
+    return to_linear_exact(totalLoad(clamped));
 }
 
 fn catmull_rom_slow_unrolled(
