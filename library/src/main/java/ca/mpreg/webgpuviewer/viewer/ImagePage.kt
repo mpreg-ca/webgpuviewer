@@ -126,6 +126,9 @@ open class ImagePage(val images: List<Image?>) {
         get() = images.maxOfOrNull { it?.trim?.height() ?: it?.height ?: 0 } ?: 0
 
     var animationJob: Job? = null
+    var animationTargetX: Float? = null
+    var animationTargetY: Float? = null
+    var animationTargetScale: Float? = null
 
     var homeScaleOverride: Float? = null
     var homeXOverride: Float? = null
@@ -370,23 +373,32 @@ open class ImagePage(val images: List<Image?>) {
         }
 
         animationJob = scope?.launch {
-            animate(
-                0f, 1f, animationSpec = spring(
-                    stiffness = Spring.StiffnessMediumLow, visibilityThreshold = 0.001f
-                )
-            ) { value, _ ->
-                val currentScale = startScale + (targetScale - startScale) * value
-                val c = if (scaleChanging) {
-                    ((1 / currentScale - 1 / startScale) / diffEnd).fastCoerceIn(0f, 1f)
-                } else {
-                    value
-                }
+            animationTargetX = endX
+            animationTargetY = endY
+            animationTargetScale = targetScale
+            try {
+                animate(
+                    0f, 1f, animationSpec = spring(
+                        stiffness = Spring.StiffnessMediumLow, visibilityThreshold = 0.001f
+                    )
+                ) { value, _ ->
+                    val currentScale = startScale + (targetScale - startScale) * value
+                    val c = if (scaleChanging) {
+                        ((1 / currentScale - 1 / startScale) / diffEnd).fastCoerceIn(0f, 1f)
+                    } else {
+                        value
+                    }
 
-                setPos(
-                    (startX + (endX - startX) * c).orZero(),
-                    (startY + (endY - startY) * c).orZero(),
-                    currentScale
-                )
+                    setPos(
+                        (startX + (endX - startX) * c).orZero(),
+                        (startY + (endY - startY) * c).orZero(),
+                        currentScale
+                    )
+                }
+            } finally {
+                animationTargetX = null
+                animationTargetY = null
+                animationTargetScale = null
             }
         }
     }
