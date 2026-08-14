@@ -391,8 +391,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     ) {
         if (page.images.all { it == null }) return
 
+        // Use the current animation frame for single-image pages; fall back to the full
+        // images list for dual-page spreads (which are never animated).
+        val renderImages = if (page.images.size == 1) listOf(page.image) else page.images
+
         // For each image, prepare render and draw background + image
-        page.images.forEach { image ->
+        renderImages.forEach { image ->
             image ?: return@forEach
             val offsetX = when (image.position) {
                 Image.Position.LEFT -> (-0.5f * image.width) / dst.width

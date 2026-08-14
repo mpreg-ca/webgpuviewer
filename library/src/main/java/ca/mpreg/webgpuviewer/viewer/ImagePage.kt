@@ -138,6 +138,11 @@ open class ImagePage(val images: List<Image?>) {
     private var frames: List<Pair<Image, Int>>? = null
     private var currentFrameImage: Image? = null
 
+    /** Incremented each time the animation frame changes. Used by the render cache to detect stale frames. */
+    @Volatile
+    var frameVersion: Int = 0
+        private set
+
     /** Current image for rendering (may change during animation) */
     val image: Image?
         get() = currentFrameImage ?: images.firstOrNull()
@@ -154,6 +159,7 @@ open class ImagePage(val images: List<Image?>) {
             while (true) {
                 this@ImagePage.frames?.getOrNull(frameIndex)?.let { (img, duration) ->
                     currentFrameImage = img
+                    frameVersion++
                     invalidate()
                     delay(duration.coerceAtLeast(0).milliseconds)
                 } ?: break

@@ -181,9 +181,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         private var cachedX1 = 0f
         private var cachedY1 = 0f
         private var cachedScale1 = 0f
+        private var cachedFrameVersion1 = -1
         private var cachedX2 = 0f
         private var cachedY2 = 0f
         private var cachedScale2 = 0f
+        private var cachedFrameVersion2 = -1
 
         private var cacheWidth = 0
         private var cacheHeight = 0
@@ -259,6 +261,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             val pageX = page.x
             val pageY = page.y
             val pageScale = page.scale
+            val pageFrameVersion = page.frameVersion
 
             // Check cache validity and ensure textures exist (lock only for metadata).
             // GPU command recording does not need the lock - it always runs on the single
@@ -272,9 +275,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 val cachedX = if (isPage1) cachedX1 else cachedX2
                 val cachedY = if (isPage1) cachedY1 else cachedY2
                 val cachedScale = if (isPage1) cachedScale1 else cachedScale2
+                val cachedFrame = if (isPage1) cachedFrameVersion1 else cachedFrameVersion2
 
-                val cacheHit = cachedPage === page &&
-                        cachedX == pageX && cachedY == pageY && cachedScale == pageScale
+                val cacheHit =
+                    cachedPage === page && cachedX == pageX && cachedY == pageY && cachedScale == pageScale && cachedFrame == pageFrameVersion
 
                 Triple(texture, view, !cacheHit)
             }
@@ -304,11 +308,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                     cachedX1 = pageX
                     cachedY1 = pageY
                     cachedScale1 = pageScale
+                    cachedFrameVersion1 = pageFrameVersion
                 } else {
                     cachedPage2 = page
                     cachedX2 = pageX
                     cachedY2 = pageY
                     cachedScale2 = pageScale
+                    cachedFrameVersion2 = pageFrameVersion
                 }
             }
 
@@ -357,8 +363,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             pass.setBindGroup(
                 0, WebGpuRenderer.device.createBindGroup(
                     GPUBindGroupDescriptor(
-                        layout = blitPipeline.getBindGroupLayout(0),
-                        entries = arrayOf(
+                        layout = blitPipeline.getBindGroupLayout(0), entries = arrayOf(
                             GPUBindGroupEntry(0, buffer = uniformBuffer),
                             GPUBindGroupEntry(1, textureView = cachedView),
                             GPUBindGroupEntry(2, sampler = blitSampler)
