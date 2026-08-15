@@ -137,7 +137,10 @@ fun ImageViewer(
                                 pageTurnJob?.join()
                                 val zoomPage = state.getPage(0) ?: return@launch
                                 if (zoomPage.atHome) {
-                                    zoomPage.animateTo(Offset(tapX, tapY), targetScale = zoomPage.doubleTapScale)
+                                    zoomPage.animateTo(
+                                        Offset(tapX, tapY),
+                                        targetScale = zoomPage.doubleTapScale
+                                    )
                                 } else {
                                     zoomPage.home()
                                 }
