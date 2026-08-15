@@ -77,7 +77,7 @@ fun ImageViewer(
                 awaitEachGesture {
                     val firstDown = awaitFirstDown(pass = PointerEventPass.Initial)
                     val wasScrolling = state.pageOffset != 0f
-                    state.animationJob?.cancel()
+                    val pageTurnJob = state.animationJob
                     val page = state.getPage(0) ?: return@awaitEachGesture
                     page.animationJob?.cancel()
 
@@ -105,6 +105,7 @@ fun ImageViewer(
                         longPressJob?.cancel()
                         val secondDown = waitForDown(doubleTapTimeout)
                         if (secondDown == null) {
+                            pageTurnJob?.cancel()
                             if (state.pageOffset != 0f) {
                                 state.animationJob = scope.launch {
                                     Animatable(state.pageOffset).animateTo(
@@ -129,15 +130,17 @@ fun ImageViewer(
                         }
 
                         if (waitForCleanUp(secondDown.id, doubleTapTimeout, touchSlop) != null) {
-                            // double tap
-                            if (page.atHome) {
-                                val origin = Offset(
-                                    secondDown.position.x / state.width,
-                                    secondDown.position.y / state.height
-                                )
-                                page.animateTo(origin, targetScale = page.doubleTapScale)
-                            } else {
-                                page.home()
+                            // double tap — let any in-progress page turn finish committing first
+                            val tapX = secondDown.position.x / state.width
+                            val tapY = secondDown.position.y / state.height
+                            scope.launch {
+                                pageTurnJob?.join()
+                                val zoomPage = state.getPage(0) ?: return@launch
+                                if (zoomPage.atHome) {
+                                    zoomPage.animateTo(Offset(tapX, tapY), targetScale = zoomPage.doubleTapScale)
+                                } else {
+                                    zoomPage.home()
+                                }
                             }
                         } else {
                             // double tap drag
@@ -225,6 +228,7 @@ fun ImageViewer(
                         }
                     } else {
                         if (!wasScrolling) page.animateTo(Offset(0.5f, 0.5f))
+                        pageTurnJob?.cancel()
 
                         var lastMoveTime = firstDown.uptimeMillis
                         var lastEventTime: Long = firstDown.uptimeMillis
