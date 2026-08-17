@@ -2,7 +2,6 @@ package ca.mpreg.webgpuviewer.renderer
 
 import androidx.webgpu.BlendFactor
 import androidx.webgpu.BlendOperation
-import androidx.webgpu.FilterMode
 import androidx.webgpu.GPUBindGroupDescriptor
 import androidx.webgpu.GPUBindGroupEntry
 import androidx.webgpu.GPUBlendComponent
@@ -13,7 +12,6 @@ import androidx.webgpu.GPUPrimitiveState
 import androidx.webgpu.GPURenderPassEncoder
 import androidx.webgpu.GPURenderPipeline
 import androidx.webgpu.GPURenderPipelineDescriptor
-import androidx.webgpu.GPUSamplerDescriptor
 import androidx.webgpu.GPUShaderModuleDescriptor
 import androidx.webgpu.GPUShaderSourceWGSL
 import androidx.webgpu.GPUTexture
@@ -37,14 +35,17 @@ import java.nio.ByteOrder
  * pages and a fraction and owns several passes, while this takes one page and a placement and
  * draws it wherever the caller says.
  *
- * It carries two shaders, picked per call:
+ * It carries two shaders, picked per call, both resolving in linear light so a tile from
+ * [TileRenderer] popping in over [renderFast]'s output never shows a brightness seam:
  *
- *  - [render] resolves with a box filter when minifying and Catmull-Rom when magnifying, both in
- *    linear light. Sharp, and expensive - the box filter alone reads scale_factor^2 texels per
- *    output pixel, each through a pow()-based sRGB round trip.
- *  - [renderFast] resolves with the hardware sampler: one fetch, fixed-function, filtered on the
- *    stored sRGB values. Multi-tile quads also clamp per tile, so a tile boundary blends against
- *    a duplicated edge texel rather than its neighbour.
+ *  - [render] resolves with a box filter when minifying and Catmull-Rom when magnifying. Sharp,
+ *    and expensive - the box filter alone reads scale_factor^2 texels per output pixel, each
+ *    through a pow()-based sRGB round trip.
+ *  - [renderFast] resolves with one manual bilinear tap per pixel: decode four texels, lerp,
+ *    encode back. Cheaper than [render] - one lerp instead of a whole filter kernel - but no
+ *    longer the single hardware fetch a plain sampler would give, since decoding requires reading
+ *    the texels by hand. [totalLoad] addresses the whole 2x2 tile quad as one surface, so this is
+ *    the same four taps whether or not the footprint straddles a tile boundary.
  *
  * Everything except the sampling differs by nothing, so the two share their header and vertex
  * stage and diverge only in the fragment stage.
@@ -57,27 +58,13 @@ object RenderPage {
         ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder())
     }
 
-    private val linearSampler by lazy {
-        device.createSampler(
-            GPUSamplerDescriptor(
-                magFilter = FilterMode.Linear,
-                minFilter = FilterMode.Linear,
-            )
-        )
-    }
-
-    /**
-     * One of the two shaders, with the pipeline built from it on first use.
-     *
-     * [bindsSampler] tracks whether the source declares binding 5, since the layout is derived
-     * from the shader and the bind group has to match it exactly.
-     */
-    private class Variant(val bindsSampler: Boolean, build: () -> GPURenderPipeline) {
+    /** One of the two shaders, with the pipeline built from it on first use. */
+    private class Variant(build: () -> GPURenderPipeline) {
         val pipeline: GPURenderPipeline by lazy(build)
     }
 
-    private val samplerVariant = Variant(true) { buildPipeline(HEADER + VS_MAIN + SAMPLER_FS) }
-    private val filteredVariant = Variant(false) { buildPipeline(HEADER + VS_MAIN + FILTERED_FS) }
+    private val samplerVariant = Variant { buildPipeline(HEADER + VS_MAIN + SAMPLER_FS) }
+    private val filteredVariant = Variant { buildPipeline(HEADER + VS_MAIN + FILTERED_FS) }
 
     private fun buildPipeline(code: String): GPURenderPipeline {
         val shaderModule = device.createShaderModule(
@@ -149,6 +136,24 @@ fn totalDimensions() -> vec2<u32> {
     return vec2<u32>(width, height);
 }
 
+// Shared by both fragment variants: the fast path also filters in linear light now, so both need
+// the same sRGB<->linear conversion.
+fn to_linear_exact(srgb: vec4<f32>) -> vec4<f32> {
+    let c = max(srgb.rgb, vec3<f32>(0.0));
+    let lower = c / vec3<f32>(12.92);
+    let higher = pow((c + vec3<f32>(0.055)) / vec3<f32>(1.055), vec3<f32>(2.4));
+    let cond = c <= vec3<f32>(0.04045);
+    return vec4(select(higher, lower, cond), srgb.a);
+}
+
+fn to_srgb_exact(linear_rgb: vec4<f32>) -> vec4<f32> {
+    let c = max(linear_rgb.rgb, vec3<f32>(0.0));
+    let lower = c * vec3<f32>(12.92);
+    let higher = vec3<f32>(1.055) * pow(c, vec3<f32>(1.0 / 2.4)) - vec3<f32>(0.055);
+    let cond = c <= vec3<f32>(0.0031308);
+    return vec4(select(higher, lower, cond), linear_rgb.a);
+}
+
 fn tileLoad(i: i32, pos: vec2<i32>) -> vec4<f32> {
     if (i == 0) { return textureLoad(src_tex0, pos, 0); }
     if (i == 1) { return textureLoad(src_tex1, pos, 0); }
@@ -203,10 +208,19 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 }
 """
 
-    /** Fragment stage for [renderFast]: one bilinear resolve per pixel. */
+    /**
+     * Fragment stage for [renderFast]: one bilinear resolve per pixel, in linear light.
+     *
+     * The hardware sampler filters the stored sRGB values directly, which is wrong wherever two
+     * texels of different brightness mix - the result reads darker than blending after decoding
+     * would. Doing the decode/lerp/encode by hand instead means every tap goes through
+     * [totalLoad] rather than the sampler, so there is no fast single-fetch path left to take:
+     * unlike [renderFast]'s old sampler-only shortcut, every pixel here pays four loads and the
+     * conversions. What stays cheap is that this always was cross-tile-safe - [totalLoad]
+     * addresses the whole quad, so a footprint spanning two tiles is no different from one that
+     * doesn't.
+     */
     private const val SAMPLER_FS = """
-@group(0) @binding(5) var src_sampler: sampler;
-
 fn sampleQuad(uv: vec2<f32>) -> vec4<f32> {
     let size = vec2<f32>(totalDimensions());
     let pos = uv * size;
@@ -216,44 +230,15 @@ fn sampleQuad(uv: vec2<f32>) -> vec4<f32> {
     let max_coord = vec2<i32>(size) - 1;
     let i0 = clamp(vec2<i32>(base), vec2<i32>(0), max_coord);
     let i1 = clamp(vec2<i32>(base) + 1, vec2<i32>(0), max_coord);
-
-    let ts = i32(transform.tile_size);
-    let tile_x = select(0, 1, i0.x >= ts);
-    let tile_y = select(0, 1, i0.y >= ts);
-
-    // A bilinear footprint only needs stitching where its two corners land in different tiles -
-    // a one-texel line along each tile edge. With a single tile i1 can never reach ts, so this is
-    // false for the whole image and every pixel takes the one-fetch path below.
-    let spans_tiles = (tile_x != select(0, 1, i1.x >= ts))
-                   || (tile_y != select(0, 1, i1.y >= ts));
-
-    if (!spans_tiles) {
-        // Wholly inside one tile, so hand it to the sampler: one fetch instead of four loads and
-        // three lerps. textureSampleLevel because this branch is per-pixel, and an explicit LOD
-        // is allowed in non-uniform control flow where implicit derivatives are not.
-        let local = pos - vec2<f32>(f32(tile_x), f32(tile_y)) * f32(ts);
-        let idx = tile_y * 2 + tile_x;
-        if (idx == 0) {
-            return textureSampleLevel(src_tex0, src_sampler, local / vec2<f32>(textureDimensions(src_tex0)), 0.0);
-        } else if (idx == 1) {
-            return textureSampleLevel(src_tex1, src_sampler, local / vec2<f32>(textureDimensions(src_tex1)), 0.0);
-        } else if (idx == 2) {
-            return textureSampleLevel(src_tex2, src_sampler, local / vec2<f32>(textureDimensions(src_tex2)), 0.0);
-        }
-        return textureSampleLevel(src_tex3, src_sampler, local / vec2<f32>(textureDimensions(src_tex3)), 0.0);
-    }
-
-    // On a tile edge. A sampler is pointed at one texture, so it would clamp to that tile's edge
-    // and blend a texel with itself - the seam along the join. totalLoad addresses the quad as a
-    // whole, so these four taps straddle the boundary. Same bilinear either way, so the two paths
-    // agree where they meet.
     let f = p - base;
-    let c00 = totalLoad(vec2<i32>(i0.x, i0.y));
-    let c10 = totalLoad(vec2<i32>(i1.x, i0.y));
-    let c01 = totalLoad(vec2<i32>(i0.x, i1.y));
-    let c11 = totalLoad(vec2<i32>(i1.x, i1.y));
 
-    return mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
+    let c00 = to_linear_exact(totalLoad(vec2<i32>(i0.x, i0.y)));
+    let c10 = to_linear_exact(totalLoad(vec2<i32>(i1.x, i0.y)));
+    let c01 = to_linear_exact(totalLoad(vec2<i32>(i0.x, i1.y)));
+    let c11 = to_linear_exact(totalLoad(vec2<i32>(i1.x, i1.y)));
+
+    let linear_col = mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
+    return to_srgb_exact(linear_col);
 }
 
 @fragment
@@ -264,22 +249,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     /** Fragment stage for [render]: box filter when minifying, Catmull-Rom when magnifying. */
     private const val FILTERED_FS = """
-fn to_linear_exact(srgb: vec4<f32>) -> vec4<f32> {
-    let c = max(srgb.rgb, vec3<f32>(0.0));
-    let lower = c / vec3<f32>(12.92);
-    let higher = pow((c + vec3<f32>(0.055)) / vec3<f32>(1.055), vec3<f32>(2.4));
-    let cond = c <= vec3<f32>(0.04045);
-    return vec4(select(higher, lower, cond), srgb.a);
-}
-
-fn to_srgb_exact(linear_rgb: vec4<f32>) -> vec4<f32> {
-    let c = max(linear_rgb.rgb, vec3<f32>(0.0));
-    let lower = c * vec3<f32>(12.92);
-    let higher = vec3<f32>(1.055) * pow(c, vec3<f32>(1.0 / 2.4)) - vec3<f32>(0.055);
-    let cond = c <= vec3<f32>(0.0031308);
-    return vec4(select(higher, lower, cond), linear_rgb.a);
-}
-
 fn catmull_rom_weights(t: f32) -> array<f32, 4> {
     let t2 = t * t;
     let t3 = t2 * t;
@@ -681,15 +650,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         device.queue.writeBuffer(image.buffer, 0, byteBuffer)
 
         val pipeline = variant.pipeline
-        var entries = arrayOf(
+        val entries = arrayOf(
             GPUBindGroupEntry(0, buffer = image.buffer),
         ).plus(res.quad.tileViews.mapIndexed { i, view ->
             GPUBindGroupEntry(1 + i, textureView = view)
         })
-        // Only the sampler shader declares binding 5, and the layout comes from the shader.
-        if (variant.bindsSampler) {
-            entries += GPUBindGroupEntry(5, sampler = linearSampler)
-        }
 
         pass.setPipeline(pipeline)
         pass.setBindGroup(
