@@ -2,6 +2,7 @@ package ca.mpreg.webgpuviewer.renderer
 
 import android.util.Log
 import androidx.webgpu.GPUExtent3D
+import androidx.webgpu.GPUOrigin3D
 import androidx.webgpu.GPUTexelCopyBufferLayout
 import androidx.webgpu.GPUTexelCopyTextureInfo
 import androidx.webgpu.GPUTexture
@@ -9,6 +10,7 @@ import androidx.webgpu.GPUTextureDescriptor
 import androidx.webgpu.GPUTextureView
 import androidx.webgpu.TextureFormat
 import androidx.webgpu.TextureUsage
+import kotlinx.coroutines.yield
 import java.nio.ByteBuffer
 import kotlin.math.ceil
 import kotlin.math.min
@@ -23,23 +25,51 @@ class Mipmap(
 ) {
     companion object {
         private val device get() = WebGpuRenderer.device
+
+        /**
+         * Rough size of a single `writeTexture` call, in bytes.
+         *
+         * Big enough that per-call overhead stays noise, small enough that one copy fits in the
+         * slack of a frame. A whole 2000x3000 page in one call is ~24MB of memcpy on the render
+         * thread, which is several frames' worth.
+         */
+        private const val UPLOAD_CHUNK_BYTES = 1 shl 20
+
+        /**
+         * Build a mipmap level from [pixels] and upload it.
+         *
+         * Suspends between chunks, so it must run outside the render mutex (see
+         * [WebGpuRenderer.onDispatcher]) for the yields to be worth anything. The level is only
+         * returned once every chunk has landed, so no caller can sample a half-filled texture.
+         */
+        suspend fun create(
+            pixels: ByteBuffer, width: Int, height: Int, scale: Float, tilesize: Int
+        ): Mipmap {
+            val mipmap = Mipmap(
+                width = width,
+                height = height,
+                scale = scale,
+                tilesCols = ceil(width.toFloat() / tilesize).toInt(),
+                tilesRows = ceil(height.toFloat() / tilesize).toInt(),
+                tilesize = tilesize,
+            )
+            try {
+                mipmap.upload(pixels)
+            } catch (e: Throwable) {
+                // Yielding makes the upload cancellable, so a half-built level can now exist.
+                // Free whatever landed before rethrowing - the caller never sees this instance
+                // and so can't free it itself.
+                mipmap.cleanup()
+                throw e
+            }
+            return mipmap
+        }
     }
 
-    var textures: MutableList<GPUTexture> = mutableListOf()
-    private var textureViews: MutableList<GPUTextureView> = mutableListOf()
-    private var tiles: MutableList<GPUTexture> = mutableListOf()
-    private var tileViews: MutableList<GPUTextureView> = mutableListOf()
+    /** Allocate the tile textures and copy [pixels] into them a chunk at a time. */
+    private suspend fun upload(pixels: ByteBuffer) {
+        val rowsPerChunk = (UPLOAD_CHUNK_BYTES / (width * Int.SIZE_BYTES)).coerceAtLeast(1)
 
-    private var cachedQuad: Quad? = null
-
-    constructor(pixels: ByteBuffer, width: Int, height: Int, scale: Float, tilesize: Int) : this(
-        width = width,
-        height = height,
-        scale = scale,
-        tilesCols = ceil(width.toFloat() / tilesize).toInt(),
-        tilesRows = ceil(height.toFloat() / tilesize).toInt(),
-        tilesize = tilesize,
-    ) {
         for (r in 0 until tilesRows) {
             val tileHeight = min((r + 1) * tilesize, height) - (r * tilesize)
             val y = r * tilesize
@@ -48,26 +78,37 @@ class Mipmap(
                 val tileWidth = min((c + 1) * tilesize, width) - (c * tilesize)
 
                 Log.i("Renderer", "Create tile $c $r $tileWidth $tileHeight $x $y")
-                val size = GPUExtent3D(tileWidth, tileHeight)
 
                 val texture = device.createTexture(
                     GPUTextureDescriptor(
-                        size = size,
+                        size = GPUExtent3D(tileWidth, tileHeight),
                         format = TextureFormat.RGBA8Unorm,
                         usage = TextureUsage.TextureBinding or TextureUsage.CopyDst or TextureUsage.RenderAttachment,
                     )
                 )
 
-                device.queue.writeTexture(
-                    dataLayout = GPUTexelCopyBufferLayout(
-                        offset = (y * width + x) * 4L,
-                        bytesPerRow = width * Int.SIZE_BYTES,
-                        rowsPerImage = height,
-                    ),
-                    data = pixels,
-                    destination = GPUTexelCopyTextureInfo(texture = texture),
-                    writeSize = size,
-                )
+                var row = 0
+                while (row < tileHeight) {
+                    val rows = min(rowsPerChunk, tileHeight - row)
+
+                    device.queue.writeTexture(
+                        dataLayout = GPUTexelCopyBufferLayout(
+                            // Long arithmetic: y * width overflows Int well before the byte
+                            // offset does on a large page.
+                            offset = ((y + row).toLong() * width + x) * Int.SIZE_BYTES,
+                            bytesPerRow = width * Int.SIZE_BYTES,
+                            rowsPerImage = height,
+                        ),
+                        data = pixels,
+                        destination = GPUTexelCopyTextureInfo(
+                            texture = texture, origin = GPUOrigin3D(y = row)
+                        ),
+                        writeSize = GPUExtent3D(tileWidth, rows),
+                    )
+
+                    row += rows
+                    yield()
+                }
 
                 textures.add(texture)
                 textureViews.add(texture.createView())
@@ -87,6 +128,13 @@ class Mipmap(
             cachedQuad = Quad(tiles, tileViews, 0, 0)
         }
     }
+
+    var textures: MutableList<GPUTexture> = mutableListOf()
+    private var textureViews: MutableList<GPUTextureView> = mutableListOf()
+    private var tiles: MutableList<GPUTexture> = mutableListOf()
+    private var tileViews: MutableList<GPUTextureView> = mutableListOf()
+
+    private var cachedQuad: Quad? = null
 
     constructor(texture: GPUTexture, scale: Float, tilesize: Int) : this(
         texture.width, texture.height, scale, 1, 1, tilesize

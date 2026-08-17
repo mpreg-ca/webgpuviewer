@@ -3,6 +3,8 @@ package ca.mpreg.webgpuviewer.transition
 import androidx.compose.ui.geometry.Offset
 import androidx.webgpu.GPUCommandEncoder
 import androidx.webgpu.GPUTexture
+import ca.mpreg.webgpuviewer.draw.Draw
+import ca.mpreg.webgpuviewer.draw.clear
 import ca.mpreg.webgpuviewer.viewer.ImagePage
 import kotlin.math.cos
 import kotlin.math.sin
@@ -65,20 +67,27 @@ object TransitionCubeOuter : Transition() {
         return result
     }
 
+    /**
+     * Face transform for one side of the cube.
+     *
+     * [faceWidth] and [faceHeight] size the face so its content isn't distorted. This shares
+     * [TransitionCube]'s shader, whose unit quad is the whole cached surface, so they are the
+     * surface's dimensions - the vertical scale then cancels against [screenAspect] and the face
+     * comes out screen-shaped.
+     */
     private fun buildFaceMatrix(
         rotAngle: Float,
         screenAspect: Float,
-        imgWidth: Float,
-        imgHeight: Float,
+        faceWidth: Float,
+        faceHeight: Float,
         isSide: Boolean,
-        phase: Float,
     ): FloatArray {
         val d = FACE_DEPTH
         val pushBack = 5f * d
-        // Scale face so it fills NDC ±1 at rest (matches flat image size, no zoom during phase-in)
+        // Scale face so it fills NDC ±1 at rest, matching the flat page size
         // ndc edge = s * FOV / (pushBack - s + FOV) = 1  →  s = (pushBack + FOV) / (FOV + 1)
         val s = (pushBack + FOV) / (FOV + 1f)
-        val faceScaleMat = scale(s, (imgHeight / imgWidth) * screenAspect * s, 1f)
+        val faceScaleMat = scale(s, (faceHeight / faceWidth) * screenAspect * s, 1f)
         val baseMat = if (isSide) {
             multiply(rotateY(HALF_PI), multiply(translate(0f, 0f, -s), faceScaleMat))
         } else {
@@ -92,9 +101,7 @@ object TransitionCubeOuter : Transition() {
             0f, 0f, 1f, 1f,
             0f, 0f, 0f, FOV,
         )
-        val result = multiply(projMat, mat)
-        result[14] = phase
-        return result
+        return multiply(projMat, mat)
     }
 
     override fun render(
@@ -109,10 +116,6 @@ object TransitionCubeOuter : Transition() {
         // CubeOuter rotates opposite to Cube, hence negated frac
         val t = if (frac < 0f) -frac else 1f - frac
 
-        val frontPhase = if (t < PHASE_IN_END) t / PHASE_IN_END else 1f
-        val sidePhase =
-            if (t > PHASE_OUT_START) 1f - (t - PHASE_OUT_START) / (1f - PHASE_OUT_START) else 1f
-
         val rotAngle = when {
             t < PHASE_IN_END -> 0f
             t > PHASE_OUT_START -> HALF_PI
@@ -124,38 +127,38 @@ object TransitionCubeOuter : Transition() {
         // Negated frac means page selection is swapped vs TransitionCube
         val frontPage: ImagePage
         val sidePage: ImagePage
+        val frontIsPage1: Boolean
         if (frac < 0f) {
             frontPage = page1
             sidePage = page2
+            frontIsPage1 = true
         } else {
             frontPage = page2
             sidePage = page1
+            frontIsPage1 = false
         }
 
-        val frontImg = frontPage.images.firstOrNull()
-        val sideImg = sidePage.images.firstOrNull()
+        // A face is the whole cached surface, so both use the surface's dimensions.
+        val faceWidth = dst.width.toFloat()
+        val faceHeight = dst.height.toFloat()
 
         val frontMat = buildFaceMatrix(
-            rotAngle, screenAspect,
-            frontImg?.width?.toFloat() ?: 1f,
-            frontImg?.height?.toFloat() ?: 1f,
-            isSide = false,
-            phase = frontPhase,
+            rotAngle, screenAspect, faceWidth, faceHeight, isSide = false,
         )
         val sideMat = buildFaceMatrix(
-            rotAngle, screenAspect,
-            sideImg?.width?.toFloat() ?: 1f,
-            sideImg?.height?.toFloat() ?: 1f,
-            isSide = true,
-            phase = sidePhase,
+            rotAngle, screenAspect, faceWidth, faceHeight, isSide = true,
         )
 
+        // The cube never covers the whole surface, and getCurrentTexture hands back a rotating set
+        // of buffers, so without a clear the area around it shows a frame from several ago.
+        Draw.clear(encoder, dst, 0)
+
         if (t < 0.5f) {
-            TransitionCube.render(sidePage, encoder, dst, sideMat)
-            TransitionCube.render(frontPage, encoder, dst, frontMat)
+            TransitionCube.face(sidePage, !frontIsPage1, encoder, dst, sideMat)
+            TransitionCube.face(frontPage, frontIsPage1, encoder, dst, frontMat)
         } else {
-            TransitionCube.render(frontPage, encoder, dst, frontMat)
-            TransitionCube.render(sidePage, encoder, dst, sideMat)
+            TransitionCube.face(frontPage, frontIsPage1, encoder, dst, frontMat)
+            TransitionCube.face(sidePage, !frontIsPage1, encoder, dst, sideMat)
         }
     }
 }

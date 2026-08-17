@@ -17,6 +17,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.yield
 import java.nio.ByteBuffer
 import kotlin.math.abs
 import kotlin.math.max
@@ -78,6 +79,14 @@ open class ImagePage(val images: List<Image?>) {
     val isDecoded: Boolean
         get() = this !is Dummy && this !is Draw && images.any { it != null }
 
+    /**
+     * True once [cleanup] has run and the images are gone or going.
+     *
+     * Volatile because it is set on whatever thread evicts the page but read on the GPU thread,
+     * which uses it to skip drawing a page whose textures are being freed. A render snapshot is
+     * captured on the main thread and drawn later, so it can outlive the page it names.
+     */
+    @Volatile
     var destroyed = false
         private set
 
@@ -436,8 +445,16 @@ open class ImagePage(val images: List<Image?>) {
         if (imagesToClean.isNotEmpty()) {
             cleanupScope.launch {
                 try {
-                    WebGpuRenderer.withContext {
-                        imagesToClean.forEach { it.cleanup() }
+                    // Eviction fires exactly when the viewer reaches a new page, so freeing a
+                    // page's textures competes with the frames that are drawing the new one.
+                    // Yield between images and stay off the render mutex, for the same reason
+                    // uploads do. Dawn keeps a destroyed texture alive until the command buffers
+                    // referencing it retire, so a frame already in flight is unaffected.
+                    WebGpuRenderer.onDispatcher {
+                        imagesToClean.forEach { image ->
+                            image.cleanup()
+                            yield()
+                        }
                     }
                 } catch (e: Exception) {
                     Log.e("ImagePage", "Cleanup error", e)

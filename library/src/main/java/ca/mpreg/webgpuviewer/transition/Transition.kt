@@ -17,6 +17,7 @@ import androidx.webgpu.GPUFragmentState
 import androidx.webgpu.GPUPrimitiveState
 import androidx.webgpu.GPURenderPassColorAttachment
 import androidx.webgpu.GPURenderPassDescriptor
+import androidx.webgpu.GPURenderPassEncoder
 import androidx.webgpu.GPURenderPipeline
 import androidx.webgpu.GPURenderPipelineDescriptor
 import androidx.webgpu.GPUShaderModuleDescriptor
@@ -31,6 +32,8 @@ import androidx.webgpu.StoreOp
 import androidx.webgpu.TextureFormat
 import androidx.webgpu.TextureUsage
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
+import ca.mpreg.webgpuviewer.transition.Transition.Companion.blitCached
+import ca.mpreg.webgpuviewer.transition.Transition.Companion.getCachedTexture
 import ca.mpreg.webgpuviewer.viewer.ImagePage
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -39,6 +42,16 @@ abstract class Transition {
     open val code: String = ""
 
     protected val device get() = WebGpuRenderer.device
+
+    /**
+     * True when [code]'s fragment stage already returns premultiplied alpha.
+     *
+     * A transition that samples a cached page texture is in that position: the cache was written
+     * premultiplied, so re-multiplying by alpha on the way out would darken every edge. Such a
+     * shader needs `One` for the colour source factor, the way [blitCached] does, rather than the
+     * `SrcAlpha` that suits a shader resolving straight-alpha texels.
+     */
+    protected open val premultipliedOutput: Boolean = false
 
     protected open val pipeline: GPURenderPipeline by lazy {
         val shaderModule = device.createShaderModule(
@@ -53,7 +66,8 @@ abstract class Transition {
                         GPUColorTargetState(
                             format = TextureFormat.RGBA8Unorm, blend = GPUBlendState(
                                 color = GPUBlendComponent(
-                                    srcFactor = BlendFactor.SrcAlpha,
+                                    srcFactor = if (premultipliedOutput) BlendFactor.One
+                                    else BlendFactor.SrcAlpha,
                                     dstFactor = BlendFactor.OneMinusSrcAlpha,
                                     operation = BlendOperation.Add
                                 ), alpha = GPUBlendComponent(
@@ -234,6 +248,28 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
 
         /**
+         * The rect [page]'s flat render occupies inside its cached texture, as normalised
+         * (x1, y1, x2, y2) surface coordinates, or null if the page has nothing to draw.
+         *
+         * [getCachedTexture] renders the page through `RenderPage` at the page's own transform, so
+         * this mirrors the placement that produces. A warp needs it to map the page's rect rather
+         * than the whole surface - otherwise its geometry would be screen-shaped, and a page
+         * narrower or shorter than the surface would fold or rotate as if it filled it.
+         */
+        internal fun pageRect(page: ImagePage, dst: GPUTexture): FloatArray? {
+            val image = page.images.firstOrNull() ?: return null
+            val res = image.prepareForRender(dst, page.x, page.y, page.scale) ?: return null
+            val w = res.mipmap.width.toFloat() / dst.width
+            val h = res.mipmap.height.toFloat() / dst.height
+            return floatArrayOf(
+                res.scale * res.x,
+                res.scale * res.y,
+                res.scale * (res.x + w),
+                res.scale * (res.y + h),
+            )
+        }
+
+        /**
          * Invalidate the transition cache. Call when transition ends.
          * Keeps textures allocated for reuse.
          */
@@ -254,9 +290,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             encoder: GPUCommandEncoder,
             dstWidth: Int,
             dstHeight: Int,
-            renderPage: (GPUCommandEncoder, GPUTexture) -> Unit
+            renderPage: (GPURenderPassEncoder, GPUTexture) -> Unit
         ): GPUTextureView? {
-            if (page.images.all { it == null }) return null
+            if (page.destroyed || page.images.all { it == null }) return null
 
             val pageX = page.x
             val pageY = page.y
@@ -285,8 +321,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
             if (!needsRender) return view
 
-            // Record GPU commands outside the lock - GPU thread is single-threaded
-            encoder.beginRenderPass(
+            // Record GPU commands outside the lock - GPU thread is single-threaded.
+            //
+            // The clear and the page's draws share one pass. Opening it here rather than letting
+            // the callback do it is what lets the callback take a pass at all, and it drops the
+            // separate clear-only pass this used to need.
+            val pass = encoder.beginRenderPass(
                 GPURenderPassDescriptor(
                     colorAttachments = arrayOf(
                         GPURenderPassColorAttachment(
@@ -297,9 +337,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                         )
                     )
                 )
-            ).end()
-
-            renderPage(encoder, texture)
+            )
+            try {
+                renderPage(pass, texture)
+            } finally {
+                pass.end()
+            }
 
             // Update cache metadata
             synchronized(cacheLock) {

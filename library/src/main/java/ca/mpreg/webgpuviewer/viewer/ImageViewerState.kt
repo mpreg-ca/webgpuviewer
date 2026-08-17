@@ -11,8 +11,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.util.fastCoerceAtLeast
 import androidx.compose.ui.util.fastCoerceAtMost
+import androidx.webgpu.GPUColor
 import androidx.webgpu.GPUCommandEncoder
+import androidx.webgpu.GPURenderPassColorAttachment
+import androidx.webgpu.GPURenderPassDescriptor
+import androidx.webgpu.GPURenderPassEncoder
 import androidx.webgpu.GPUTexture
+import androidx.webgpu.LoadOp
+import androidx.webgpu.StoreOp
+import ca.mpreg.webgpuviewer.renderer.RenderPage
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer.Companion.dispatcher
 import ca.mpreg.webgpuviewer.transition.Transition
@@ -200,6 +207,43 @@ open class ImageViewerState(var isVertical: Boolean = false) {
         val currentPos: Offset,
     )
 
+    /**
+     * Run [block] against a render pass over [texture], ending the pass afterwards either way.
+     *
+     * Pass ownership sits here rather than inside the transitions: every draw a frame makes into
+     * the surface belongs in one pass, and only the code that knows what the whole frame contains
+     * can decide where that pass starts and ends. Subclasses get a pass to draw into and owe
+     * nothing back - a draw that throws still leaves the pass closed, and [WebGpuRenderer.render]
+     * turns the throw into a dropped frame, so there is no need to guard the call site.
+     *
+     * Always clears. `getCurrentTexture` returns a rotating set of buffers, so loading gives back
+     * whatever this one held several frames ago rather than the last frame - and nothing here
+     * paints every pixel, so that stale content would show through around the page.
+     */
+    protected fun renderPass(
+        encoder: GPUCommandEncoder,
+        texture: GPUTexture,
+        block: (GPURenderPassEncoder) -> Unit
+    ) {
+        val pass = encoder.beginRenderPass(
+            GPURenderPassDescriptor(
+                colorAttachments = arrayOf(
+                    GPURenderPassColorAttachment(
+                        view = texture.createView(),
+                        loadOp = LoadOp.Clear,
+                        storeOp = StoreOp.Store,
+                        clearValue = GPUColor(0.0, 0.0, 0.0, 0.0)
+                    )
+                )
+            )
+        )
+        try {
+            block(pass)
+        } finally {
+            pass.end()
+        }
+    }
+
     protected open suspend fun renderSnapshot(
         encoder: GPUCommandEncoder, texture: GPUTexture, snapshot: Any
     ) {
@@ -209,7 +253,9 @@ open class ImageViewerState(var isVertical: Boolean = false) {
                 s.currentPage, s.adjacentPage, encoder, texture, s.offset, s.firstPos, s.currentPos
             )
         } else {
-            TransitionBasic.render(s.currentPage, encoder, texture, 0f, 0f, 1f)
+            renderPass(encoder, texture) { pass ->
+                RenderPage.render(pass, s.currentPage, texture, 0f, 0f, 1f)
+            }
         }
     }
 

@@ -1,188 +1,73 @@
 package ca.mpreg.webgpuviewer.transition
 
 import androidx.compose.ui.geometry.Offset
+import androidx.webgpu.BufferUsage
+import androidx.webgpu.FilterMode
 import androidx.webgpu.GPUBindGroupDescriptor
 import androidx.webgpu.GPUBindGroupEntry
+import androidx.webgpu.GPUBufferDescriptor
 import androidx.webgpu.GPUColor
 import androidx.webgpu.GPUCommandEncoder
 import androidx.webgpu.GPURenderPassColorAttachment
 import androidx.webgpu.GPURenderPassDescriptor
+import androidx.webgpu.GPUSamplerDescriptor
 import androidx.webgpu.GPUTexture
+import androidx.webgpu.GPUTextureView
 import androidx.webgpu.LoadOp
 import androidx.webgpu.StoreOp
 import ca.mpreg.webgpuviewer.draw.Draw
+import ca.mpreg.webgpuviewer.draw.clear
 import ca.mpreg.webgpuviewer.draw.rect
+import ca.mpreg.webgpuviewer.renderer.RenderPage
+import ca.mpreg.webgpuviewer.transition.Transition.Companion.getCachedTexture
 import ca.mpreg.webgpuviewer.viewer.ImagePage
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.cos
 import kotlin.math.sin
 
+/**
+ * Cube rotation: the outgoing page is the front face, the incoming one the side face.
+ *
+ * Each page is rendered flat into a cached screen-sized texture first, then a face maps that
+ * texture onto a rotating quad. [getCachedTexture] keys on the page's own transform, so the flat
+ * render happens once per transition while only the rotation is per-frame - which is what lets the
+ * flat render use [RenderPage]'s sharp filter instead of something cheap enough to run every frame.
+ *
+ * A face is the whole cached surface, so it is screen-shaped rather than page-shaped - unlike the
+ * flips and the sphere, which map the page's rect. Each face also gets a background column behind
+ * it, spanning its projected width and the full height of the surface.
+ */
 object TransitionCube : Transition() {
+    override val premultipliedOutput = true
+
     // Thread-local ByteBuffer to avoid per-frame allocation
     private val byteBufferLocal = ThreadLocal.withInitial {
-        ByteBuffer.allocateDirect(96).order(ByteOrder.nativeOrder())
+        ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder())
+    }
+
+    private val faceSampler by lazy {
+        device.createSampler(
+            GPUSamplerDescriptor(
+                magFilter = FilterMode.Linear,
+                minFilter = FilterMode.Linear,
+            )
+        )
     }
 
     override val code = """
 struct Uniforms {
-    offset: vec2<f32>,
-    scale: f32,
-    tile_size: f32,
-    tiles_width: f32,
-    tiles_height: f32,
-    dst_width: f32,
-    dst_height: f32,
     transform_mat: mat4x4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> transform: Uniforms;
-@group(0) @binding(1) var src_tex0: texture_2d<f32>;
-@group(0) @binding(2) var src_tex1: texture_2d<f32>;
-@group(0) @binding(3) var src_tex2: texture_2d<f32>;
-@group(0) @binding(4) var src_tex3: texture_2d<f32>;
+@group(0) @binding(1) var src_tex: texture_2d<f32>;
+@group(0) @binding(2) var src_sampler: sampler;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
 };
-
-fn tileLoad(i: i32, pos: vec2<i32>) -> vec4<f32> {
-    if (i == 0) { return textureLoad(src_tex0, pos, 0); }
-    if (i == 1) { return textureLoad(src_tex1, pos, 0); }
-    if (i == 2) { return textureLoad(src_tex2, pos, 0); }
-    return textureLoad(src_tex3, pos, 0);
-}
-
-fn totalDimensions() -> vec2<u32> {
-    let w = i32(transform.tiles_width);
-    let h = i32(transform.tiles_height);
-    if (w <= 0 || h <= 0) { return vec2<u32>(0u); }
-    let dim0 = textureDimensions(src_tex0);
-    var width = dim0.x;
-    if (w > 1) { width += textureDimensions(src_tex1).x; }
-    var height = dim0.y;
-    if (h > 1) { height += textureDimensions(src_tex2).y; }
-    return vec2<u32>(width, height);
-}
-
-fn totalLoad(pos: vec2<i32>) -> vec4<f32> {
-    let ts = i32(transform.tile_size);
-    let tile_x = select(0, 1, pos.x >= ts);
-    let tile_y = select(0, 1, pos.y >= ts);
-    let idx = tile_y * 2 + tile_x;
-    let pos0 = pos - vec2<i32>(tile_x, tile_y) * ts;
-    return tileLoad(idx, pos0);
-}
-
-fn to_linear_exact(srgb: vec4<f32>) -> vec4<f32> {
-    let c = max(srgb.rgb, vec3<f32>(0.0));
-    let lower = c / vec3<f32>(12.92);
-    let higher = pow((c + vec3<f32>(0.055)) / vec3<f32>(1.055), vec3<f32>(2.4));
-    let cond = c <= vec3<f32>(0.04045);
-    return vec4(select(higher, lower, cond), srgb.a);
-}
-
-fn to_srgb_exact(linear_rgb: vec4<f32>) -> vec4<f32> {
-    let c = max(linear_rgb.rgb, vec3<f32>(0.0));
-    let lower = c * vec3<f32>(12.92);
-    let higher = vec3<f32>(1.055) * pow(c, vec3<f32>(1.0 / 2.4)) - vec3<f32>(0.055);
-    let cond = c <= vec3<f32>(0.0031308);
-    return vec4(select(higher, lower, cond), linear_rgb.a);
-}
-
-fn loop_over_tile(
-    tex: texture_2d<f32>,
-    start_i: vec2<i32>,
-    end_i: vec2<i32>,
-    src_start: vec2<f32>,
-    src_end: vec2<f32>,
-    local_offset: vec2<i32>
-) -> vec4<f32> {
-    var color_sum = vec4<f32>(0.0);
-    var weight_sum = 0.0;
-    for (var y: i32 = start_i.y; y < end_i.y; y++) {
-        let y_f = f32(y);
-        var y_overlap = 1.0;
-        if (y == start_i.y) { y_overlap = min(y_f + 1.0, src_end.y) - src_start.y; }
-        else if (y == end_i.y - 1) { y_overlap = src_end.y - max(y_f, src_start.y); }
-        y_overlap = max(0.0, y_overlap);
-        let py = y + local_offset.y;
-        for (var x: i32 = start_i.x; x < end_i.x; x++) {
-            let x_f = f32(x);
-            var x_overlap = 1.0;
-            if (x == start_i.x) { x_overlap = min(x_f + 1.0, src_end.x) - src_start.x; }
-            else if (x == end_i.x - 1) { x_overlap = src_end.x - max(x_f, src_start.x); }
-            x_overlap = max(0.0, x_overlap);
-            let weight = x_overlap * y_overlap;
-            let px = x + local_offset.x;
-            let texel = to_linear_exact(textureLoad(tex, vec2<i32>(px, py), 0));
-            color_sum += texel * weight;
-            weight_sum += weight;
-        }
-    }
-    return color_sum / max(weight_sum, 0.0001);
-}
-
-fn downsample(src_start: vec2<f32>, scale: vec2<f32>) -> vec4<f32> {
-    let src_size_f = vec2<f32>(totalDimensions());
-    let src_end = src_start + scale;
-    let start_i = vec2<i32>(clamp(floor(src_start), vec2<f32>(0.0), src_size_f));
-    let end_i = vec2<i32>(clamp(ceil(src_end), vec2<f32>(0.0), src_size_f));
-    let ts = i32(transform.tile_size);
-    let tile_TL = start_i / ts;
-    let tile_BR = (end_i - 1) / ts;
-    let in_bounds = start_i.x >= 0 && start_i.y >= 0 && (end_i.x - 1) < ts * 2 && (end_i.y - 1) < ts * 2;
-    let is_single_tile = all(tile_TL == tile_BR) && in_bounds;
-
-    if (is_single_tile) {
-        let idx = tile_TL.y * 2 + tile_TL.x;
-        let local_offset = -tile_TL * ts;
-        var avg_color = vec4<f32>(0.0);
-        if (idx == 0) { avg_color = loop_over_tile(src_tex0, start_i, end_i, src_start, src_end, local_offset); }
-        else if (idx == 1) { avg_color = loop_over_tile(src_tex1, start_i, end_i, src_start, src_end, local_offset); }
-        else if (idx == 2) { avg_color = loop_over_tile(src_tex2, start_i, end_i, src_start, src_end, local_offset); }
-        else { avg_color = loop_over_tile(src_tex3, start_i, end_i, src_start, src_end, local_offset); }
-        return to_srgb_exact(avg_color);
-    } else {
-        var color_sum = vec4<f32>(0.0);
-        var weight_sum = 0.0;
-        for (var y: i32 = start_i.y; y < end_i.y; y++) {
-            let y_f = f32(y);
-            var y_overlap = 1.0;
-            if (y == start_i.y) { y_overlap = min(y_f + 1.0, src_end.y) - src_start.y; }
-            else if (y == end_i.y - 1) { y_overlap = src_end.y - max(y_f, src_start.y); }
-            y_overlap = max(0.0, y_overlap);
-            for (var x: i32 = start_i.x; x < end_i.x; x++) {
-                let x_f = f32(x);
-                var x_overlap = 1.0;
-                if (x == start_i.x) { x_overlap = min(x_f + 1.0, src_end.x) - src_start.x; }
-                else if (x == end_i.x - 1) { x_overlap = src_end.x - max(x_f, src_start.x); }
-                x_overlap = max(0.0, x_overlap);
-                let weight = x_overlap * y_overlap;
-                let texel = to_linear_exact(totalLoad(vec2<i32>(x, y)));
-                color_sum += texel * weight;
-                weight_sum += weight;
-            }
-        }
-        return to_srgb_exact(color_sum / max(weight_sum, 0.0001));
-    }
-}
-
-fn sampleImage(uv: vec2<f32>) -> vec4<f32> {
-    let size = vec2<i32>(totalDimensions());
-    let src_size_f = vec2<f32>(size);
-    let scale_factor = 1.0 / transform.scale;
-    if (scale_factor > 1.0) {
-        let src_start = uv * src_size_f;
-        return downsample(src_start, vec2<f32>(scale_factor));
-    }
-    let pos = vec2<i32>(uv * src_size_f);
-    if (pos.x < 0 || pos.y < 0 || pos.x >= size.x || pos.y >= size.y) {
-        return vec4<f32>(0.0);
-    }
-    return totalLoad(pos);
-}
 
 @vertex
 fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
@@ -208,29 +93,16 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
         default: { uv = vec2<f32>(x1, y1); }
     }
 
-    let dst_size_f = vec2<f32>(transform.dst_width, transform.dst_height);
-    let src_size_f = vec2<f32>(totalDimensions());
-
-    // Phase packed in mat[3][2]: 0=flat, 1=fully transformed
-    let phase = transform.transform_mat[3][2];
-
-    // Flat position: image at its current transform
-    let pixel_pos = transform.scale * (transform.offset * dst_size_f + uv * src_size_f);
-    let flat_ndc = vec2<f32>(
-        (pixel_pos.x / dst_size_f.x) * 2.0 - 1.0,
-        1.0 - (pixel_pos.y / dst_size_f.y) * 2.0
-    );
-
-    // Transformed position: matrix maps unit quad to clip space, perspective via W
+    // The matrix maps the unit quad to clip space, perspective via W. The unit quad is the cached
+    // surface, so the face is screen-shaped - the matrix is built from the surface's dimensions and
+    // its vertical scale cancels against the screen aspect.
+    //
+    // uv doubles as the texture coordinate, since the face spans the whole surface.
     let local_pos = vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0.0, 1.0);
     let transformed = transform.transform_mat * local_pos;
-    let trans_ndc = transformed.xy / transformed.w;
-
-    // Interpolate between flat and transformed
-    let final_ndc = mix(flat_ndc, trans_ndc, vec2<f32>(phase));
 
     var out: VertexOutput;
-    out.position = vec4<f32>(final_ndc, 0.0, 1.0);
+    out.position = vec4<f32>(transformed.xy / transformed.w, 0.0, 1.0);
     out.uv = uv;
     return out;
 }
@@ -244,15 +116,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let dudy = dpdy(in.uv);
     if (dudx.x * dudy.y - dudx.y * dudy.x < 0.0) { discard; }
 
-    let col = sampleImage(in.uv);
-    return vec4<f32>(col.rgb * col.a, col.a);
+    // textureSampleLevel rather than textureSample: the discards above make this non-uniform
+    // control flow, where implicit derivatives are not allowed. The cache is single-level, so an
+    // explicit LOD of 0 loses nothing. Premultiplied already - see premultipliedOutput.
+    return textureSampleLevel(src_tex, src_sampler, in.uv, 0.0);
 }"""
 
     private const val HALF_PI = (Math.PI / 2.0).toFloat()
     private const val FOV = 4f
     private const val FACE_DEPTH = FOV / (FOV - 1f)
-    private const val PHASE_IN_END = 0.1f
-    private const val PHASE_OUT_START = 0.9f
 
     private fun mat4(
         m00: Float, m01: Float, m02: Float, m03: Float,
@@ -305,15 +177,22 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         return result
     }
 
+    /**
+     * Face transform for one side of the cube.
+     *
+     * [faceWidth] and [faceHeight] size the face so its content isn't distorted. The face is the
+     * cached surface, so they are the surface's dimensions - the vertical scale then cancels
+     * against [screenAspect] and the face comes out screen-shaped.
+     */
     private fun buildFaceMatrix(
         rotAngle: Float,
         screenAspect: Float,
-        imgWidth: Float,
-        imgHeight: Float,
+        faceWidth: Float,
+        faceHeight: Float,
         isSide: Boolean,
-        phase: Float,
     ): FloatArray {
-        val faceScaleMat = scale(FACE_DEPTH, (imgHeight / imgWidth) * screenAspect * FACE_DEPTH, 1f)
+        val faceScaleMat =
+            scale(FACE_DEPTH, (faceHeight / faceWidth) * screenAspect * FACE_DEPTH, 1f)
         val baseMat = if (isSide) {
             multiply(rotateY(HALF_PI), multiply(translate(0f, 0f, FACE_DEPTH), faceScaleMat))
         } else {
@@ -327,9 +206,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             0f, 0f, 1f, 1f,
             0f, 0f, 0f, FOV,
         )
-        val mat = multiply(projMat, worldMat)
-        mat[14] = phase
-        return mat
+        return multiply(projMat, worldMat)
     }
 
     override fun render(
@@ -341,17 +218,20 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         pos1: Offset,
         pos2: Offset,
     ) {
+        val cached1 = getCachedTexture(page1, true, encoder, dst.width, dst.height) { pass, tex ->
+            RenderPage.render(pass, page1, tex, 0f, 0f, 1f)
+        }
+
+        val cached2 = getCachedTexture(page2, false, encoder, dst.width, dst.height) { pass, tex ->
+            RenderPage.render(pass, page2, tex, 0f, 0f, 1f)
+        }
+
         val t = if (frac > 0f) frac else 1f + frac
 
-        val frontPhase = if (t < PHASE_IN_END) t / PHASE_IN_END else 1f
-        val sidePhase =
-            if (t > PHASE_OUT_START) 1f - (t - PHASE_OUT_START) / (1f - PHASE_OUT_START) else 1f
-
-        val rotAngle = when {
-            t < PHASE_IN_END -> 0f
-            t > PHASE_OUT_START -> HALF_PI
-            else -> (t - PHASE_IN_END) / (PHASE_OUT_START - PHASE_IN_END) * HALF_PI
-        }
+        // Rotation runs the whole way across, with no held stages at either end. At 0 the front
+        // face is exactly flat and full-screen, and at 90 degrees the side face is - which is what
+        // FACE_DEPTH is chosen for - so there is nothing to ease into or out of.
+        val rotAngle = t * HALF_PI
 
         val screenAspect = dst.width.toFloat() / dst.height.toFloat()
 
@@ -359,92 +239,102 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // When frac < 0: page2 is front, page1 is side
         val frontPage: ImagePage
         val sidePage: ImagePage
+        val frontFace: GPUTextureView?
+        val sideFace: GPUTextureView?
         if (frac > 0f) {
             frontPage = page1
             sidePage = page2
+            frontFace = cached1
+            sideFace = cached2
         } else {
             frontPage = page2
             sidePage = page1
+            frontFace = cached2
+            sideFace = cached1
         }
 
-        val frontImg = frontPage.images.firstOrNull()
-        val sideImg = sidePage.images.firstOrNull()
+        // A face is the whole cached surface, so both use the surface's dimensions.
+        val faceWidth = dst.width.toFloat()
+        val faceHeight = dst.height.toFloat()
 
         val frontMat = buildFaceMatrix(
-            rotAngle, screenAspect,
-            frontImg?.width?.toFloat() ?: 1f,
-            frontImg?.height?.toFloat() ?: 1f,
-            isSide = false,
-            phase = frontPhase,
+            rotAngle, screenAspect, faceWidth, faceHeight, isSide = false,
         )
         val sideMat = buildFaceMatrix(
-            rotAngle, screenAspect,
-            sideImg?.width?.toFloat() ?: 1f,
-            sideImg?.height?.toFloat() ?: 1f,
-            isSide = true,
-            phase = sidePhase,
+            rotAngle, screenAspect, faceWidth, faceHeight, isSide = true,
         )
+
+        // Both faces load rather than clear, so that the second doesn't erase the first, and the
+        // cube never covers the whole surface. Without a clear first, the area around it shows
+        // whatever getCurrentTexture's rotating buffer held several frames ago.
+        Draw.clear(encoder, dst, 0)
 
         // Render back-to-front for correct overlap
         if (t < 0.5f) {
-            render(sidePage, encoder, dst, sideMat)
-            render(frontPage, encoder, dst, frontMat)
+            drawFace(sideFace, sidePage, encoder, dst, sideMat)
+            drawFace(frontFace, frontPage, encoder, dst, frontMat)
         } else {
-            render(frontPage, encoder, dst, frontMat)
-            render(sidePage, encoder, dst, sideMat)
+            drawFace(frontFace, frontPage, encoder, dst, frontMat)
+            drawFace(sideFace, sidePage, encoder, dst, sideMat)
         }
     }
 
-    internal fun render(
+    /**
+     * Render [page] flat into its cache slot, then map that onto a face by [matrix].
+     *
+     * Shared with [TransitionCubeOuter], which drives the same faces through a different rotation.
+     * [isPage1] picks the cache slot, so the two pages must be given different values or they will
+     * evict each other every frame.
+     */
+    internal fun face(
+        page: ImagePage,
+        isPage1: Boolean,
+        encoder: GPUCommandEncoder,
+        dst: GPUTexture,
+        matrix: FloatArray,
+    ) {
+        val cached = getCachedTexture(page, isPage1, encoder, dst.width, dst.height) { pass, tex ->
+            RenderPage.render(pass, page, tex, 0f, 0f, 1f)
+        }
+        drawFace(cached, page, encoder, dst, matrix)
+    }
+
+    private fun drawFace(
+        cachedView: GPUTextureView?,
         page: ImagePage,
         encoder: GPUCommandEncoder,
         dst: GPUTexture,
         matrix: FloatArray,
     ) {
-        // For cube transitions, use first image (TODO: support dual page cube)
-        val image = page.images.firstOrNull() ?: return
-        val res = image.prepareForRender(dst, page.x, page.y, page.scale) ?: return
+        if (cachedView == null) return
 
-        // Project left and right edges through matrix to get screen x coordinates
-        // Matrix is column-major: mat[col*4 + row]
-        // local_pos for left edge: (-1, 0, 0, 1), right edge: (1, 0, 0, 1)
-        // transformed = mat * local_pos, ndc = transformed.xy / transformed.w
-        val phase = matrix[14] // mat[3][2] contains phase
-
-        // Left edge: x=-1
-        val leftW = matrix[3] * -1f + matrix[15]  // mat[0][3]*x + mat[3][3]
-        val leftX = (matrix[0] * -1f + matrix[12]) / leftW  // (mat[0][0]*x + mat[3][0]) / w
-        // Right edge: x=1
-        val rightW = matrix[3] * 1f + matrix[15]
-        val rightX = (matrix[0] * 1f + matrix[12]) / rightW
-
-        // Convert NDC (-1 to 1) to 0-1 range, interpolate with flat position based on phase
-        val srcWidth = res.mipmap.width.toFloat()
-        val flatX1 = res.scale * res.x
-        val flatX2 = res.scale * (res.x + srcWidth / dst.width)
-        val transX1 = (leftX + 1f) / 2f
-        val transX2 = (rightX + 1f) / 2f
-        val x1 = flatX1 + (transX1 - flatX1) * phase
-        val x2 = flatX2 + (transX2 - flatX2) * phase
-
-        Draw.rect(encoder, dst, x1, 0f, x2, 1f, image.backgroundColor)
+        // Background behind the face, spanning its projected width and the full height. The face
+        // itself carries the page's own background inside the cache, but only across the page's
+        // band and rotated with it - this fills the column top to bottom.
+        //
+        // Project the face's left and right edges to find that width. Column-major, so index is
+        // col * 4 + row; local_pos is (x, y, 0, 1) and neither x nor w takes a y term here, so
+        // only column 0 and column 3 matter.
+        val leftW = -matrix[3] + matrix[15]
+        val rightW = matrix[3] + matrix[15]
+        val leftX = (-matrix[0] + matrix[12]) / leftW
+        val rightX = (matrix[0] + matrix[12]) / rightW
+        val bg = page.images.firstOrNull()?.backgroundColor
+        if (bg != null) {
+            Draw.rect(encoder, dst, (leftX + 1f) / 2f, 0f, (rightX + 1f) / 2f, 1f, bg)
+        }
 
         val byteBuffer = byteBufferLocal.get()
         byteBuffer.clear()
-        byteBuffer.putFloat(res.x)
-        byteBuffer.putFloat(res.y)
-        byteBuffer.putFloat(res.scale)
-        byteBuffer.putFloat(res.mipmap.tilesize.toFloat())
-        byteBuffer.putFloat(res.mipmap.tilesCols.toFloat())
-        byteBuffer.putFloat(res.mipmap.tilesRows.toFloat())
-        byteBuffer.putFloat(dst.width.toFloat())
-        byteBuffer.putFloat(dst.height.toFloat())
         for (i in matrix.indices) {
             byteBuffer.putFloat(matrix[i])
         }
         byteBuffer.flip()
 
-        device.queue.writeBuffer(image.buffer, 0, byteBuffer)
+        val uniformBuffer = device.createBuffer(
+            GPUBufferDescriptor(size = 64, usage = BufferUsage.Uniform or BufferUsage.CopyDst)
+        )
+        device.queue.writeBuffer(uniformBuffer, 0, byteBuffer)
 
         val pass = encoder.beginRenderPass(
             GPURenderPassDescriptor(
@@ -464,10 +354,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             0, device.createBindGroup(
                 GPUBindGroupDescriptor(
                     layout = pipeline.getBindGroupLayout(0), entries = arrayOf(
-                        GPUBindGroupEntry(0, buffer = image.buffer),
-                    ).plus(res.quad.tileViews.mapIndexed { i, view ->
-                        GPUBindGroupEntry(1 + i, textureView = view)
-                    })
+                        GPUBindGroupEntry(0, buffer = uniformBuffer),
+                        GPUBindGroupEntry(1, textureView = cachedView),
+                        GPUBindGroupEntry(2, sampler = faceSampler),
+                    )
                 )
             )
         )

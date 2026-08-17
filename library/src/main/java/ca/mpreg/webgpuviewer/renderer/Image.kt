@@ -5,14 +5,18 @@ import android.util.Log
 import androidx.webgpu.BufferUsage
 import androidx.webgpu.GPUBuffer
 import androidx.webgpu.GPUBufferDescriptor
+import androidx.webgpu.GPUColor
 import androidx.webgpu.GPUExtent3D
+import androidx.webgpu.GPURenderPassColorAttachment
+import androidx.webgpu.GPURenderPassDescriptor
 import androidx.webgpu.GPUTexture
 import androidx.webgpu.GPUTextureDescriptor
+import androidx.webgpu.LoadOp
+import androidx.webgpu.StoreOp
 import androidx.webgpu.TextureFormat
 import androidx.webgpu.TextureUsage
 import ca.mpreg.webgpuviewer.ImageUtil
 import ca.mpreg.webgpuviewer.Trim
-import ca.mpreg.webgpuviewer.transition.TransitionBasic
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
@@ -48,6 +52,12 @@ class Image private constructor(
     var position: Position = Position.SINGLE
 
     companion object {
+        /**
+         * When true, mipmap levels below the CPU-generated ones are produced on the GPU with a
+         * render pass. Disabled by default: all mipmap levels are generated on the CPU.
+         */
+        var useGpuMipmaps: Boolean = false
+
         suspend fun createWithTrim(
             pixels: ByteBuffer, width: Int, height: Int,
             createMipMaps: Boolean = true,
@@ -61,9 +71,45 @@ class Image private constructor(
             }
 
             val image = Image(width, height)
-            var trimRect: Rect? = null
 
-            val tilesize = 4096
+            // Trim and background detection read the decoded pixels, so they run on a background
+            // dispatcher here instead of as compute shaders. The GPU versions have to park on a
+            // buffer readback while holding the render thread, which stalls every frame queued
+            // behind them - visible as a stutter each time a page decodes.
+            withContext(Dispatchers.Default) {
+                var backgroundFromTrim = false
+
+                val trimWith = trimColors?.takeIf { it.isNotEmpty() }
+                if (trimWith != null) {
+                    // Find trim for each color and pick the smallest rect
+                    val rects = Trim.findAllCpu(pixels, width, height, trimWith, trimThreshold)
+                    val best = trimWith.zip(rects)
+                        .minByOrNull { it.second.width() * it.second.height() }
+
+                    if (best != null) {
+                        image.trim = best.second
+                        // Set background color from the winning trim color
+                        if (backgroundColor == null) {
+                            val c = best.first
+                            image.backgroundColor = 0xFF000000.toInt() or
+                                    ((c[0] * 255).toInt() shl 16) or
+                                    ((c[1] * 255).toInt() shl 8) or (c[2] * 255).toInt()
+                            backgroundFromTrim = true
+                        }
+                    }
+                }
+
+                // Probing the edges is only worth a pass when neither the caller nor trim has
+                // already named a background colour.
+                if (backgroundColor != null) {
+                    image.backgroundColor = backgroundColor
+                } else if (!backgroundFromTrim) {
+                    image.backgroundColor =
+                        Trim.detectBackgroundCpu(pixels, width, height, trimThreshold)
+                }
+            }
+
+            val tilesize = 2048
             val maxWidth = 4096
             val maxHeight = 4096
 
@@ -80,7 +126,13 @@ class Image private constructor(
                 var textureHeight = height
                 var scale = 1f
 
-                while (width * scale > tilesize || height * scale > tilesize) {
+                // With the GPU path enabled the CPU only has to reach the tile size; the shader
+                // takes the remaining levels down to maxWidth/maxHeight. Otherwise the CPU has to
+                // cover those levels too.
+                val cpuMaxWidth = if (useGpuMipmaps) tilesize else minOf(tilesize, maxWidth)
+                val cpuMaxHeight = if (useGpuMipmaps) tilesize else minOf(tilesize, maxHeight)
+
+                while (width * scale > cpuMaxWidth || height * scale > cpuMaxHeight) {
                     scale /= 2
                     val newWidth = floor(width * scale).toInt()
                     val newHeight = floor(height * scale).toInt()
@@ -95,13 +147,19 @@ class Image private constructor(
                 }
             }
 
-            WebGpuRenderer.withContext { device ->
+            // No render mutex: Mipmap.create yields between upload chunks so queued frames get
+            // the GPU thread back, and holding the mutex would make those yields pointless. Safe
+            // because the image isn't reachable from any page until this function returns, so
+            // nothing can sample or destroy it while the upload is in flight.
+            WebGpuRenderer.onDispatcher { device ->
                 try {
                     for (data in mipmapDataList) {
-                        image.mipmaps.add(Mipmap(data.pixels, data.w, data.h, data.scale, tilesize))
+                        image.mipmaps.add(
+                            Mipmap.create(data.pixels, data.w, data.h, data.scale, tilesize)
+                        )
                     }
 
-                    if (createMipMaps && mipmapDataList.isNotEmpty()) {
+                    if (useGpuMipmaps && createMipMaps && mipmapDataList.isNotEmpty()) {
                         var scale = mipmapDataList.last().scale
                         while (width * scale > maxWidth || height * scale > maxHeight) {
                             scale /= 2
@@ -121,38 +179,31 @@ class Image private constructor(
                                 )
                             )
                             val encoder = device.createCommandEncoder()
-                            TransitionBasic.render(image, encoder, texture, 0f, 0f, scale)
+                            // Fresh texture, so clear rather than load - there is nothing to
+                            // preserve and loading would cost a pointless tile read.
+                            val pass = encoder.beginRenderPass(
+                                GPURenderPassDescriptor(
+                                    colorAttachments = arrayOf(
+                                        GPURenderPassColorAttachment(
+                                            view = texture.createView(),
+                                            loadOp = LoadOp.Clear,
+                                            storeOp = StoreOp.Store,
+                                            clearValue = GPUColor(0.0, 0.0, 0.0, 0.0)
+                                        )
+                                    )
+                                )
+                            )
+                            try {
+                                RenderPage.render(pass, image, texture, 0f, 0f, scale)
+                            } finally {
+                                pass.end()
+                            }
                             device.queue.submit(arrayOf(encoder.finish()))
                             image.mipmaps.add(Mipmap(texture, scale, tilesize))
                         }
                     }
-
-                    if (!trimColors.isNullOrEmpty() && image.mipmaps.isNotEmpty()) {
-                        // Find trim for each color and pick the smallest rect
-                        val results = trimColors.map { color ->
-                            color to Trim.findInContext(
-                                image, color[0], color[1], color[2], trimThreshold
-                            )
-                        }
-
-                        val best = results.minByOrNull { it.second.width() * it.second.height() }
-                        if (best != null) {
-                            trimRect = best.second
-                            image.trim = trimRect  // Store trim on image
-                            // Set background color from the winning trim color
-                            if (backgroundColor == null) {
-                                val c = best.first
-                                image.backgroundColor = 0xFF000000.toInt() or
-                                        ((c[0] * 255).toInt() shl 16) or ((c[1] * 255).toInt() shl 8) or (c[2] * 255).toInt()
-                            }
-                        }
-                    }
-
-                    // Use explicitly provided background color if given, otherwise detect
-                    image.backgroundColor =
-                        backgroundColor ?: Trim.detectBackgroundInContext(image)
                 } catch (e: Exception) {
-                    Log.e("Renderer", "Error creating image with trim", e)
+                    Log.e("Renderer", "Error creating image", e)
                     image.mipmaps.forEach { it.cleanup() }
                     image.mipmaps.clear()
                     throw e
@@ -205,7 +256,27 @@ class Image private constructor(
     fun prepareForRender(dst: GPUTexture, x: Float, y: Float, scale: Float): MipMapForDraw? {
         if (mipmaps.isEmpty()) return null
 
-        val level = floor(log2(1 / scale)).toInt().coerceIn(0, mipmaps.size - 1)
+        var level = floor(log2(1 / scale)).toInt().coerceIn(0, mipmaps.size - 1)
+
+        // Scale alone isn't enough to pick a level. A draw binds a 2x2 window of tiles, and
+        // getQuad can only promise half a tile either side of the view centre, so the visible
+        // span has to fit within one tile's worth of source texels. A level whose whole grid is
+        // 2x2 or smaller is bound in one go and always fits; anything larger has to be checked.
+        //
+        // Without this, a page taller than two tiles renders only the window around the centre
+        // and the rest of it comes out empty. Stepping coarser costs nothing in sharpness here:
+        // the level that fits is the one roughly matching the size it's drawn at.
+        while (level < mipmaps.size - 1) {
+            val m = mipmaps[level]
+            if (m.tilesCols <= 2 && m.tilesRows <= 2) break
+
+            // Source texels the viewport covers at this level.
+            val visibleW = dst.width * m.scale / scale
+            val visibleH = dst.height * m.scale / scale
+            if (visibleW <= m.tilesize && visibleH <= m.tilesize) break
+
+            level++
+        }
 
         val mipmap = mipmaps[level]
 

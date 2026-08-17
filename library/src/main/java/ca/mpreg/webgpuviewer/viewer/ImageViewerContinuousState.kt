@@ -5,7 +5,7 @@ import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.spring
 import androidx.webgpu.GPUCommandEncoder
 import androidx.webgpu.GPUTexture
-import ca.mpreg.webgpuviewer.transition.TransitionBasic
+import ca.mpreg.webgpuviewer.renderer.RenderPage
 import kotlinx.coroutines.launch
 
 class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
@@ -16,35 +16,60 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
     private val scrollLock = Any()
     var scrollY = 0f
 
+    /**
+     * Layout height of [page] in screen pixels.
+     *
+     * Measured the same way whether or not the page has decoded yet: a placeholder that carries
+     * the real aspect ratio has to occupy exactly the space its decoded self will, or the pages
+     * below it jump the moment it decodes. The guard is only for pages with no width to fit
+     * against (all images null), which have no aspect ratio to scale by.
+     */
     fun getPageHeight(page: ImagePage): Float {
-        if (page.images.all { it == null }) return page.height.toFloat()
-        val fitWidth = width.toFloat() / page.width.toFloat()
-        return page.height * fitWidth
+        val pageWidth = page.width
+        if (pageWidth <= 0) return page.height.toFloat()
+        return page.height * (width.toFloat() / pageWidth)
     }
 
     var currentPageHeight: Float? = null
 
+    /**
+     * Scroll by [deltaPixels], moving the current page as many times as the delta covers.
+     *
+     * A single fling frame can cross more than one page when pages are short, so both walks
+     * loop. Each also stops on a zero-height page, which would otherwise never advance the
+     * position and spin here forever.
+     */
     fun scrollBy(deltaPixels: Float) {
         synchronized(scrollLock) {
             getPage(0) ?: return
 
             scrollY += deltaPixels
 
-            if (scrollY < 0) {
+            // Backwards, while the position sits above the top of the current page.
+            while (scrollY < 0) {
                 if (getPage(-1) == null) {
                     scrollY = 0f
-                } else {
-                    onPageChange?.invoke(-1)
-                    val newPage = getPage(0) ?: return
-                    val pageHeight = getPageHeight(newPage)
-                    currentPageHeight = pageHeight
-                    scrollY += pageHeight
+                    break
                 }
+                onPageChange?.invoke(-1)
+                val newPage = getPage(0) ?: return
+                val newHeight = getPageHeight(newPage)
+                currentPageHeight = newHeight
+                if (newHeight <= 0f) break
+                scrollY += newHeight
             }
 
-            val page = getPage(0) ?: return
-            val pageHeight = getPageHeight(page)
-            if (scrollY > pageHeight) {
+            // Forwards, while it sits past the bottom of it. Stopping at the last page rather
+            // than stepping off the end: with no page to move to, the step would leave the
+            // position short by a page height instead of clamping.
+            while (true) {
+                val page = getPage(0) ?: return
+                val pageHeight = getPageHeight(page)
+                if (scrollY <= pageHeight || pageHeight <= 0f) break
+                if (getPage(1) == null) {
+                    scrollY = pageHeight
+                    break
+                }
                 onPageChange?.invoke(1)
                 val newPage = getPage(0) ?: return
                 currentPageHeight = getPageHeight(newPage)
@@ -53,8 +78,7 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
 
             if (getPage(1) == null) {
                 val page = getPage(0) ?: return
-                val pageHeight = getPageHeight(page)
-                scrollY = scrollY.coerceAtMost(pageHeight)
+                scrollY = scrollY.coerceAtMost(getPageHeight(page))
             }
         }
     }
@@ -101,19 +125,30 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
 
         val images = mutableListOf<Pair<ImagePage, Float>>()
 
-        for (i in 0 until 6) {
-            val page = getPage(i) ?: break
-            val pageScale = screenW / page.width
-            val offsetY = (0.5f * page.height + y / pageScale) / screenH - 0.5f / pageScale
+        // Visible band in unscaled page space. Zoom is centered on the screen, so the
+        // viewport covers screenH / scale of page space around the screen center.
+        val visTop = 0.5f * screenH - screenH / (2f * scale)
+        val visBot = 0.5f * screenH + screenH / (2f * scale)
 
-            if (page.images.any { it != null }) {
+        // Walk forward until the viewport is covered, rather than a fixed page count: zoomed out
+        // or with short pages, more of them fit on screen than any constant would allow for, and
+        // the ones past it would just be missing.
+        var i = 0
+        while (y < visBot) {
+            val page = getPage(i) ?: break
+            val pageHeight = getPageHeight(page)
+
+            if (y + pageHeight > visTop && page.images.any { it != null }) {
+                val pageScale = screenW / page.width
+                val offsetY = (0.5f * page.height + y / pageScale) / screenH - 0.5f / pageScale
                 images.add(Pair(page, offsetY))
             }
 
-            val pageHeight = getPageHeight(page)
+            // A zero-height page never advances y, so stop rather than ask for pages forever.
+            if (pageHeight <= 0f) break
 
             y += pageHeight
-            if (y > screenH / scale + pageHeight) break
+            i++
         }
 
         return ContinuousRenderSnapshot(images, screenW, scale, offsetX)
@@ -125,24 +160,36 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
         snapshot: Any
     ) {
         val s = snapshot as ContinuousRenderSnapshot
-        s.images.forEach { pair ->
-            val page = pair.first
-            if (page.images.any { it != null }) {
-                val pageScale = s.screenW / page.width
-                // Render each image in the page
-                page.images.forEachIndexed { i, image ->
-                    if (image != null) {
-                        val offsetX = if (page.images.size == 2) {
-                            ((0.5f - i) * image.width) / texture.width
-                        } else 0f
-                        TransitionBasic.render(
-                            image,
-                            encoder,
-                            texture,
-                            s.offsetX / pageScale + offsetX,
-                            pair.second,
-                            pageScale * s.scale
-                        )
+        if (s.images.isEmpty()) return
+
+        // All visible images share one render pass. Pages never overlap vertically, so the clear
+        // plus one draw per image writes each pixel once, with no per-image attachment
+        // load/store.
+        renderPass(encoder, texture) { pass ->
+            s.images.forEach { pair ->
+                val page = pair.first
+                // The snapshot was captured on the main thread; the page can have been evicted
+                // since, in which case its image buffers are gone and reading one throws.
+                if (!page.destroyed && page.images.any { it != null }) {
+                    val pageScale = s.screenW / page.width
+                    // Render each image in the page
+                    page.images.forEachIndexed { i, image ->
+                        if (image != null) {
+                            val offsetX = if (page.images.size == 2) {
+                                ((0.5f - i) * image.width) / texture.width
+                            } else 0f
+                            // Sampler shader: several pages can be on screen at once here, and
+                            // the view is usually in motion, so the filtered path's per-pixel
+                            // cost is not worth paying.
+                            RenderPage.renderFast(
+                                pass,
+                                image,
+                                texture,
+                                s.offsetX / pageScale + offsetX,
+                                pair.second,
+                                pageScale * s.scale
+                            )
+                        }
                     }
                 }
             }

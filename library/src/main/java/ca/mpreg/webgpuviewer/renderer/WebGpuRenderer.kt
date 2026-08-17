@@ -24,6 +24,8 @@ import androidx.webgpu.UncapturedErrorCallback
 import androidx.webgpu.WebGpuRuntimeException
 import androidx.webgpu.helper.Util.windowFromSurface
 import androidx.webgpu.helper.initLibrary
+import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer.Companion.withContext
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.runBlocking
@@ -122,6 +124,25 @@ class WebGpuRenderer {
                 }
             }
         }
+
+        /**
+         * Run [block] on the GPU thread *without* taking the render mutex.
+         *
+         * For long resource work that yields as it goes. [withContext] would defeat that: a
+         * [render] call woken by the yield would just block on the mutex and hand the thread
+         * straight back, so the work would still run to completion before the next frame. Without
+         * the mutex the yield actually lets a frame through.
+         *
+         * Only safe for work that either owns its resources outright (an image still being built
+         * and not yet reachable from a page) or that cannot be observed mid-flight. Anything that
+         * has to appear atomically to the renderer belongs in [withContext].
+         */
+        @JvmStatic
+        suspend fun <R> onDispatcher(block: suspend CoroutineScope.(GPUDevice) -> R): R {
+            return withContext(dispatcher) {
+                block(this, device)
+            }
+        }
     }
 
     @Volatile
@@ -190,6 +211,8 @@ class WebGpuRenderer {
                 fn(encoder, texture)
                 device.queue.submit(arrayOf(encoder.finish()))
                 surface.present()
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Log.e("WebGpuRenderer", "Render error", e)
                 // Don't rethrow - allow the app to continue rendering next frame
@@ -201,9 +224,7 @@ class WebGpuRenderer {
             recordFrameTime(frameTime)
             Log.d(
                 "WebGpuRenderer", "Frame: %.2fms | Avg: %.2fms | FPS: %.1f".format(
-                    frameTime / 1_000_000f,
-                    recentAvgFrameTimeMs,
-                    estimatedFps
+                    frameTime / 1_000_000f, recentAvgFrameTimeMs, estimatedFps
                 )
             )
         }

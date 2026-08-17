@@ -14,6 +14,7 @@ import androidx.webgpu.GPUFragmentState
 import androidx.webgpu.GPUPrimitiveState
 import androidx.webgpu.GPURenderPassColorAttachment
 import androidx.webgpu.GPURenderPassDescriptor
+import androidx.webgpu.GPURenderPassEncoder
 import androidx.webgpu.GPURenderPipeline
 import androidx.webgpu.GPURenderPipelineDescriptor
 import androidx.webgpu.GPUShaderModuleDescriptor
@@ -124,6 +125,38 @@ fun Draw.rect(
     y2: Float,
     color: Int
 ) {
+    val pass = encoder.beginRenderPass(
+        GPURenderPassDescriptor(
+            colorAttachments = arrayOf(
+                GPURenderPassColorAttachment(
+                    view = texture.createView(),
+                    loadOp = LoadOp.Load,
+                    storeOp = StoreOp.Store,
+                    clearValue = androidx.webgpu.GPUColor(0.0, 0.0, 0.0, 0.0)
+                )
+            )
+        )
+    )
+    rect(pass, x1, y1, x2, y2, color)
+    pass.end()
+}
+
+/**
+ * Draw a filled rectangle into an existing render pass, so it can share a pass with other draws.
+ * Sets its own pipeline, so the caller must set theirs again before drawing something else.
+ *
+ * A fresh uniform buffer is allocated per call: several rects can share one pass, and
+ * `queue.writeBuffer` is ordered against `submit` rather than against other writes, so a reused
+ * buffer would give every rect in the batch the last colour written.
+ */
+fun Draw.rect(
+    pass: GPURenderPassEncoder,
+    x1: Float,
+    y1: Float,
+    x2: Float,
+    y2: Float,
+    color: Int
+) {
     val r = ((color shr 16) and 0xFF) / 255f
     val g = ((color shr 8) and 0xFF) / 255f
     val b = (color and 0xFF) / 255f
@@ -146,18 +179,6 @@ fun Draw.rect(
     )
     device.queue.writeBuffer(uniformBuffer, 0, byteBuffer)
 
-    val pass = encoder.beginRenderPass(
-        GPURenderPassDescriptor(
-            colorAttachments = arrayOf(
-                GPURenderPassColorAttachment(
-                    view = texture.createView(),
-                    loadOp = LoadOp.Load,
-                    storeOp = StoreOp.Store,
-                    clearValue = androidx.webgpu.GPUColor(0.0, 0.0, 0.0, 0.0)
-                )
-            )
-        )
-    )
     pass.setPipeline(pipeline)
     pass.setBindGroup(
         0, device.createBindGroup(
@@ -169,5 +190,4 @@ fun Draw.rect(
         )
     )
     pass.draw(6)
-    pass.end()
 }
