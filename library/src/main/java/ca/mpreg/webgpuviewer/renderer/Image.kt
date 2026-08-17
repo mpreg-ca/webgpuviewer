@@ -283,8 +283,14 @@ class Image private constructor(
         val adjustedX = x + this.x / dst.width + WebGpuRenderer.offsetX
         val adjustedY = y + this.y / dst.height + WebGpuRenderer.offsetY
 
-        val vx = round(-adjustedX * dst.width + mipmap.width / 2).toInt()
-        val vy = round(-adjustedY * dst.height + mipmap.height / 2).toInt()
+        // View centre in this level's pixels: -adjustedX * dst.width is the offset from the
+        // image centre in level-0 pixels, so it scales by mipmap.scale before adding the level's
+        // half-size. Without the factor the quad window lands up to 2^level too far out - masked
+        // on screen because the guard above almost always ends on a <= 2x2 grid (where there is
+        // only one window), but the tile cache renders 256px targets that legitimately pick fine
+        // levels with large grids.
+        val vx = round(-adjustedX * dst.width * mipmap.scale + mipmap.width / 2).toInt()
+        val vy = round(-adjustedY * dst.height * mipmap.scale + mipmap.height / 2).toInt()
 
         val quad = mipmap.getQuad(vx, vy)
 

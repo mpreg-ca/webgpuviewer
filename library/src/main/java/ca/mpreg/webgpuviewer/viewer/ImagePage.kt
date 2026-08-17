@@ -147,6 +147,10 @@ open class ImagePage(val images: List<Image?>) {
     private var frames: List<Pair<Image, Int>>? = null
     private var currentFrameImage: Image? = null
 
+    /** True while an animation frame loop owns [image]. The tile cache skips animated pages. */
+    val isAnimated: Boolean
+        get() = frames != null
+
     /** Incremented each time the animation frame changes. Used by the render cache to detect stale frames. */
     @Volatile
     var frameVersion: Int = 0

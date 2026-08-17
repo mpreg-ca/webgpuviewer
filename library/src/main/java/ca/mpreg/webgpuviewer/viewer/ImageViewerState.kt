@@ -20,6 +20,7 @@ import androidx.webgpu.GPUTexture
 import androidx.webgpu.LoadOp
 import androidx.webgpu.StoreOp
 import ca.mpreg.webgpuviewer.renderer.RenderPage
+import ca.mpreg.webgpuviewer.renderer.TileRenderer
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer.Companion.dispatcher
 import ca.mpreg.webgpuviewer.transition.Transition
@@ -35,6 +36,8 @@ import kotlinx.coroutines.withContext
 
 open class ImageViewerState(var isVertical: Boolean = false) {
     val renderer = WebGpuRenderer()
+
+    internal val tiles = TileRenderer { invalidate() }
 
     var animationJob: Job? = null
 
@@ -248,13 +251,19 @@ open class ImageViewerState(var isVertical: Boolean = false) {
         encoder: GPUCommandEncoder, texture: GPUTexture, snapshot: Any
     ) {
         val s = snapshot as RenderSnapshot
+        tiles.newFrame()
         if (s.adjacentPage != null && s.offset != 0f) {
             s.transition.render(
                 s.currentPage, s.adjacentPage, encoder, texture, s.offset, s.firstPos, s.currentPos
             )
         } else {
             renderPass(encoder, texture) { pass ->
-                RenderPage.render(pass, s.currentPage, texture, 0f, 0f, 1f)
+                // Fast path underneath, cached filtered tiles on top. Whatever the tile cache
+                // hasn't produced yet still shows, just at sampler quality, and the background
+                // is always the underlay's - drawn live, so its position-dependent fades never
+                // come from a stale tile.
+                RenderPage.renderFast(pass, s.currentPage, texture, 0f, 0f, 1f)
+                tiles.draw(pass, s.currentPage, texture, 0f, 0f, 1f)
             }
         }
     }
@@ -275,6 +284,7 @@ open class ImageViewerState(var isVertical: Boolean = false) {
 
     fun cleanup() {
         animationJob?.cancel()
+        tiles.cleanup()
         renderer.cleanup()
     }
 }

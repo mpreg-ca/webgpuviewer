@@ -160,6 +160,7 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
         snapshot: Any
     ) {
         val s = snapshot as ContinuousRenderSnapshot
+        tiles.newFrame()
         if (s.images.isEmpty()) return
 
         // All visible images share one render pass. Pages never overlap vertically, so the clear
@@ -178,17 +179,14 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
                             val offsetX = if (page.images.size == 2) {
                                 ((0.5f - i) * image.width) / texture.width
                             } else 0f
-                            // Sampler shader: several pages can be on screen at once here, and
-                            // the view is usually in motion, so the filtered path's per-pixel
-                            // cost is not worth paying.
-                            RenderPage.renderFast(
-                                pass,
-                                image,
-                                texture,
-                                s.offsetX / pageScale + offsetX,
-                                pair.second,
-                                pageScale * s.scale
-                            )
+                            // Sampler shader underneath: several pages can be on screen at once
+                            // here, and the view is usually in motion, so the filtered path's
+                            // per-pixel cost is not worth paying every frame. The tile cache
+                            // draws the filtered version on top as it fills in.
+                            val x = s.offsetX / pageScale + offsetX
+                            val scale = pageScale * s.scale
+                            RenderPage.renderFast(pass, image, texture, x, pair.second, scale)
+                            tiles.draw(pass, page, image, texture, x, pair.second, scale)
                         }
                     }
                 }
