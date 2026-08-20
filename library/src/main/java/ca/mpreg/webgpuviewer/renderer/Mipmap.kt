@@ -1,6 +1,9 @@
 package ca.mpreg.webgpuviewer.renderer
 
 import android.util.Log
+import androidx.webgpu.BufferUsage
+import androidx.webgpu.GPUBuffer
+import androidx.webgpu.GPUBufferDescriptor
 import androidx.webgpu.GPUExtent3D
 import androidx.webgpu.GPUOrigin3D
 import androidx.webgpu.GPUTexelCopyBufferLayout
@@ -173,6 +176,8 @@ class Mipmap(
         lastQuad = null
         lastQuadTX = -1
         lastQuadTY = -1
+        tileUniforms?.forEach { it?.destroy() }
+        tileUniforms = null
         textureViews.clear()
         tileViews.clear()
         textures.forEach { tex -> tex.destroy() }
@@ -210,6 +215,68 @@ class Mipmap(
     class Quad(
         val tiles: List<GPUTexture>, val tileViews: List<GPUTextureView>, val x: Int, val y: Int
     )
+
+    /**
+     * One tile overlapping a queried rect, at its own pixel offset within the mipmap. [uniform] is
+     * its own persistent placement buffer - see [tileUniforms] for why it needs one of its own.
+     */
+    class TileRect(
+        val texture: GPUTexture,
+        val view: GPUTextureView,
+        val x: Int,
+        val y: Int,
+        val uniform: GPUBuffer
+    )
+
+    /**
+     * One small uniform buffer per physical tile, created on first use and rewritten every frame
+     * that tile is drawn - never shared between tiles. `writeBuffer` calls all land before any
+     * command buffer submitted afterwards executes, so a shared buffer would let the last of
+     * several tiles drawn in one frame win for all of them; one buffer per tile has no such race.
+     */
+    private var tileUniforms: Array<GPUBuffer?>? = null
+
+    private fun tileUniformFor(index: Int): GPUBuffer {
+        val arr = tileUniforms ?: arrayOfNulls<GPUBuffer>(textures.size).also { tileUniforms = it }
+        return arr[index] ?: device.createBuffer(
+            GPUBufferDescriptor(size = 32, usage = BufferUsage.Uniform or BufferUsage.CopyDst)
+        ).also { arr[index] = it }
+    }
+
+    /**
+     * Every tile overlapping [left]..[right] by [top]..[bottom] (mipmap pixels) - unlike [getQuad]
+     * which always hands back exactly 2x2, letting a caller draw each tile separately instead of
+     * needing everything to fit one window. See [Image.prepareTilesForRender].
+     */
+    fun tilesInRect(left: Float, top: Float, right: Float, bottom: Float): List<TileRect> {
+        val l = left.coerceIn(0f, width.toFloat())
+        val t = top.coerceIn(0f, height.toFloat())
+        val r = right.coerceIn(0f, width.toFloat())
+        val b = bottom.coerceIn(0f, height.toFloat())
+        if (l >= r || t >= b) return emptyList()
+
+        val c0 = (l / tilesize).toInt().coerceIn(0, tilesCols - 1)
+        val c1 = ((r - 1f) / tilesize).toInt().coerceIn(0, tilesCols - 1)
+        val row0 = (t / tilesize).toInt().coerceIn(0, tilesRows - 1)
+        val row1 = ((b - 1f) / tilesize).toInt().coerceIn(0, tilesRows - 1)
+
+        val result = ArrayList<TileRect>((c1 - c0 + 1) * (row1 - row0 + 1))
+        for (row in row0..row1) {
+            for (col in c0..c1) {
+                val idx = row * tilesCols + col
+                result.add(
+                    TileRect(
+                        textures[idx],
+                        textureViews[idx],
+                        col * tilesize,
+                        row * tilesize,
+                        tileUniformFor(idx)
+                    )
+                )
+            }
+        }
+        return result
+    }
 
     // Cache the last computed quad to avoid allocations when panning within the same tile region
     private var lastQuadTX = -1

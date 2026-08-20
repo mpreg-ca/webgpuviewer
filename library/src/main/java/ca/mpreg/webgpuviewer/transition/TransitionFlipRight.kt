@@ -18,7 +18,7 @@ import androidx.webgpu.LoadOp
 import androidx.webgpu.StoreOp
 import ca.mpreg.webgpuviewer.draw.Draw
 import ca.mpreg.webgpuviewer.draw.rect
-import ca.mpreg.webgpuviewer.renderer.RenderPage
+import ca.mpreg.webgpuviewer.renderer.TileRenderer
 import ca.mpreg.webgpuviewer.viewer.ImagePage
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -29,8 +29,7 @@ import kotlin.math.atan2
  * Page flip in the other direction: the crease sweeps in from the left.
  *
  * Same shape as [TransitionFlipLeft] - each page is rendered flat into a cached screen-sized
- * texture once, and only the fold is per-frame - so the flat render can afford [RenderPage]'s
- * sharp filter.
+ * texture once, and only the fold is per-frame.
  */
 object TransitionFlipRight : Transition() {
     override val premultipliedOutput = true
@@ -173,13 +172,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         frac: Float,
         pos1: Offset,
         pos2: Offset,
+        tiles: TileRenderer,
     ) {
         val cached1 = getCachedTexture(page1, true, encoder, dst.width, dst.height) { pass, tex ->
-            RenderPage.render(pass, page1, tex, 0f, 0f, 1f)
+            tiles.renderFullyTiled(pass, page1, tex)
         }
 
         val cached2 = getCachedTexture(page2, false, encoder, dst.width, dst.height) { pass, tex ->
-            RenderPage.render(pass, page2, tex, 0f, 0f, 1f)
+            tiles.renderFullyTiled(pass, page2, tex)
         }
 
         val dy = pos2.y - pos1.y

@@ -20,35 +20,32 @@ import androidx.webgpu.PrimitiveTopology.Companion.TriangleList
 import androidx.webgpu.TextureFormat
 import ca.mpreg.webgpuviewer.draw.Draw
 import ca.mpreg.webgpuviewer.draw.rect
+import ca.mpreg.webgpuviewer.renderer.RenderPage.TILE_SAMPLER_FS
+import ca.mpreg.webgpuviewer.renderer.RenderPage.draw
 import ca.mpreg.webgpuviewer.renderer.RenderPage.render
 import ca.mpreg.webgpuviewer.renderer.RenderPage.renderFast
+import ca.mpreg.webgpuviewer.renderer.RenderPage.renderImage
+import ca.mpreg.webgpuviewer.renderer.RenderPage.renderPlain
 import ca.mpreg.webgpuviewer.viewer.ImagePage
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * Draws a page or a single image into a render pass.
+ * Draws a page or a single image into a render pass. Every path that draws a page's live content
+ * comes through here: the continuous viewer and the paged viewer when no page turn is in flight.
  *
- * Every path that draws a page comes through here: the continuous viewer, the paged viewer when no
- * page turn is in flight, and the cached transitions when they render a page into their cache. It
- * is deliberately not a [ca.mpreg.webgpuviewer.transition.Transition] - a transition takes two
- * pages and a fraction and owns several passes, while this takes one page and a placement and
- * draws it wherever the caller says.
+ * Three shaders, picked per call:
+ *  - [render] - box filter minifying, Catmull-Rom magnifying, in linear light. Sharp and
+ *    expensive, so bound to a fixed 2x2-tile window - safe only because its one caller,
+ *    [TileRenderer]'s tile generation, always targets a single tile-sized destination.
+ *  - [renderFast] - one bilinear tap per pixel, also linear-light (so a [TileRenderer] tile
+ *    popping in over it never shows a brightness seam). Draws every tile the viewport overlaps
+ *    separately, so the viewport can be any size or position without a window falling short.
+ *  - [renderPlain] is [renderFast] without the sRGB<->linear round trip, for
+ *    [ImagePage.highQuality] false content where that correctness isn't worth the cost.
  *
- * It carries two shaders, picked per call, both resolving in linear light so a tile from
- * [TileRenderer] popping in over [renderFast]'s output never shows a brightness seam:
- *
- *  - [render] resolves with a box filter when minifying and Catmull-Rom when magnifying. Sharp,
- *    and expensive - the box filter alone reads scale_factor^2 texels per output pixel, each
- *    through a pow()-based sRGB round trip.
- *  - [renderFast] resolves with one manual bilinear tap per pixel: decode four texels, lerp,
- *    encode back. Cheaper than [render] - one lerp instead of a whole filter kernel - but no
- *    longer the single hardware fetch a plain sampler would give, since decoding requires reading
- *    the texels by hand. [totalLoad] addresses the whole 2x2 tile quad as one surface, so this is
- *    the same four taps whether or not the footprint straddles a tile boundary.
- *
- * Everything except the sampling differs by nothing, so the two share their header and vertex
- * stage and diverge only in the fragment stage.
+ * A cached transition's own snapshot is instead composed from [TileRenderer]'s already-generated
+ * tiles - see [TileRenderer.blitIfFullyCovered] and [TileRenderer.renderFullyTiled].
  */
 object RenderPage {
     private val device get() = WebGpuRenderer.device
@@ -58,13 +55,15 @@ object RenderPage {
         ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder())
     }
 
-    /** One of the two shaders, with the pipeline built from it on first use. */
+    /** One of the three shaders, pipeline built on first use. */
     private class Variant(build: () -> GPURenderPipeline) {
         val pipeline: GPURenderPipeline by lazy(build)
     }
 
-    private val samplerVariant = Variant { buildPipeline(HEADER + VS_MAIN + SAMPLER_FS) }
+    private val samplerVariant =
+        Variant { buildPipeline(TILE_HEADER + TILE_VS_MAIN + TILE_SAMPLER_FS) }
     private val filteredVariant = Variant { buildPipeline(HEADER + VS_MAIN + FILTERED_FS) }
+    private val plainVariant = Variant { buildPipeline(TILE_HEADER + TILE_VS_MAIN + TILE_PLAIN_FS) }
 
     private fun buildPipeline(code: String): GPURenderPipeline {
         val shaderModule = device.createShaderModule(
@@ -209,21 +208,77 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 """
 
     /**
-     * Fragment stage for [renderFast]: one bilinear resolve per pixel, in linear light.
-     *
-     * The hardware sampler filters the stored sRGB values directly, which is wrong wherever two
-     * texels of different brightness mix - the result reads darker than blending after decoding
-     * would. Doing the decode/lerp/encode by hand instead means every tap goes through
-     * [totalLoad] rather than the sampler, so there is no fast single-fetch path left to take:
-     * unlike [renderFast]'s old sampler-only shortcut, every pixel here pays four loads and the
-     * conversions. What stays cheap is that this always was cross-tile-safe - [totalLoad]
-     * addresses the whole quad, so a footprint spanning two tiles is no different from one that
-     * doesn't.
+     * Uniforms, single-texture binding and vertex stage shared by [renderFast]/[renderPlain]'s
+     * per-tile draws - no [tile_size]/[tiles_width]/[tiles_height] bookkeeping, since a draw
+     * through here is always exactly one tile.
      */
-    private const val SAMPLER_FS = """
-fn sampleQuad(uv: vec2<f32>) -> vec4<f32> {
-    let size = vec2<f32>(totalDimensions());
-    let pos = uv * size;
+    private const val TILE_HEADER = """
+struct TileUniforms {
+    offset: vec2<f32>,
+    scale: f32,
+    dst_width: f32,
+    dst_height: f32,
+}
+
+@group(0) @binding(0) var<uniform> transform: TileUniforms;
+@group(0) @binding(1) var src_tex: texture_2d<f32>;
+
+struct TileVertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+fn tile_to_linear_exact(srgb: vec4<f32>) -> vec4<f32> {
+    let c = max(srgb.rgb, vec3<f32>(0.0));
+    let lower = c / vec3<f32>(12.92);
+    let higher = pow((c + vec3<f32>(0.055)) / vec3<f32>(1.055), vec3<f32>(2.4));
+    let cond = c <= vec3<f32>(0.04045);
+    return vec4(select(higher, lower, cond), srgb.a);
+}
+
+fn tile_to_srgb_exact(linear_rgb: vec4<f32>) -> vec4<f32> {
+    let c = max(linear_rgb.rgb, vec3<f32>(0.0));
+    let lower = c * vec3<f32>(12.92);
+    let higher = vec3<f32>(1.055) * pow(c, vec3<f32>(1.0 / 2.4)) - vec3<f32>(0.055);
+    let cond = c <= vec3<f32>(0.0031308);
+    return vec4(select(higher, lower, cond), linear_rgb.a);
+}
+"""
+
+    private const val TILE_VS_MAIN = """
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_index: u32) -> TileVertexOutput {
+    var uvs = array<vec2<f32>, 6>(
+        vec2<f32>(0.0, 0.0),
+        vec2<f32>(0.0, 1.0),
+        vec2<f32>(1.0, 0.0),
+        vec2<f32>(1.0, 0.0),
+        vec2<f32>(0.0, 1.0),
+        vec2<f32>(1.0, 1.0)
+    );
+
+    let uv = uvs[vertex_index];
+    let dst_size_f = vec2<f32>(transform.dst_width, transform.dst_height);
+    let src_size_f = vec2<f32>(textureDimensions(src_tex));
+    let pixel_pos = transform.scale * (transform.offset * dst_size_f + uv * src_size_f);
+
+    var out: TileVertexOutput;
+    out.position = vec4<f32>(
+        (pixel_pos.x / dst_size_f.x) * 2.0 - 1.0,
+        1.0 - (pixel_pos.y / dst_size_f.y) * 2.0,
+        0.0, 1.0
+    );
+    out.uv = uv;
+    return out;
+}
+"""
+
+    /** Fragment stage for [renderFast]: one bilinear resolve per pixel, in linear light. */
+    private const val TILE_SAMPLER_FS = """
+@fragment
+fn fs_main(in: TileVertexOutput) -> @location(0) vec4<f32> {
+    let size = vec2<f32>(textureDimensions(src_tex));
+    let pos = in.uv * size;
     let p = pos - 0.5;
     let base = floor(p);
 
@@ -232,20 +287,43 @@ fn sampleQuad(uv: vec2<f32>) -> vec4<f32> {
     let i1 = clamp(vec2<i32>(base) + 1, vec2<i32>(0), max_coord);
     let f = p - base;
 
-    let c00 = to_linear_exact(totalLoad(vec2<i32>(i0.x, i0.y)));
-    let c10 = to_linear_exact(totalLoad(vec2<i32>(i1.x, i0.y)));
-    let c01 = to_linear_exact(totalLoad(vec2<i32>(i0.x, i1.y)));
-    let c11 = to_linear_exact(totalLoad(vec2<i32>(i1.x, i1.y)));
+    let c00 = tile_to_linear_exact(textureLoad(src_tex, vec2<i32>(i0.x, i0.y), 0));
+    let c10 = tile_to_linear_exact(textureLoad(src_tex, vec2<i32>(i1.x, i0.y), 0));
+    let c01 = tile_to_linear_exact(textureLoad(src_tex, vec2<i32>(i0.x, i1.y), 0));
+    let c11 = tile_to_linear_exact(textureLoad(src_tex, vec2<i32>(i1.x, i1.y), 0));
 
     let linear_col = mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
-    return to_srgb_exact(linear_col);
-}
-
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let col = sampleQuad(in.uv);
+    let col = tile_to_srgb_exact(linear_col);
     return vec4<f32>(col.rgb * col.a, col.a);
-}"""
+}
+"""
+
+    /**
+     * Fragment stage for [renderPlain]: [TILE_SAMPLER_FS]'s bilinear tap with the sRGB<->linear
+     * round trip removed - see the class doc for the tradeoff this makes.
+     */
+    private const val TILE_PLAIN_FS = """
+@fragment
+fn fs_main(in: TileVertexOutput) -> @location(0) vec4<f32> {
+    let size = vec2<f32>(textureDimensions(src_tex));
+    let pos = in.uv * size;
+    let p = pos - 0.5;
+    let base = floor(p);
+
+    let max_coord = vec2<i32>(size) - 1;
+    let i0 = clamp(vec2<i32>(base), vec2<i32>(0), max_coord);
+    let i1 = clamp(vec2<i32>(base) + 1, vec2<i32>(0), max_coord);
+    let f = p - base;
+
+    let c00 = textureLoad(src_tex, vec2<i32>(i0.x, i0.y), 0);
+    let c10 = textureLoad(src_tex, vec2<i32>(i1.x, i0.y), 0);
+    let c01 = textureLoad(src_tex, vec2<i32>(i0.x, i1.y), 0);
+    let c11 = textureLoad(src_tex, vec2<i32>(i1.x, i1.y), 0);
+
+    let col = mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
+    return vec4<f32>(col.rgb * col.a, col.a);
+}
+"""
 
     /** Fragment stage for [render]: box filter when minifying, Catmull-Rom when magnifying. */
     private const val FILTERED_FS = """
@@ -494,11 +572,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 }"""
 
     /**
-     * Draw an image into [pass] with the filtered shader.
-     *
-     * Takes a pass rather than an encoder so that everything a frame draws can share one - a pass
-     * per image costs an attachment load/store each, which dominates frame cost on tile-based
-     * GPUs. Opening and ending the pass is the caller's job.
+     * Draw an image into [pass] with the filtered shader. Takes a pass rather than an encoder so
+     * a whole frame's draws can share one - a pass per image costs an attachment load/store each,
+     * which dominates frame cost on tile-based GPUs. Opening/ending the pass is the caller's job.
      */
     internal fun render(
         pass: GPURenderPassEncoder, image: Image, dst: GPUTexture, x: Float, y: Float, scale: Float
@@ -507,20 +583,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     /** Draw an image into [pass] with the sampler shader. */
     internal fun renderFast(
         pass: GPURenderPassEncoder, image: Image, dst: GPUTexture, x: Float, y: Float, scale: Float
-    ) = renderImage(pass, image, dst, x, y, scale, samplerVariant)
+    ) = renderImageTiled(pass, image, dst, x, y, scale, samplerVariant)
 
-    /**
-     * Draw a page into [pass] with the filtered shader, each image placed by its position (LEFT,
-     * RIGHT, or SINGLE) and backed by its background colour.
-     */
-    internal fun render(
-        pass: GPURenderPassEncoder,
-        page: ImagePage,
-        dst: GPUTexture,
-        x: Float,
-        y: Float,
-        scale: Float
-    ) = renderPage(pass, page, dst, x, y, scale, filteredVariant)
+    /** Draw an image into [pass] with the plain (non-linear-light) sampler shader. */
+    internal fun renderPlain(
+        pass: GPURenderPassEncoder, image: Image, dst: GPUTexture, x: Float, y: Float, scale: Float
+    ) = renderImageTiled(pass, image, dst, x, y, scale, plainVariant)
 
     /** Draw a page into [pass] with the sampler shader. */
     internal fun renderFast(
@@ -531,6 +599,30 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         y: Float,
         scale: Float
     ) = renderPage(pass, page, dst, x, y, scale, samplerVariant)
+
+    /** Draw a page into [pass] with the plain (non-linear-light) sampler shader. */
+    internal fun renderPlain(
+        pass: GPURenderPassEncoder,
+        page: ImagePage,
+        dst: GPUTexture,
+        x: Float,
+        y: Float,
+        scale: Float
+    ) = renderPage(pass, page, dst, x, y, scale, plainVariant)
+
+    /**
+     * Draw just a page's per-image background colour, skipping the image itself - for a caller
+     * that knows [TileRenderer] already covers it and can skip [renderFast]. The background's
+     * alpha depends on live pan/scale, so it's drawn every frame regardless of tile coverage.
+     */
+    internal fun renderBackground(
+        pass: GPURenderPassEncoder,
+        page: ImagePage,
+        dst: GPUTexture,
+        x: Float,
+        y: Float,
+        scale: Float
+    ) = renderPage(pass, page, dst, x, y, scale, null)
 
     private fun renderImage(
         pass: GPURenderPassEncoder,
@@ -545,6 +637,21 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         draw(pass, image, dst, res, variant)
     }
 
+    /** As [renderImage], for [renderFast]/[renderPlain] - draws every tile separately. */
+    private fun renderImageTiled(
+        pass: GPURenderPassEncoder,
+        image: Image,
+        dst: GPUTexture,
+        x: Float,
+        y: Float,
+        scale: Float,
+        variant: Variant
+    ) {
+        for (tile in image.prepareTilesForRender(dst, x, y, scale)) {
+            drawTile(pass, dst, tile, variant)
+        }
+    }
+
     private fun renderPage(
         pass: GPURenderPassEncoder,
         page: ImagePage,
@@ -552,7 +659,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         x: Float,
         y: Float,
         scale: Float,
-        variant: Variant
+        variant: Variant?
     ) {
         // A snapshot is captured on the main thread and drawn later, so the page may have been
         // evicted in between. Its images' buffers are already destroyed, and touching one throws.
@@ -570,9 +677,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 Image.Position.RIGHT -> (0.5f * image.width) / dst.width
                 Image.Position.SINGLE -> 0f
             }
-            val res =
-                image.prepareForRender(dst, page.x + x + offsetX, page.y + y, page.scale * scale)
-                    ?: return@forEach
+            if (image.mipmaps.isEmpty()) return@forEach
+            val placeX = page.x + x + offsetX
+            val placeY = page.y + y
+            val placeScale = page.scale * scale
+            val rect = image.placement(dst, placeX, placeY, placeScale)
 
             // Draw background color behind the image
             val parent = page.parent
@@ -609,10 +718,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             val a = (origA * bgAlpha).toInt()
 
             if (a > 0) {
-                val srcWidth = res.mipmap.width.toFloat()
-                val finalScale = res.scale
-                val x1 = finalScale * res.x
-                val x2 = finalScale * (res.x + srcWidth / dst.width)
+                val x1 = rect[0]
+                val x2 = rect[2]
                 val origR = (image.backgroundColor shr 16) and 0xFF
                 val origG = (image.backgroundColor shr 8) and 0xFF
                 val origB = image.backgroundColor and 0xFF
@@ -623,8 +730,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 Draw.rect(pass, x1, 0f, x2, 1f, bgColor)
             }
 
-            // Render the image on top
-            draw(pass, image, dst, res, variant)
+            // Render the image on top, one tile at a time - skipped when variant is null
+            // (background-only draw, used when TileRenderer already covers the image itself).
+            if (variant != null) {
+                for (tile in image.prepareTilesForRender(dst, placeX, placeY, placeScale)) {
+                    drawTile(pass, dst, tile, variant)
+                }
+            }
         }
     }
 
@@ -663,6 +775,39 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             )
         )
 
+        pass.draw(6)
+    }
+
+    /**
+     * Draw one tile from [Image.prepareTilesForRender], into its own persistent uniform buffer
+     * rather than the shared scratch one [draw] uses - see [Mipmap.TileRect]'s doc for why.
+     */
+    private fun drawTile(
+        pass: GPURenderPassEncoder, dst: GPUTexture, tile: Image.TileForDraw, variant: Variant
+    ) {
+        val byteBuffer = byteBufferLocal.get()
+        byteBuffer.clear()
+        byteBuffer.putFloat(tile.x)
+        byteBuffer.putFloat(tile.y)
+        byteBuffer.putFloat(tile.scale)
+        byteBuffer.putFloat(dst.width.toFloat())
+        byteBuffer.putFloat(dst.height.toFloat())
+        byteBuffer.flip()
+
+        device.queue.writeBuffer(tile.uniform, 0, byteBuffer)
+
+        val pipeline = variant.pipeline
+        pass.setPipeline(pipeline)
+        pass.setBindGroup(
+            0, device.createBindGroup(
+                GPUBindGroupDescriptor(
+                    layout = pipeline.getBindGroupLayout(0), entries = arrayOf(
+                        GPUBindGroupEntry(0, buffer = tile.uniform),
+                        GPUBindGroupEntry(1, textureView = tile.view),
+                    )
+                )
+            )
+        )
         pass.draw(6)
     }
 }

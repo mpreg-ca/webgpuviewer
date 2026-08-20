@@ -22,7 +22,7 @@ import androidx.webgpu.LoadOp
 import androidx.webgpu.PrimitiveTopology.Companion.TriangleList
 import androidx.webgpu.StoreOp
 import androidx.webgpu.TextureFormat
-import ca.mpreg.webgpuviewer.renderer.RenderPage
+import ca.mpreg.webgpuviewer.renderer.TileRenderer
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
 import ca.mpreg.webgpuviewer.viewer.ImagePage
 import java.nio.ByteBuffer
@@ -173,13 +173,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         frac: Float,
         pos1: Offset,
         pos2: Offset,
+        tiles: TileRenderer,
     ) {
         val cached1 = getCachedTexture(page1, true, encoder, dst.width, dst.height) { pass, tex ->
-            RenderPage.render(pass, page1, tex, 0f, 0f, 1f)
+            tiles.renderFullyTiled(pass, page1, tex)
         }
 
         val cached2 = getCachedTexture(page2, false, encoder, dst.width, dst.height) { pass, tex ->
-            RenderPage.render(pass, page2, tex, 0f, 0f, 1f)
+            tiles.renderFullyTiled(pass, page2, tex)
         }
 
         // frac goes from 0 to 1 (forward) or 0 to -1 (backward)

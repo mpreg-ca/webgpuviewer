@@ -5,6 +5,7 @@ import androidx.webgpu.GPUCommandEncoder
 import androidx.webgpu.GPUTexture
 import ca.mpreg.webgpuviewer.draw.Draw
 import ca.mpreg.webgpuviewer.draw.clear
+import ca.mpreg.webgpuviewer.renderer.TileRenderer
 import ca.mpreg.webgpuviewer.viewer.ImagePage
 import kotlin.math.cos
 import kotlin.math.sin
@@ -13,8 +14,6 @@ object TransitionCubeOuter : Transition() {
     private const val HALF_PI = (Math.PI / 2.0).toFloat()
     private const val FOV = 4f
     private const val FACE_DEPTH = FOV / (FOV - 1f)
-    private const val PHASE_IN_END = 0.1f
-    private const val PHASE_OUT_START = 0.9f
 
     private fun mat4(
         m00: Float, m01: Float, m02: Float, m03: Float,
@@ -112,15 +111,12 @@ object TransitionCubeOuter : Transition() {
         frac: Float,
         pos1: Offset,
         pos2: Offset,
+        tiles: TileRenderer,
     ) {
         // CubeOuter rotates opposite to Cube, hence negated frac
         val t = if (frac < 0f) -frac else 1f - frac
 
-        val rotAngle = when {
-            t < PHASE_IN_END -> 0f
-            t > PHASE_OUT_START -> HALF_PI
-            else -> (t - PHASE_IN_END) / (PHASE_OUT_START - PHASE_IN_END) * HALF_PI
-        }
+        val rotAngle = t * HALF_PI
 
         val screenAspect = dst.width.toFloat() / dst.height.toFloat()
 
@@ -154,11 +150,11 @@ object TransitionCubeOuter : Transition() {
         Draw.clear(encoder, dst, 0)
 
         if (t < 0.5f) {
-            TransitionCube.face(sidePage, !frontIsPage1, encoder, dst, sideMat)
-            TransitionCube.face(frontPage, frontIsPage1, encoder, dst, frontMat)
+            TransitionCube.face(sidePage, !frontIsPage1, encoder, dst, sideMat, tiles)
+            TransitionCube.face(frontPage, frontIsPage1, encoder, dst, frontMat, tiles)
         } else {
-            TransitionCube.face(frontPage, frontIsPage1, encoder, dst, frontMat)
-            TransitionCube.face(sidePage, !frontIsPage1, encoder, dst, sideMat)
+            TransitionCube.face(frontPage, frontIsPage1, encoder, dst, frontMat, tiles)
+            TransitionCube.face(sidePage, !frontIsPage1, encoder, dst, sideMat, tiles)
         }
     }
 }

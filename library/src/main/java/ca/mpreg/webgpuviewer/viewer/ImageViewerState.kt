@@ -34,7 +34,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-open class ImageViewerState(var isVertical: Boolean = false) {
+open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boolean = false) {
     val renderer = WebGpuRenderer()
 
     internal val tiles = TileRenderer { invalidate() }
@@ -85,15 +85,19 @@ open class ImageViewerState(var isVertical: Boolean = false) {
             if (!haveNext) v = v.fastCoerceAtMost(1f)
             if (!havePrev) v = v.fastCoerceAtLeast(-1f)
 
-            // Invalidate transition cache when transition ends
-            if (field != 0f && v == 0f) {
-                Transition.invalidateCache()
-            }
+            val settling = field != 0f && v == 0f
 
             field = v
 
             if (pageDelta != 0) {
-                onPageChange?.invoke(pageDelta)
+                onPageChange?.invoke(if (isReversed) -pageDelta else pageDelta)
+            }
+
+            // Rotate rather than invalidate: onPageChange has already updated whatever backs
+            // getPage, so slot 2 often already holds a valid render of this new current page.
+            if (settling) {
+                val current = getPage(0)
+                if (current != null) Transition.rotateCacheOnPageChange(current) else Transition.invalidateCache()
             }
         }
 
@@ -111,8 +115,7 @@ open class ImageViewerState(var isVertical: Boolean = false) {
             try {
                 Animatable(direction.toFloat()).animateTo(
                     0f, animationSpec = spring(
-                        stiffness = Spring.StiffnessMediumLow,
-                        visibilityThreshold = 0.001f
+                        stiffness = Spring.StiffnessMediumLow, visibilityThreshold = 0.001f
                     )
                 ) {
                     setPageOffsetDirect(value)
@@ -128,8 +131,8 @@ open class ImageViewerState(var isVertical: Boolean = false) {
         }
     }
 
-    val havePrev get() = getPage(-1) != null
-    val haveNext get() = getPage(1) != null
+    val havePrev get() = getPage(if (isReversed) 1 else -1) != null
+    val haveNext get() = getPage(if (isReversed) -1 else 1) != null
 
     var fetchPage: ((Int) -> ImagePage?)? = null
 
@@ -143,6 +146,10 @@ open class ImageViewerState(var isVertical: Boolean = false) {
     // Pre-allocated invalidate lambda - same for the lifetime of this state
     private val invalidateCallback: () -> Unit = { invalidate() }
 
+    /**
+     * The page [index] steps from current. [isReversed] plays no part here - [fetchPage] and
+     * [onPageChange] are what decide what a step actually means.
+     */
     fun getPage(index: Int): ImagePage? {
         return fetchPage?.invoke(index)?.also { page ->
             if (page.parent !== this) page.parent = this
@@ -195,15 +202,21 @@ open class ImageViewerState(var isVertical: Boolean = false) {
             offset == 0f -> null
             // Use override if set (for far navigation)
             transitionFromPage != null -> transitionFromPage
-            offset > 0f -> getPage(1)
-            else -> getPage(-1)
+            offset > 0f -> getPage(if (isReversed) -1 else 1)
+            else -> getPage(if (isReversed) 1 else -1)
         }
-        return RenderSnapshot(currentPage, adjacentPage, offset, transition, firstPos, currentPos)
+        // Only used to pre-warm the transition cache while at rest (see renderSnapshot), so
+        // there's no need to look it up while a turn is already in progress.
+        val nextPage = if (offset == 0f) getPage(1) else null
+        return RenderSnapshot(
+            currentPage, adjacentPage, nextPage, offset, transition, firstPos, currentPos
+        )
     }
 
     private class RenderSnapshot(
         val currentPage: ImagePage,
         val adjacentPage: ImagePage?,
+        val nextPage: ImagePage?,
         val offset: Float,
         val transition: Transition,
         val firstPos: Offset,
@@ -213,20 +226,15 @@ open class ImageViewerState(var isVertical: Boolean = false) {
     /**
      * Run [block] against a render pass over [texture], ending the pass afterwards either way.
      *
-     * Pass ownership sits here rather than inside the transitions: every draw a frame makes into
-     * the surface belongs in one pass, and only the code that knows what the whole frame contains
-     * can decide where that pass starts and ends. Subclasses get a pass to draw into and owe
-     * nothing back - a draw that throws still leaves the pass closed, and [WebGpuRenderer.render]
-     * turns the throw into a dropped frame, so there is no need to guard the call site.
+     * Pass ownership sits here rather than inside the transitions, since only the code that knows
+     * the whole frame's contents can decide where the pass starts and ends. A draw that throws
+     * still leaves the pass closed, and [WebGpuRenderer.render] turns it into a dropped frame.
      *
-     * Always clears. `getCurrentTexture` returns a rotating set of buffers, so loading gives back
-     * whatever this one held several frames ago rather than the last frame - and nothing here
-     * paints every pixel, so that stale content would show through around the page.
+     * Always clears: `getCurrentTexture` rotates buffers, so loading would show stale content
+     * from several frames ago around the page.
      */
     protected fun renderPass(
-        encoder: GPUCommandEncoder,
-        texture: GPUTexture,
-        block: (GPURenderPassEncoder) -> Unit
+        encoder: GPUCommandEncoder, texture: GPUTexture, block: (GPURenderPassEncoder) -> Unit
     ) {
         val pass = encoder.beginRenderPass(
             GPURenderPassDescriptor(
@@ -254,16 +262,62 @@ open class ImageViewerState(var isVertical: Boolean = false) {
         tiles.newFrame()
         if (s.adjacentPage != null && s.offset != 0f) {
             s.transition.render(
-                s.currentPage, s.adjacentPage, encoder, texture, s.offset, s.firstPos, s.currentPos
+                s.currentPage,
+                s.adjacentPage,
+                encoder,
+                texture,
+                s.offset,
+                s.firstPos,
+                s.currentPos,
+                tiles
             )
         } else {
+            // Computed once and reused below - isFullyCoveredCore already treats a false
+            // highQuality as "not covered", so the plain-sampler branch just ends up unused.
+            val covered = tiles.isFullyCovered(s.currentPage, texture, 0f, 0f, 1f)
+
             renderPass(encoder, texture) { pass ->
-                // Fast path underneath, cached filtered tiles on top. Whatever the tile cache
-                // hasn't produced yet still shows, just at sampler quality, and the background
-                // is always the underlay's - drawn live, so its position-dependent fades never
-                // come from a stale tile.
-                RenderPage.renderFast(pass, s.currentPage, texture, 0f, 0f, 1f)
+                // Content not worth the tile cache's sharpness or the fast path's linear-light
+                // correctness (see ImagePage.highQuality) skips both entirely - just the plain
+                // sampler, every frame.
+                if (!s.currentPage.highQuality) {
+                    RenderPage.renderPlain(pass, s.currentPage, texture, 0f, 0f, 1f)
+                    return@renderPass
+                }
+                // Fast path underneath, cached filtered tiles on top; whatever the cache hasn't
+                // produced yet still shows at sampler quality. The background is always drawn
+                // live since its fades are position-dependent, never from a stale tile - skipped
+                // only once tiles alone cover the whole page.
+                if (covered) {
+                    RenderPage.renderBackground(pass, s.currentPage, texture, 0f, 0f, 1f)
+                } else {
+                    RenderPage.renderFast(pass, s.currentPage, texture, 0f, 0f, 1f)
+                }
                 tiles.draw(pass, s.currentPage, texture, 0f, 0f, 1f)
+            }
+
+            // Opportunistic background work, strictly in order: current tiles (above) > blit them
+            // to the transition cache's current-page slot > next page's tiles > blit those to the
+            // next-page slot. Each stage waits for the previous to actually finish, not just be
+            // requested, so next's tiles never compete with current's pending transition blit for
+            // the worker's attention - see TileRenderer.prewarmTransition/prewarm. Gated on atHome
+            // since the cache is keyed by (x, y, scale), and warming at a pan/zoom the user won't
+            // stay at would be wasted work.
+            if (s.currentPage.highQuality && !s.currentPage.isAnimated && s.currentPage.atHome && covered) {
+                val currentTransitionWarm = Transition.isCached(s.currentPage, true)
+                if (!currentTransitionWarm) {
+                    tiles.prewarmTransition(s.currentPage, true, texture.width, texture.height)
+                }
+
+                val next = s.nextPage
+                if (currentTransitionWarm && next != null && next.highQuality && !next.isAnimated && next.atHome) {
+                    tiles.prewarm(next, texture)
+
+                    val nextCovered = tiles.isFullyCovered(next, texture, 0f, 0f, 1f)
+                    if (nextCovered && !Transition.isCached(next, false)) {
+                        tiles.prewarmTransition(next, false, texture.width, texture.height)
+                    }
+                }
             }
         }
     }

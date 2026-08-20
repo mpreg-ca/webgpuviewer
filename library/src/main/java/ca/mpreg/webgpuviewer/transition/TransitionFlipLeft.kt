@@ -18,7 +18,7 @@ import androidx.webgpu.LoadOp
 import androidx.webgpu.StoreOp
 import ca.mpreg.webgpuviewer.draw.Draw
 import ca.mpreg.webgpuviewer.draw.rect
-import ca.mpreg.webgpuviewer.renderer.RenderPage
+import ca.mpreg.webgpuviewer.renderer.TileRenderer
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.getCachedTexture
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.pageRect
 import ca.mpreg.webgpuviewer.viewer.ImagePage
@@ -32,8 +32,7 @@ import kotlin.math.atan2
  *
  * Each page is rendered flat into a cached screen-sized texture first, then this shader folds that
  * texture. [getCachedTexture] keys on the page's own transform, so the flat render happens once per
- * transition while only the fold is per-frame - which is what lets the flat render use
- * [RenderPage]'s sharp filter instead of something cheap enough to run every frame.
+ * transition while only the fold is per-frame.
  *
  * The cache is already at display resolution, so the fold resamples it with a plain sampler. The
  * fold works in page-relative coordinates and reflects across the page's rect within the cache -
@@ -176,13 +175,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         frac: Float,
         pos1: Offset,
         pos2: Offset,
+        tiles: TileRenderer,
     ) {
         val cached1 = getCachedTexture(page1, true, encoder, dst.width, dst.height) { pass, tex ->
-            RenderPage.render(pass, page1, tex, 0f, 0f, 1f)
+            tiles.renderFullyTiled(pass, page1, tex)
         }
 
         val cached2 = getCachedTexture(page2, false, encoder, dst.width, dst.height) { pass, tex ->
-            RenderPage.render(pass, page2, tex, 0f, 0f, 1f)
+            tiles.renderFullyTiled(pass, page2, tex)
         }
 
         val dy = pos2.y - pos1.y

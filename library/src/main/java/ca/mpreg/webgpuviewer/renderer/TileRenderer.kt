@@ -33,8 +33,9 @@ import androidx.webgpu.PrimitiveTopology
 import androidx.webgpu.StoreOp
 import androidx.webgpu.TextureFormat
 import androidx.webgpu.TextureUsage
-import ca.mpreg.webgpuviewer.renderer.TileRenderer.Companion.TILES_PER_BATCH
+import ca.mpreg.webgpuviewer.renderer.TileRenderer.Companion.OFF_SCREEN_SCORE
 import ca.mpreg.webgpuviewer.renderer.TileRenderer.Companion.TILE_SIZE
+import ca.mpreg.webgpuviewer.transition.Transition
 import ca.mpreg.webgpuviewer.viewer.ImagePage
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -50,60 +51,83 @@ import kotlin.math.min
 import kotlin.math.round
 
 /**
+ * Solve the (x, y) [RenderPage.render]/[RenderPage.renderFast] need so [image] lands centred at
+ * screen position ([targetX], [targetY]) - inverts [Image.prepareForRender]'s placement math for
+ * an arbitrary target.
+ */
+internal fun solveImagePlacement(
+    targetX: Float,
+    targetY: Float,
+    imageScale: Float,
+    image: Image,
+    dstWidth: Float,
+    dstHeight: Float
+): Pair<Float, Float> {
+    val x =
+        (targetX - dstWidth / 2f) / (imageScale * dstWidth) - image.x / dstWidth - WebGpuRenderer.offsetX
+    val y =
+        (targetY - dstHeight / 2f) / (imageScale * dstHeight) - image.y / dstHeight - WebGpuRenderer.offsetY
+    return x to y
+}
+
+/**
  * A cache of the filtered render, cut into [TILE_SIZE]-square screen-resolution tiles.
  *
- * [RenderPage.render]'s box/Catmull-Rom filter is too expensive to run over the whole screen
- * every frame, and [RenderPage.renderFast] gives up sharpness for that speed. This sits between:
- * each frame draws the fast path first, then blits whatever filtered tiles exist on top, while a
- * background worker fills in the missing ones a few at a time. The view converges to filtered
- * quality within a handful of frames of going quiet, and never stalls to get there.
+ * [RenderPage.render] is too expensive every frame; [RenderPage.renderFast] is cheap but
+ * unfiltered. Each frame draws the fast path, then blits whatever filtered tiles already exist
+ * on top, while a background worker fills in the rest a few at a time.
  *
- * Tiles live in *content space*: tile (tx, ty) holds the [TILE_SIZE] square of the image's
- * filtered rendering whose top-left sits tx*[TILE_SIZE] pixels right and ty*[TILE_SIZE] pixels
- * below the image's centre, at the current scale. Panning only moves where a tile lands on
- * screen, so the cache survives it untouched - which is also why generation can keep running
- * *during* a pan, with [draw] re-prioritising towards whatever just scrolled into view. Changing
- * scale is what invalidates: every tile of that image is dropped, and nothing is enqueued again
- * until the scale holds for two consecutive frames, so a pinch or zoom animation doesn't churn
- * out tiles it will immediately throw away.
+ * One grid per whole [ImagePage], not per image, so a spread's seam bakes into whichever tile
+ * straddles it rather than meeting two independently-snapped layers.
  *
- * The blit layer is snapped as a whole to the nearest screen pixel. The grid is rigid, so the
- * snap can't open seams between tiles, and it keeps every blit an exact 1:1 texel copy - a tile
- * drawn at a fractional offset would be resampled and lose exactly the sharpness it exists to
- * provide. The at-most-half-pixel displacement against the fast underlay is invisible - but each
- * image snaps *independently*, so two abutting images can land up to a whole pixel apart, which
- * would show as a gap or an overlap right on their shared edge. So blits are clipped one pixel
- * inside the image's own rect: the outermost pixel band of every image always comes from the
- * fast underlay, which draws at exact unsnapped positions, and image boundaries meet exactly as
- * they would without tiles.
+ * The same grid serves both viewers. The paged viewer has one page on screen at a time and
+ * rounds its own anchor; the continuous viewer can have several pages' grids live at once, so it
+ * rounds only the shared *camera* position and leaves each page's offset from it exact - keeps
+ * adjacent pages' tiles pixel-aligned at their shared boundary (see that [draw] overload).
  *
- * Blitting is built to be nearly free per frame. Each tile owns its bind group and a tiny
- * uniform holding its grid coordinate, both created once at generation, so a blit encodes as
- * just setBindGroup + draw. Everything that changes per frame - the snapped anchor and the clip
- * rect - lives in one 32-byte per-image uniform, written only on frames where the image actually
- * moved, and the clip intersection runs in the vertex shader by clamping the quad's corners.
+ * Tiles live in content space: tile (tx, ty) holds the square [TILE_SIZE] pixels right/down of
+ * the grid's anchor, so panning survives untouched. Changing scale (or a document position shift
+ * in the continuous viewer) invalidates the whole grid, which regenerates once scale has held
+ * stable for two frames.
  *
- * Generation runs on the render thread but outside the render mutex, in batches of
- * [TILES_PER_BATCH] with a yield between batches, so a queued frame always gets the thread back
- * after a bounded amount of encoding. The tile size bounds how much GPU work each pass submits,
- * so a frame queued behind a batch is never waiting on one huge filtered draw. Pending tiles are
- * picked by priority at pull time: on-screen before the margin ring, centre-out within it,
- * against the viewport as of the most recent frame.
+ * The whole grid snaps to the nearest screen pixel so every blit is an exact 1:1 texel copy. Each
+ * tile's bind group and uniform are created once at generation, so a blit is just setBindGroup +
+ * draw; only the per-grid anchor/clip uniform is rewritten, and only when it changes.
  *
- * Everything here - maps, queues, textures - is touched only on the render thread, which is
- * single-threaded. [cleanup] may be called from any thread and posts its work there.
+ * Generation runs on the render thread but outside the render mutex, a few tiles at a time with a
+ * suspend between batches so a queued frame always gets the thread back. Pending tiles are pulled
+ * on-screen-first, centre-out.
+ *
+ * Everything here is touched only on the render thread. [cleanup] may be called from any thread
+ * and posts its work there.
  */
 internal class TileRenderer(private val invalidate: () -> Unit) {
     companion object {
         const val TILE_SIZE = 256
+
+        /**
+         * Tiles per batch before yielding back to the render thread. Kept at 1: the worker and
+         * frame render share one dispatcher, and low latency matters more than fill-in speed.
+         */
         private const val TILES_PER_BATCH = 1
 
-        /** Drop an image's tiles after this many rendered frames without it being drawn. */
-        private const val KEEP_FRAMES = 600L
+        /**
+         * Grace window of extra pages (past "whichever is current") [draw] keeps a grid for, so
+         * leaving a page doesn't force full regeneration on turning right back. Paged overload
+         * only - the continuous viewer relies on [evict]'s shared LRU cap instead.
+         */
+        private const val RETAIN_MARGIN = 2
+
         private const val TAG = "TileRenderer"
+
+        /**
+         * Score threshold [nextRequest] uses to tell a genuinely on-screen tile request from one
+         * outside a grid's wanted range (e.g. [prewarm]'s tiles, which leave that range empty).
+         */
+        private const val OFF_SCREEN_SCORE = 1e6f
     }
 
-    /** Upper bound on cached tiles across all images, ~[maxTiles] * 256KB of texture memory. */
+    /** Upper bound on cached tiles, ~[maxTiles] * 256KB of texture memory. */
     var maxTiles = 192
 
     private val device get() = WebGpuRenderer.device
@@ -124,23 +148,35 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         }
     }
 
-    /** [page] is the page the image was last drawn under, for its destroyed flag. */
-    private class ImageTiles(var scale: Float, val frameUniform: GPUBuffer, var page: ImagePage) {
+    /** One grid per whole [ImagePage] - both images of a spread share it, seam baked in. */
+    private class PageTiles(var scale: Float, val page: ImagePage, val frameUniform: GPUBuffer) {
         val tiles = HashMap<Long, Tile>()
         val pending = HashSet<Long>()
 
-        // Values the current frameUniform contents were derived from, so a frame where the image
-        // didn't move skips the write entirely and encodes nothing but the blit draws.
+        // Values the current frameUniform contents were derived from, so a frame where the grid
+        // didn't move skips the write entirely and encodes nothing but the blit draws - see
+        // writeFrameUniformIfChanged.
         var writtenSnapX = Float.NaN
         var writtenSnapY = Float.NaN
         var writtenDstW = Float.NaN
         var writtenDstH = Float.NaN
-        var writtenHalfW = Float.NaN
-        var writtenHalfH = Float.NaN
+        var writtenClipL = Float.NaN
+        var writtenClipT = Float.NaN
+        var writtenClipR = Float.NaN
+        var writtenClipB = Float.NaN
 
         /** True once the scale has held for two consecutive frames; gates generation. */
         var stable = false
-        var lastSeen = 0L
+
+        /**
+         * This page's exact, unrounded vertical offset from the grid's shared anchor - see
+         * [draw]'s continuous overload. Always 0 for the paged overload.
+         *
+         * Also doubles as a staleness key, compared each call like [scale]: a changed offset at
+         * fixed scale means the page's document position shifted, so existing tiles no longer
+         * agree with where it sits.
+         */
+        var centerYOffset = 0f
 
         // The strictly visible tile range as of the last draw, in tile coordinates. The worker
         // prioritises against it at pull time, so a pan mid-fill redirects generation without
@@ -149,11 +185,40 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         var txMax = -1
         var tyMin = 0
         var tyMax = -1
+
+        val destroyed get() = page.destroyed
+
+        fun destroyAll() {
+            tiles.values.forEach { it.destroy() }
+            tiles.clear()
+            pending.clear()
+            frameUniform.destroy()
+        }
     }
 
-    private class Request(val image: Image, val state: ImageTiles, val tx: Int, val ty: Int)
+    /**
+     * One unit of work for the shared worker - either a tile, or (paged viewer only) warming a
+     * slot of [Transition]'s cache. Both share [schedule]/[nextRequest]'s pipeline, so one place
+     * decides when non-urgent GPU work runs rather than each task throttling itself separately.
+     */
+    private sealed class Request {
+        class ForTile(val state: PageTiles, val tx: Int, val ty: Int) : Request()
+        class ForTransition(
+            val page: ImagePage, val isPage1: Boolean, val dstWidth: Int, val dstHeight: Int
+        ) : Request()
+    }
 
-    private val images = HashMap<Image, ImageTiles>()
+    // At most one request per transition slot - a newer call for the same slot just replaces
+    // which page it targets, and nextRequest() clears a slot as soon as it hands the request out
+    // so a since-warmed page doesn't spin the worker forever re-checking a cache hit.
+    private var pendingTransitionPage1: ImagePage? = null
+    private var pendingTransitionPage2: ImagePage? = null
+    private var pendingTransitionDstWidth = 0
+    private var pendingTransitionDstHeight = 0
+
+    // Access-ordered so getOrPut's read-then-maybe-write always moves the touched page to the
+    // end (most recently drawn), whether or not it was already present - see RETAIN_MARGIN.
+    private val pages = LinkedHashMap<ImagePage, PageTiles>(16, 0.75f, true)
 
     private fun key(tx: Int, ty: Int) = (tx.toLong() shl 32) or (ty.toLong() and 0xFFFFFFFFL)
 
@@ -204,199 +269,501 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     }
 
     /**
-     * Advance the frame counter and drop tiles of destroyed or long-unseen pages.
-     *
-     * Called once at the top of every rendered frame, including frames that don't draw tiles
-     * (e.g. during a page transition), so eviction keeps ticking.
+     * Advance the frame counter and drop tiles for any page the app has since evicted. Called
+     * once at the top of every rendered frame, including ones that don't draw tiles at all (e.g.
+     * a page transition), so a destroyed page's textures are freed right away.
      */
     fun newFrame() {
         frame++
-        if (images.isEmpty()) return
-        val it = images.iterator()
+        if (pages.isEmpty()) return
+        val it = pages.iterator()
         while (it.hasNext()) {
             val st = it.next().value
-            if (st.page.destroyed || frame - st.lastSeen > KEEP_FRAMES) {
-                st.tiles.values.forEach { tile -> tile.destroy() }
-                st.tiles.clear()
-                st.pending.clear()
-                st.frameUniform.destroy()
+            if (st.destroyed) {
+                st.destroyAll()
                 it.remove()
             }
         }
     }
 
     /**
-     * Blit the cached tiles for a whole page and enqueue the missing ones.
+     * Left/right screen-pixel extent of [page] from its own anchor (x=0), in [pageScale] units.
      *
-     * Takes the same placement arguments as [RenderPage.render] and decomposes into per-image
-     * calls the same way, minus the background - the fast underlay draws that live, so fades
-     * tied to the page's current position (overscroll, under-min-scale) never go stale in a
-     * cached tile.
+     * Not symmetric halves of [ImagePage.width]: a LEFT/RIGHT image extends outward from the
+     * anchor by its *own* width, so the anchor sits at the spread's seam, not the centre of its
+     * combined footprint - they can differ, e.g. a cover with no partner. No LEFT/RIGHT image at
+     * all is the ordinary centred case, so its extent stays symmetric.
      */
-    fun draw(
-        pass: GPURenderPassEncoder,
-        page: ImagePage,
-        dst: GPUTexture,
-        x: Float,
-        y: Float,
-        scale: Float
-    ) {
-        page.images.forEach { image ->
-            image ?: return@forEach
-            val offsetX = when (image.position) {
-                Image.Position.LEFT -> (-0.5f * image.width) / dst.width
-                Image.Position.RIGHT -> (0.5f * image.width) / dst.width
-                Image.Position.SINGLE -> 0f
-            }
-            draw(pass, page, image, dst, page.x + x + offsetX, page.y + y, page.scale * scale)
+    private fun pageHorizontalExtent(page: ImagePage, pageScale: Float): Pair<Float, Float> {
+        val leftWidth = page.images.firstOrNull { it?.position == Image.Position.LEFT }?.width
+        val rightWidth = page.images.firstOrNull { it?.position == Image.Position.RIGHT }?.width
+        if (leftWidth == null && rightWidth == null) {
+            val half = pageScale * page.width / 2f
+            return half to half
         }
+        return pageScale * (leftWidth ?: 0) to pageScale * (rightWidth ?: 0)
+    }
+
+    /** [pageScale]/[anchorX]/[anchorY] a paged overload resolves its (x, y, scale) placement to. */
+    private class PagedAnchor(val pageScale: Float, val anchorX: Float, val anchorY: Float)
+
+    private fun pagedAnchor(
+        page: ImagePage, dst: GPUTexture, x: Float, y: Float, scale: Float
+    ): PagedAnchor {
+        // While animating to home, pin the grid to that animation's (x, y, scale) target instead
+        // of the live in-flight values - avoids drawCore wiping/destabilizing the grid every
+        // frame scale interpolates. Invisible on screen (the grid draws nothing there anyway via
+        // isScaleAnimating), so this only affects Transition's cache warm/force-complete render.
+        val goingHome = page.animationTargetScale == page.homeScale
+        val effectivePageX = if (goingHome) page.animationTargetX ?: page.x else page.x
+        val effectivePageY = if (goingHome) page.animationTargetY ?: page.y else page.y
+        val effectivePageScale = if (goingHome) page.homeScale else page.scale
+        val pageScale = effectivePageScale * scale
+        val anchorX =
+            dst.width / 2f + pageScale * ((effectivePageX + x + WebGpuRenderer.offsetX) * dst.width)
+        val anchorY =
+            dst.height / 2f + pageScale * ((effectivePageY + y + WebGpuRenderer.offsetY) * dst.height)
+        return PagedAnchor(pageScale, anchorX, anchorY)
     }
 
     /**
-     * Blit the cached tiles for one image and enqueue the missing ones.
+     * Shared placement math for a page's tile grid at [anchorX]/[anchorY], scaled by [pageScale]:
+     * the tile region the viewport (plus a one-tile margin) wants, clipped to the page's own
+     * extent, and the snapped clip rect the shader clamps blits to.
      *
-     * [x], [y] and [scale] are exactly what the caller passes to [RenderPage.renderFast] for the
-     * same image, so the tiles land pixel-for-pixel (within the half-pixel layer snap) on top of
-     * the fast underlay.
-     *
-     * [ImagePage.Draw] pages are drawn into externally and animated pages swap images per frame;
-     * a cache would hold yesterday's content for both, so they stay on the fast path.
+     * One definition shared by [isFullyCoveredCore], [drawCore], and [prewarm] - each used to
+     * carry its own copy, which is how [prewarm] ended up silently missing a step the others had.
      */
-    fun draw(
-        pass: GPURenderPassEncoder,
-        page: ImagePage,
-        image: Image,
-        dst: GPUTexture,
-        x: Float,
-        y: Float,
-        scale: Float
-    ) {
-        if (page.destroyed || page is ImagePage.Draw || page.isAnimated) return
-        if (image.mipmaps.isEmpty()) return
+    private class GridPlacement(
+        val snapX: Float,
+        val snapY: Float,
+        val clipL: Float,
+        val clipT: Float,
+        val clipR: Float,
+        val clipB: Float,
+        val wantL: Float,
+        val wantR: Float,
+        val wantT: Float,
+        val wantB: Float
+    )
 
-        val st = images.getOrPut(image) {
-            ImageTiles(
-                scale, device.createBuffer(
+    private fun gridPlacement(
+        page: ImagePage,
+        dst: GPUTexture,
+        anchorX: Float,
+        anchorY: Float,
+        centerYOffset: Float,
+        pageScale: Float
+    ): GridPlacement? {
+        val ts = TILE_SIZE.toFloat()
+        val (leftHalf, rightHalf) = pageHorizontalExtent(page, pageScale)
+        val halfH = pageScale * page.height / 2f
+        if (leftHalf + rightHalf <= 0f || halfH <= 0f) return null
+
+        val wantL = max(-anchorX - ts, -leftHalf)
+        val wantR = min(dst.width - anchorX + ts, rightHalf)
+        val wantT = max(-anchorY - ts, centerYOffset - halfH)
+        val wantB = min(dst.height - anchorY + ts, centerYOffset + halfH)
+
+        val snapX = round(anchorX)
+        val snapY = round(anchorY)
+        val clipL = snapX - leftHalf
+        val clipT = snapY + centerYOffset - halfH
+        val clipR = snapX + rightHalf
+        val clipB = snapY + centerYOffset + halfH
+
+        return GridPlacement(snapX, snapY, clipL, clipT, clipR, clipB, wantL, wantR, wantT, wantB)
+    }
+
+    /** As [PagedAnchor], for the continuous overloads; also carries [centerYOffset]. */
+    private class ContinuousAnchor(
+        val pageScale: Float, val anchorX: Float, val anchorY: Float, val centerYOffset: Float
+    )
+
+    private fun continuousAnchor(
+        page: ImagePage,
+        dst: GPUTexture,
+        cameraDocY: Float,
+        docTop: Float,
+        viewerOffsetX: Float,
+        scale: Float
+    ): ContinuousAnchor? {
+        if (page.width <= 0) return null
+        val pageScaleAtZoom1 = dst.width / page.width.toFloat()
+        val pageScale = pageScaleAtZoom1 * scale
+        val anchorX =
+            dst.width / 2f + scale * (viewerOffsetX * dst.width + WebGpuRenderer.offsetX * dst.width)
+        val anchorY =
+            dst.height / 2f - scale * cameraDocY + scale * WebGpuRenderer.offsetY * dst.height
+        val pageHeightDoc = page.height * pageScaleAtZoom1
+        val centerYOffset = scale * (docTop + pageHeightDoc / 2f)
+        return ContinuousAnchor(pageScale, anchorX, anchorY, centerYOffset)
+    }
+
+    /**
+     * True if [page]'s grid already has full tile coverage, so the caller can skip
+     * [RenderPage.renderFast] entirely this frame - the paged viewer's placement, via its own
+     * [page]-relative (x, y).
+     */
+    fun isFullyCovered(
+        page: ImagePage, dst: GPUTexture, x: Float, y: Float, scale: Float
+    ): Boolean {
+        val a = pagedAnchor(page, dst, x, y, scale)
+        return isFullyCoveredCore(
+            page, dst, a.anchorX, a.anchorY, 0f, a.pageScale, page.isScaleAnimating
+        )
+    }
+
+    /**
+     * True if [page]'s grid already has full tile coverage, so the caller can skip
+     * [RenderPage.renderFast] entirely this frame - the continuous viewer's placement, via
+     * [cameraDocY] (the camera's document position) and [docTop] (this page's own, both in screen
+     * pixels at zoom 1).
+     */
+    fun isFullyCovered(
+        page: ImagePage,
+        dst: GPUTexture,
+        cameraDocY: Float,
+        docTop: Float,
+        viewerOffsetX: Float,
+        scale: Float,
+        suppressGeneration: Boolean
+    ): Boolean {
+        val a =
+            continuousAnchor(page, dst, cameraDocY, docTop, viewerOffsetX, scale) ?: return false
+        return isFullyCoveredCore(
+            page, dst, a.anchorX, a.anchorY, a.centerYOffset, a.pageScale, suppressGeneration
+        )
+    }
+
+    /**
+     * Shared read-only coverage check for both [isFullyCovered] overloads. [anchorX]/[anchorY]
+     * are the (unrounded) anchor either overload computed; [centerYOffset] is this page's own
+     * exact, unrounded vertical offset from that anchor - zero for the paged overload. Compared
+     * against [PageTiles.centerYOffset] (like [pageScale] against [PageTiles.scale]) since this
+     * call may race ahead of [draw] invalidating a grid whose page just shifted.
+     */
+    private fun isFullyCoveredCore(
+        page: ImagePage,
+        dst: GPUTexture,
+        anchorX: Float,
+        anchorY: Float,
+        centerYOffset: Float,
+        pageScale: Float,
+        suppressGeneration: Boolean
+    ): Boolean {
+        if (page.destroyed || !page.highQuality || page.isAnimated || suppressGeneration) return false
+        if (page.images.isEmpty() || page.images.all { it == null || it.mipmaps.isEmpty() }) return false
+
+        val st = pages[page] ?: return false
+        if (st.scale != pageScale || st.centerYOffset != centerYOffset || !st.stable) return false
+
+        val gp =
+            gridPlacement(page, dst, anchorX, anchorY, centerYOffset, pageScale) ?: return false
+        // Genuinely off-screen: the fast path would draw nothing either, so there is nothing for
+        // tiles to be "covering".
+        if (gp.wantL >= gp.wantR || gp.wantT >= gp.wantB) return true
+
+        val ts = TILE_SIZE.toFloat()
+        val visL = max(gp.clipL, 0f)
+        val visT = max(gp.clipT, 0f)
+        val visR = min(gp.clipR, dst.width.toFloat())
+        val visB = min(gp.clipB, dst.height.toFloat())
+        if (visL >= visR || visT >= visB) return true
+
+        val tx0 = floor((visL - gp.snapX) / ts).toInt()
+        val tx1 = ceil((visR - gp.snapX) / ts).toInt() - 1
+        val ty0 = floor((visT - gp.snapY) / ts).toInt()
+        val ty1 = ceil((visB - gp.snapY) / ts).toInt() - 1
+
+        for (tyi in ty0..ty1) {
+            for (txi in tx0..tx1) {
+                val px = gp.snapX + txi * ts
+                val py = gp.snapY + tyi * ts
+                if (px < visR && px + ts > visL && py < visB && py + ts > visT) {
+                    if (!st.tiles.containsKey(key(txi, tyi))) return false
+                }
+            }
+        }
+        return true
+    }
+
+    /**
+     * Ensure [page]'s tile grid exists and enqueue its missing tiles, without blitting anything -
+     * for getting a page sharp before it's on screen (the paged viewer's next page). Always at
+     * the page's own home position, since it has no live pan/zoom yet.
+     *
+     * Deliberately leaves [PageTiles.txMin]/etc at their empty default, so [nextRequest] always
+     * ranks this grid's tiles as "off-screen", behind whichever page is genuinely being drawn.
+     * Doesn't run [draw]'s retain-window trim either; that catches this grid once the page it
+     * displaced becomes current and calls [draw] again.
+     */
+    fun prewarm(page: ImagePage, dst: GPUTexture) {
+        if (page.destroyed || !page.highQuality || page.isAnimated) return
+        if (page.images.isEmpty() || page.images.all { it == null || it.mipmaps.isEmpty() }) return
+
+        val a = pagedAnchor(page, dst, 0f, 0f, 1f)
+        val st = pages.getOrPut(page) {
+            PageTiles(
+                a.pageScale, page, device.createBuffer(
                     GPUBufferDescriptor(
-                        size = 32, usage = BufferUsage.Uniform or BufferUsage.CopyDst
+                        size = 32,
+                        usage = BufferUsage.Uniform or BufferUsage.CopyDst
                     )
-                ), page
+                )
             )
         }
-        st.page = page
-        st.lastSeen = frame
-        if (st.scale != scale) {
-            // Last frame's pass, the only one that can reference these, is already submitted;
-            // Dawn keeps a destroyed texture alive until the command buffers using it retire.
+
+        if (st.scale != a.pageScale) {
             st.tiles.values.forEach { it.destroy() }
             st.tiles.clear()
             st.pending.clear()
-            st.scale = scale
+            st.scale = a.pageScale
             st.stable = false
-            // The next frame is what proves the scale has settled, but when this is the last
-            // frame of a zoom animation no further frame is coming, and nothing would enqueue
-            // tiles until the next interaction. Ask for one; while the scale is still moving
-            // this just coalesces into the motion's own invalidations.
             invalidate()
         } else {
             st.stable = true
         }
+        if (!st.stable) return
+
+        val gp = gridPlacement(page, dst, a.anchorX, a.anchorY, 0f, a.pageScale) ?: return
+        if (gp.wantL >= gp.wantR || gp.wantT >= gp.wantB) return
 
         val ts = TILE_SIZE.toFloat()
-        // Screen-pixel position of the image centre. Content space hangs off it: content pixel c
-        // sits at screen pixel anchor + c, so tiles keyed by content coordinates survive panning.
-        val anchorX = dst.width / 2f + scale * ((x + WebGpuRenderer.offsetX) * dst.width + image.x)
-        val anchorY =
-            dst.height / 2f + scale * ((y + WebGpuRenderer.offsetY) * dst.height + image.y)
-        val halfW = scale * image.width / 2f
-        val halfH = scale * image.height / 2f
+        val tx0 = floor(gp.wantL / ts).toInt()
+        val tx1 = ceil(gp.wantR / ts).toInt() - 1
+        val ty0 = floor(gp.wantT / ts).toInt()
+        val ty1 = ceil(gp.wantB / ts).toInt() - 1
 
-        // Wanted region: the viewport plus a one-tile margin ring, clipped to the image extent.
-        val wantL = max(-anchorX - ts, -halfW)
-        val wantR = min(dst.width - anchorX + ts, halfW)
-        val wantT = max(-anchorY - ts, -halfH)
-        val wantB = min(dst.height - anchorY + ts, halfH)
-        if (wantL >= wantR || wantT >= wantB) {
+        // A prewarmed tile's bind group references this same frame uniform, but unlike [drawCore]
+        // this grid is never drawn on screen to write it - without this, a page that's only ever
+        // been prewarmed (never on screen) blits with a stale/never-written clip rect once
+        // [blitIfFullyCovered] uses its tiles, which reads as solid black. Shares [gridPlacement]
+        // with [drawCore] now, so this can't happen again without both call sites noticing.
+        writeFrameUniformIfChanged(
+            st,
+            dst,
+            gp.snapX,
+            gp.snapY,
+            gp.clipL,
+            gp.clipT,
+            gp.clipR,
+            gp.clipB
+        )
+
+        // Captured before the loop below can add to it, so this only fires the one time pending
+        // work actually starts for this grid - every later call while it's still filling in finds
+        // pending already non-empty and stays quiet.
+        val alreadyPrewarming = st.pending.isNotEmpty()
+
+        var added = false
+        for (tyi in ty0..ty1) {
+            for (txi in tx0..tx1) {
+                val tkey = key(txi, tyi)
+                if (!st.tiles.containsKey(tkey)) {
+                    st.pending.add(tkey)
+                    added = true
+                }
+            }
+        }
+        if (added) {
+            if (!alreadyPrewarming) Log.d(TAG, "Pre-warming next page tiles ${pageId(page)}")
+            schedule()
+        }
+    }
+
+    /**
+     * Enqueue [page] to have [Transition]'s cache slot [isPage1] warmed via the shared worker,
+     * once nothing more urgent is pending - see [nextRequest] for the priority ordering.
+     */
+    fun prewarmTransition(page: ImagePage, isPage1: Boolean, dstWidth: Int, dstHeight: Int) {
+        if (page.destroyed) return
+        if (isPage1) pendingTransitionPage1 = page else pendingTransitionPage2 = page
+        pendingTransitionDstWidth = dstWidth
+        pendingTransitionDstHeight = dstHeight
+        schedule()
+    }
+
+    /**
+     * Blit [page]'s cached tiles and enqueue the missing ones - the paged viewer's placement, via
+     * its own [page]-relative (x, y).
+     *
+     * [ImagePage.Draw] pages are drawn into externally and animated pages swap images per frame -
+     * neither worth the cache's sharpness, so both stay on the fast/plain path instead via
+     * [ImagePage.highQuality] being false.
+     */
+    fun draw(
+        pass: GPURenderPassEncoder,
+        page: ImagePage,
+        dst: GPUTexture,
+        x: Float,
+        y: Float,
+        scale: Float
+    ) {
+        val a = pagedAnchor(page, dst, x, y, scale)
+        drawCore(
+            pass,
+            page,
+            dst,
+            a.anchorX,
+            a.anchorY,
+            0f,
+            a.pageScale,
+            page.isScaleAnimating,
+            applyRetainWindow = true
+        )
+    }
+
+    /**
+     * Blit [page]'s cached tiles and enqueue the missing ones - the continuous viewer's
+     * placement, via [cameraDocY] (the camera's document position) and [docTop] (this page's
+     * own, both in screen pixels at zoom 1).
+     *
+     * Rounds only the shared *camera* anchor, leaving each page's own offset from it exact -
+     * unlike the paged overload, several pages can draw through here in the same frame, and
+     * independently rounding each one's own anchor could leave adjacent grids disagreeing by a
+     * pixel at their shared seam (`round(a) + b` isn't generally `round(a + b)`). Recomputing the
+     * same camera anchor from the same inputs every caller passes keeps it identical regardless
+     * of which page is drawing, so two adjacent pages' clip boundaries always agree exactly.
+     */
+    fun draw(
+        pass: GPURenderPassEncoder,
+        page: ImagePage,
+        dst: GPUTexture,
+        cameraDocY: Float,
+        docTop: Float,
+        viewerOffsetX: Float,
+        scale: Float,
+        suppressGeneration: Boolean
+    ) {
+        val a = continuousAnchor(page, dst, cameraDocY, docTop, viewerOffsetX, scale) ?: return
+        drawCore(
+            pass,
+            page,
+            dst,
+            a.anchorX,
+            a.anchorY,
+            a.centerYOffset,
+            a.pageScale,
+            suppressGeneration,
+            applyRetainWindow = false
+        )
+    }
+
+    /**
+     * Shared blit-and-enqueue core for both [draw] overloads. [anchorX]/[anchorY] are the
+     * (unrounded) anchor either overload computed; [centerYOffset] is this page's own exact,
+     * unrounded vertical offset from that anchor - zero for the paged overload. See
+     * [PageTiles.centerYOffset] for why comparing it against the stored value also catches a
+     * changed document position.
+     */
+    private fun drawCore(
+        pass: GPURenderPassEncoder,
+        page: ImagePage,
+        dst: GPUTexture,
+        anchorX: Float,
+        anchorY: Float,
+        centerYOffset: Float,
+        pageScale: Float,
+        suppressGeneration: Boolean,
+        applyRetainWindow: Boolean
+    ) {
+        if (page.destroyed || !page.highQuality || page.isAnimated) return
+        if (page.images.isEmpty() || page.images.all { it == null || it.mipmaps.isEmpty() }) return
+
+        val st = pages.getOrPut(page) {
+            PageTiles(
+                pageScale, page, device.createBuffer(
+                    GPUBufferDescriptor(
+                        size = 32, usage = BufferUsage.Uniform or BufferUsage.CopyDst
+                    )
+                )
+            )
+        }
+
+        if (applyRetainWindow) {
+            // getOrPut just moved page to the end of this access-ordered map - trim the front
+            // (least recently drawn) down to the grace window. A page turn animates via
+            // Transition's own cache, never this one, so anything evicted here isn't on screen.
+            while (pages.size > RETAIN_MARGIN) {
+                val eldest = pages.entries.iterator()
+                val entry = eldest.next()
+                entry.value.destroyAll()
+                eldest.remove()
+            }
+        }
+
+        if (st.scale != pageScale || st.centerYOffset != centerYOffset) {
+            // Dawn keeps a destroyed texture alive until its command buffers retire, so
+            // destroying now is safe. A changed centerYOffset at fixed scale means a placeholder
+            // corrected its guessed height - invalidate the same way a scale change does.
+            st.tiles.values.forEach { it.destroy() }
+            st.tiles.clear()
+            st.pending.clear()
+            st.scale = pageScale
+            st.stable = false
+            invalidate()
+        } else {
+            // Two frames landing on the same scale isn't enough proof of settling while a
+            // gesture/animation is still actively driving it.
+            st.stable = !suppressGeneration
+        }
+        // Recomputed every call regardless of whether it actually changed - see the field's own
+        // doc for why that's safe. generate() has no other way to reach this value.
+        st.centerYOffset = centerYOffset
+
+        val gp = gridPlacement(page, dst, anchorX, anchorY, centerYOffset, pageScale)
+        if (gp == null) {
+            st.pending.clear()
+            return
+        }
+        if (gp.wantL >= gp.wantR || gp.wantT >= gp.wantB) {
             st.pending.clear()
             return
         }
 
-        val tx0 = floor(wantL / ts).toInt()
-        val tx1 = ceil(wantR / ts).toInt() - 1
-        val ty0 = floor(wantT / ts).toInt()
-        val ty1 = ceil(wantB / ts).toInt() - 1
+        val ts = TILE_SIZE.toFloat()
+        val tx0 = floor(gp.wantL / ts).toInt()
+        val tx1 = ceil(gp.wantR / ts).toInt() - 1
+        val ty0 = floor(gp.wantT / ts).toInt()
+        val ty1 = ceil(gp.wantB / ts).toInt() - 1
 
+        // In tile coordinates, unlike wantT/wantB - not offset by centerYOffset, since a tile's
+        // blit position is snapY + ty*ts regardless of which page it belongs to.
         st.txMin = floor(-anchorX / ts).toInt()
         st.txMax = ceil((dst.width - anchorX) / ts).toInt() - 1
         st.tyMin = floor(-anchorY / ts).toInt()
         st.tyMax = ceil((dst.height - anchorY) / ts).toInt() - 1
 
-        // The whole layer snaps to the nearest pixel together, so blits stay 1:1 and seamless.
-        val snapX = round(anchorX)
-        val snapY = round(anchorY)
+        writeFrameUniformIfChanged(
+            st,
+            dst,
+            gp.snapX,
+            gp.snapY,
+            gp.clipL,
+            gp.clipT,
+            gp.clipR,
+            gp.clipB
+        )
 
-        // Blits stop one pixel short of the image's edges. Neighbouring images snap
-        // independently, so their tile layers can shift up to a pixel against each other; the
-        // underlay owns the perimeter band instead, and abutting images join exactly as they
-        // would without tiles. Images too small for an interior aren't worth caching at all.
-        val clipL = snapX - halfW + 1f
-        val clipT = snapY - halfH + 1f
-        val clipR = snapX + halfW - 1f
-        val clipB = snapY + halfH - 1f
-        if (clipL >= clipR || clipT >= clipB) {
-            st.pending.clear()
-            return
-        }
-
-        // Everything the blits need per frame goes in the image's one uniform, written only when
-        // something moved - snap, clip and dst size are all functions of these six values. One
-        // write per buffer per frame, so the writeBuffer-vs-submit ordering hazard that forces
-        // Draw.rect to allocate fresh buffers doesn't apply.
         val dstW = dst.width.toFloat()
         val dstH = dst.height.toFloat()
-        if (st.writtenSnapX != snapX || st.writtenSnapY != snapY ||
-            st.writtenHalfW != halfW || st.writtenHalfH != halfH ||
-            st.writtenDstW != dstW || st.writtenDstH != dstH
-        ) {
-            val byteBuffer = byteBufferLocal.get()
-            byteBuffer.clear()
-            byteBuffer.putFloat(snapX)
-            byteBuffer.putFloat(snapY)
-            byteBuffer.putFloat(dstW)
-            byteBuffer.putFloat(dstH)
-            byteBuffer.putFloat(clipL)
-            byteBuffer.putFloat(clipT)
-            byteBuffer.putFloat(clipR)
-            byteBuffer.putFloat(clipB)
-            byteBuffer.flip()
-            device.queue.writeBuffer(st.frameUniform, 0, byteBuffer)
-            st.writtenSnapX = snapX
-            st.writtenSnapY = snapY
-            st.writtenDstW = dstW
-            st.writtenDstH = dstH
-            st.writtenHalfW = halfW
-            st.writtenHalfH = halfH
-        }
-
-        // What a tile has to intersect to produce any fragments.
-        val visL = max(clipL, 0f)
-        val visT = max(clipT, 0f)
-        val visR = min(clipR, dstW)
-        val visB = min(clipB, dstH)
+        val visL = max(gp.clipL, 0f)
+        val visT = max(gp.clipT, 0f)
+        val visR = min(gp.clipR, dstW)
+        val visB = min(gp.clipB, dstH)
 
         var pipelineSet = false
         val desired = HashSet<Long>()
         for (tyi in ty0..ty1) {
             for (txi in tx0..tx1) {
-                val key = key(txi, tyi)
-                desired.add(key)
-                val tile = st.tiles[key]
+                val tkey = key(txi, tyi)
+                desired.add(tkey)
+                val tile = st.tiles[tkey]
                 if (tile != null) {
                     tile.lastUsed = frame
-                    val px = snapX + txi * ts
-                    val py = snapY + tyi * ts
-                    // Margin-ring tiles usually sit entirely offscreen or outside the clip;
-                    // skip those rather than encode a draw that can't produce fragments.
+                    val px = gp.snapX + txi * ts
+                    val py = gp.snapY + tyi * ts
                     if (px < visR && px + ts > visL && py < visB && py + ts > visT) {
                         if (!pipelineSet) {
                             pass.setPipeline(blitPipeline)
@@ -406,20 +773,34 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
                         pass.draw(6)
                     }
                 } else if (st.stable) {
-                    st.pending.add(key)
+                    st.pending.add(tkey)
                 }
             }
         }
-        // Tiles that panned out of the wanted region stop being worth generating.
         st.pending.retainAll(desired)
+
+        // Drop tiles outside this frame's wanted range - without this, a continuous-mode page
+        // scrolling past keeps accumulating tiles that may never hit evict()'s global cap on
+        // their own. Same staleness guard evict() uses; in-place removal costs nothing when
+        // nothing is stale.
+        val staleIt = st.tiles.entries.iterator()
+        while (staleIt.hasNext()) {
+            val (k, t) = staleIt.next()
+            if (k !in desired && t.lastUsed < frame - 1) {
+                t.destroy()
+                staleIt.remove()
+            }
+        }
+
         if (st.pending.isNotEmpty()) schedule()
     }
 
     /**
      * Start the generation worker if it isn't running.
      *
-     * The worker shares the render thread but not the render mutex, so the yield between batches
-     * actually lets a queued frame through - the same reasoning as [WebGpuRenderer.onDispatcher].
+     * The worker shares the render thread but not the render mutex, so suspending between
+     * batches actually lets a queued frame through - the same reasoning as
+     * [WebGpuRenderer.onDispatcher].
      */
     private fun schedule() {
         if (workerActive) return
@@ -441,7 +822,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
                     }
                     if (generated == 0) break
                     invalidate()
-                    yield()
+                     yield()
                 }
             } finally {
                 workerActive = false
@@ -449,49 +830,269 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         }
     }
 
-    /** Pull the highest-priority pending tile: on-screen first, then centre-out. */
+    /**
+     * Pull the highest-priority request, in four tiers: on-screen tile > current page's
+     * transition warm > everything else ([prewarm]'d tiles or a stability-losing grid's
+     * leftovers) > next page's transition warm. That last tier trails the third because the next
+     * page's slot can only warm once [prewarm] has fed it tiles (see [blitIfFullyCovered]) -
+     * warming any earlier would just find nothing ready.
+     *
+     * The on-screen/other split reuses the per-tile distance score: [prewarm] leaves a grid's
+     * [PageTiles.txMin]/etc at their empty default, so its tiles always score at or above
+     * [OFF_SCREEN_SCORE].
+     */
     private fun nextRequest(): Request? {
-        var bestImage: Image? = null
-        var bestState: ImageTiles? = null
-        var bestKey = 0L
         var bestPriority = Float.MAX_VALUE
-        for ((image, st) in images) {
+        var bestState: PageTiles? = null
+        var bestKey = 0L
+
+        fun priorityOf(st: PageTiles, key: Long): Float {
+            val tx = (key shr 32).toInt()
+            val ty = key.toInt()
+            val centerTx = (st.txMin + st.txMax) * 0.5f
+            val centerTy = (st.tyMin + st.tyMax) * 0.5f
+            val outX = max(max(st.txMin - tx, tx - st.txMax), 0)
+            val outY = max(max(st.tyMin - ty, ty - st.tyMax), 0)
+            val cx = tx - centerTx
+            val cy = ty - centerTy
+            return max(outX, outY) * OFF_SCREEN_SCORE + cx * cx + cy * cy
+        }
+
+        val pageIt = pages.iterator()
+        while (pageIt.hasNext()) {
+            val (_, st) = pageIt.next()
             if (st.pending.isEmpty()) continue
-            if (st.page.destroyed || !st.stable) {
+            if (st.destroyed || !st.stable) {
                 st.pending.clear()
                 continue
             }
-            val centerTx = (st.txMin + st.txMax) * 0.5f
-            val centerTy = (st.tyMin + st.tyMax) * 0.5f
-            for (key in st.pending) {
-                val tx = (key shr 32).toInt()
-                val ty = key.toInt()
-                val outX = max(max(st.txMin - tx, tx - st.txMax), 0)
-                val outY = max(max(st.tyMin - ty, ty - st.tyMax), 0)
-                val cx = tx - centerTx
-                val cy = ty - centerTy
-                val priority = max(outX, outY) * 1e6f + cx * cx + cy * cy
+            for (pkey in st.pending) {
+                val priority = priorityOf(st, pkey)
                 if (priority < bestPriority) {
                     bestPriority = priority
-                    bestImage = image
                     bestState = st
-                    bestKey = key
+                    bestKey = pkey
                 }
             }
         }
-        val st = bestState ?: return null
-        st.pending.remove(bestKey)
-        return Request(bestImage!!, st, (bestKey shr 32).toInt(), bestKey.toInt())
+
+        if (bestState != null && bestPriority < OFF_SCREEN_SCORE) {
+            bestState.pending.remove(bestKey)
+            return Request.ForTile(bestState, (bestKey shr 32).toInt(), bestKey.toInt())
+        }
+
+        pendingTransitionPage1?.let { page ->
+            pendingTransitionPage1 = null
+            return Request.ForTransition(
+                page,
+                true,
+                pendingTransitionDstWidth,
+                pendingTransitionDstHeight
+            )
+        }
+
+        if (bestState != null) {
+            bestState.pending.remove(bestKey)
+            return Request.ForTile(bestState, (bestKey shr 32).toInt(), bestKey.toInt())
+        }
+
+        pendingTransitionPage2?.let { page ->
+            pendingTransitionPage2 = null
+            return Request.ForTransition(
+                page,
+                false,
+                pendingTransitionDstWidth,
+                pendingTransitionDstHeight
+            )
+        }
+
+        return null
     }
 
-    /** Render one tile with the filtered shader and store it. Runs outside any frame. */
     private fun generate(req: Request) {
+        when (req) {
+            is Request.ForTile -> generateTileRequest(req)
+            is Request.ForTransition -> generateTransitionRequest(req)
+        }
+    }
+
+    private fun generateTileRequest(req: Request.ForTile) {
         val st = req.state
-        if (st.page.destroyed || !st.stable) return
-        val key = key(req.tx, req.ty)
+        if (st.destroyed || !st.stable) return
+        generateTileNow(st, req.tx, req.ty)
+    }
+
+    /** Generate [st]'s tile at ([tx], [ty]) right now if it isn't already cached. */
+    private fun generateTileNow(st: PageTiles, tx: Int, ty: Int) {
+        generateTile(st, tx, ty) { pass, texture -> renderTileContent(st, tx, ty, pass, texture) }
+    }
+
+    /**
+     * Render a page's tile, drawing every one of its images into the same pass so a tile
+     * straddling their seam comes out with both already in place.
+     *
+     * Positions each image via [solveImagePlacement], the same inversion of
+     * [Image.prepareForRender]'s placement the fast path already uses. The target passed in is
+     * this image's ordinary full-frame placement minus the tile's own origin, so solving against
+     * a [TILE_SIZE]-square destination places exactly the crop this tile is responsible for.
+     */
+    private fun renderTileContent(
+        st: PageTiles, tx: Int, ty: Int, pass: GPURenderPassEncoder, texture: GPUTexture
+    ) {
+        val ts = TILE_SIZE.toFloat()
+        val s = st.scale
+        st.page.images.forEach { image ->
+            image ?: return@forEach
+            if (image.mipmaps.isEmpty()) return@forEach
+            // Same convention as RenderPage.renderPage's spread offset and the continuous
+            // overload's own docCenterX - keyed off the image's own position, in raw
+            // (unscaled) pixels since solveImagePlacement scales by s itself.
+            val spreadShift = when (image.position) {
+                Image.Position.LEFT -> -0.5f * image.width
+                Image.Position.RIGHT -> 0.5f * image.width
+                Image.Position.SINGLE -> 0f
+            }
+            val targetX = -tx * ts + s * (spreadShift + image.x)
+            val targetY = st.centerYOffset - ty * ts + s * image.y
+            val (x, y) = solveImagePlacement(targetX, targetY, s, image, ts, ts)
+            RenderPage.render(pass, image, texture, x, y, s)
+        }
+    }
+
+    /**
+     * Warm one slot of [Transition]'s cache from [page]'s already-generated tiles - see
+     * [blitIfFullyCovered]'s doc for why this never forces a missing one. A stale request (page
+     * destroyed, or already warmed by the time this was pulled) cheaply no-ops via [isCached].
+     */
+    private fun generateTransitionRequest(req: Request.ForTransition) {
+        if (req.page.destroyed || Transition.isCached(req.page, req.isPage1)) return
+        val encoder = device.createCommandEncoder()
+        val cached = Transition.getCachedTexture(
+            req.page, req.isPage1, encoder, req.dstWidth, req.dstHeight
+        ) { pass, tex -> blitIfFullyCovered(pass, req.page, tex) }
+        device.queue.submit(arrayOf(encoder.finish()))
+        if (cached != null) {
+            Log.d(
+                TAG,
+                "Pre-warmed transition cache: ${if (req.isPage1) "current" else "next"} " +
+                        "page ${pageId(req.page)}"
+            )
+            invalidate()
+        }
+    }
+
+    /**
+     * Compact, stable-per-object identifier for [page] in log messages - "current"/"next" are
+     * relative labels that get reassigned to a different actual page on every turn, so this is
+     * what lets a log reader tell whether two log lines are really about the same page.
+     */
+    private fun pageId(page: ImagePage) = Integer.toHexString(System.identityHashCode(page))
+
+    /**
+     * Draw every one of [page]'s currently cached tiles into [pass], covering the whole page - for
+     * [Transition]'s *background* cache warm only (see [generateTransitionRequest]), which wants
+     * exactly the pixels [draw] already produced rather than a second, separately-filtered render
+     * (which would hit [Image.prepareForRender]'s fixed-quad-window limit - see [RenderPage]'s doc).
+     *
+     * Deliberately never generates a missing tile itself, so background warming stays one tile's
+     * worth of work per worker turn; [prewarm]/[draw] are what drive a page's tiles to completion
+     * beforehand, and this only checks whether that's finished yet, drawing nothing and returning
+     * false otherwise. [renderFullyTiled] is the counterpart for when that can't be deferred.
+     */
+    private fun blitIfFullyCovered(
+        pass: GPURenderPassEncoder,
+        page: ImagePage,
+        dst: GPUTexture
+    ): Boolean {
+        if (!isFullyCovered(page, dst, 0f, 0f, 1f)) return false
+        val st = pages[page] ?: return false
+        pass.setPipeline(blitPipeline)
+        st.tiles.values.forEach { tile ->
+            tile.lastUsed = frame
+            pass.setBindGroup(0, tile.bindGroup)
+            pass.draw(6)
+        }
+        return true
+    }
+
+    /**
+     * Render [page]'s full tile grid into [dst], generating any tile the background worker hasn't
+     * reached yet right here instead of leaving it queued - for [Transition]'s live mid-transition
+     * render, which is showing the result to the user *right now* and can't defer an incomplete
+     * page. The background warm (see [blitIfFullyCovered]) is meant to make this unnecessary in
+     * the common case, so this only pays for real when the user turns the page faster than that
+     * work can keep up. Returns false, drawing nothing, if the page has no drawable images.
+     */
+    fun renderFullyTiled(pass: GPURenderPassEncoder, page: ImagePage, dst: GPUTexture): Boolean {
+        if (page.destroyed || !page.highQuality || page.isAnimated) return false
+        if (page.images.isEmpty() || page.images.all { it == null || it.mipmaps.isEmpty() }) return false
+
+        val a = pagedAnchor(page, dst, 0f, 0f, 1f)
+        drawCore(
+            pass, page, dst, a.anchorX, a.anchorY, 0f, a.pageScale,
+            suppressGeneration = false, applyRetainWindow = false
+        )
+
+        val st = pages[page] ?: return false
+
+        // A scale (or centerYOffset) change wipes the grid and marks it unstable within that same
+        // drawCore call - which also means its want/pending pass ran before stability was granted,
+        // so nothing got queued. drawCore's two-call gate exists to avoid re-wiping every frame
+        // while a gesture actively drives scale, but this caller has no next call to benefit from
+        // that - it must finish now regardless, e.g. a page turn triggered while the page is still
+        // mid-animation back to its home scale. Re-running once more (same anchor/scale, so no
+        // further wipe) grants stability immediately and lets the want/pending pass actually queue
+        // this frame's tiles - without this, the cache below gets marked valid from a blank render.
+        if (!st.stable) {
+            drawCore(
+                pass, page, dst, a.anchorX, a.anchorY, 0f, a.pageScale,
+                suppressGeneration = false, applyRetainWindow = false
+            )
+        }
+
+        if (st.pending.isEmpty()) return true
+
+        val toGenerate = st.pending.toList()
+        st.pending.clear()
+        toGenerate.forEach { tkey -> generateTileNow(st, (tkey shr 32).toInt(), tkey.toInt()) }
+
+        pass.setPipeline(blitPipeline)
+        toGenerate.forEach { tkey ->
+            val tile = st.tiles[tkey] ?: return@forEach
+            tile.lastUsed = frame
+            pass.setBindGroup(0, tile.bindGroup)
+            pass.draw(6)
+        }
+        return true
+    }
+
+    /**
+     * Render one [TILE_SIZE] tile at ([tx], [ty]) into [st] via [render], then store it.
+     */
+    private inline fun generateTile(
+        st: PageTiles, tx: Int, ty: Int, render: (GPURenderPassEncoder, GPUTexture) -> Unit
+    ) {
+        val key = key(tx, ty)
         if (st.tiles.containsKey(key)) return
         evict()
 
+        withTileTexture { texture, uniform ->
+            val encoder = device.createCommandEncoder()
+            val pass = encoder.beginRenderPass(clearedColorPass(texture))
+            try {
+                render(pass, texture)
+            } finally {
+                pass.end()
+            }
+            device.queue.submit(arrayOf(encoder.finish()))
+
+            writeTileUniform(uniform, tx, ty)
+            val bindGroup = tileBindGroup(st.frameUniform, uniform, texture)
+            st.tiles[key] = Tile(texture, uniform, bindGroup).also { it.lastUsed = frame }
+        }
+    }
+
+    private inline fun withTileTexture(block: (GPUTexture, GPUBuffer) -> Unit) {
         val texture = device.createTexture(
             GPUTextureDescriptor(
                 size = GPUExtent3D(TILE_SIZE, TILE_SIZE),
@@ -499,68 +1100,98 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
                 format = TextureFormat.RGBA8Unorm
             )
         )
-        // The tile's own uniform holds just its grid coordinate, which never changes, so it and
-        // the bind group are created once here and a blit is nothing but setBindGroup + draw.
-        // 32 bytes rather than the 8 the shader reads: writeBuffer writes the whole capacity of
-        // the shared scratch ByteBuffer, and a write must fit in the destination.
+        // Holds just the tile's grid coordinate, which never changes, so it and the bind group
+        // are created once here. 32 bytes rather than the 8 the shader reads, since writeBuffer
+        // writes the whole scratch ByteBuffer and a write must fit in the destination.
         val uniform = device.createBuffer(
             GPUBufferDescriptor(size = 32, usage = BufferUsage.Uniform or BufferUsage.CopyDst)
         )
         try {
-            val encoder = device.createCommandEncoder()
-            val pass = encoder.beginRenderPass(
-                GPURenderPassDescriptor(
-                    colorAttachments = arrayOf(
-                        GPURenderPassColorAttachment(
-                            view = texture.createView(),
-                            loadOp = LoadOp.Clear,
-                            storeOp = StoreOp.Store,
-                            clearValue = GPUColor(0.0, 0.0, 0.0, 0.0)
-                        )
-                    )
-                )
-            )
-            try {
-                // Place the image so its centre lands at tile pixel (-tx*ts, -ty*ts); content
-                // pixel c then lands at tile pixel c - t*ts, i.e. the tile holds exactly the
-                // content square [t*ts, (t+1)*ts). Solved from prepareForRender's placement:
-                // centre = ts/2 + scale * (x + image.x/ts + offsetX) * ts.
-                val ts = TILE_SIZE.toFloat()
-                val s = st.scale
-                val x =
-                    (-req.tx * ts - ts / 2f) / (s * ts) - req.image.x / ts - WebGpuRenderer.offsetX
-                val y =
-                    (-req.ty * ts - ts / 2f) / (s * ts) - req.image.y / ts - WebGpuRenderer.offsetY
-                RenderPage.render(pass, req.image, texture, x, y, s)
-            } finally {
-                pass.end()
-            }
-            device.queue.submit(arrayOf(encoder.finish()))
-
-            val byteBuffer = byteBufferLocal.get()
-            byteBuffer.clear()
-            byteBuffer.putFloat(req.tx.toFloat())
-            byteBuffer.putFloat(req.ty.toFloat())
-            byteBuffer.flip()
-            device.queue.writeBuffer(uniform, 0, byteBuffer)
-
-            val bindGroup = device.createBindGroup(
-                GPUBindGroupDescriptor(
-                    layout = blitPipeline.getBindGroupLayout(0), entries = arrayOf(
-                        GPUBindGroupEntry(0, buffer = st.frameUniform),
-                        GPUBindGroupEntry(1, buffer = uniform),
-                        GPUBindGroupEntry(2, textureView = texture.createView()),
-                        GPUBindGroupEntry(3, sampler = blitSampler),
-                    )
-                )
-            )
-            st.tiles[key] = Tile(texture, uniform, bindGroup).also { it.lastUsed = frame }
+            block(texture, uniform)
         } catch (e: Exception) {
             texture.destroy()
             uniform.destroy()
             throw e
         }
     }
+
+    private fun clearedColorPass(texture: GPUTexture) = GPURenderPassDescriptor(
+        colorAttachments = arrayOf(
+            GPURenderPassColorAttachment(
+                view = texture.createView(),
+                loadOp = LoadOp.Clear,
+                storeOp = StoreOp.Store,
+                clearValue = GPUColor(0.0, 0.0, 0.0, 0.0)
+            )
+        )
+    )
+
+    /**
+     * Write [st]'s frame uniform - snapped anchor, [dst]'s size, and a clip rect - if any of them
+     * actually changed since the last write. Shared by both [draw] overloads and [prewarm], which
+     * each derive the same 32-byte layout from their own notion of "this grid's clip".
+     */
+    private fun writeFrameUniformIfChanged(
+        st: PageTiles,
+        dst: GPUTexture,
+        snapX: Float,
+        snapY: Float,
+        clipL: Float,
+        clipT: Float,
+        clipR: Float,
+        clipB: Float
+    ) {
+        val dstW = dst.width.toFloat()
+        val dstH = dst.height.toFloat()
+        if (st.writtenSnapX == snapX && st.writtenSnapY == snapY &&
+            st.writtenDstW == dstW && st.writtenDstH == dstH &&
+            st.writtenClipL == clipL && st.writtenClipT == clipT &&
+            st.writtenClipR == clipR && st.writtenClipB == clipB
+        ) return
+
+        val byteBuffer = byteBufferLocal.get()
+        byteBuffer.clear()
+        byteBuffer.putFloat(snapX)
+        byteBuffer.putFloat(snapY)
+        byteBuffer.putFloat(dstW)
+        byteBuffer.putFloat(dstH)
+        byteBuffer.putFloat(clipL)
+        byteBuffer.putFloat(clipT)
+        byteBuffer.putFloat(clipR)
+        byteBuffer.putFloat(clipB)
+        byteBuffer.flip()
+        device.queue.writeBuffer(st.frameUniform, 0, byteBuffer)
+        st.writtenSnapX = snapX
+        st.writtenSnapY = snapY
+        st.writtenDstW = dstW
+        st.writtenDstH = dstH
+        st.writtenClipL = clipL
+        st.writtenClipT = clipT
+        st.writtenClipR = clipR
+        st.writtenClipB = clipB
+    }
+
+    private fun writeTileUniform(uniform: GPUBuffer, tx: Int, ty: Int) {
+        val byteBuffer = byteBufferLocal.get()
+        byteBuffer.clear()
+        byteBuffer.putFloat(tx.toFloat())
+        byteBuffer.putFloat(ty.toFloat())
+        byteBuffer.flip()
+        device.queue.writeBuffer(uniform, 0, byteBuffer)
+    }
+
+    private fun tileBindGroup(
+        frameUniform: GPUBuffer, tileUniform: GPUBuffer, texture: GPUTexture
+    ): GPUBindGroup = device.createBindGroup(
+        GPUBindGroupDescriptor(
+            layout = blitPipeline.getBindGroupLayout(0), entries = arrayOf(
+                GPUBindGroupEntry(0, buffer = frameUniform),
+                GPUBindGroupEntry(1, buffer = tileUniform),
+                GPUBindGroupEntry(2, textureView = texture.createView()),
+                GPUBindGroupEntry(3, sampler = blitSampler),
+            )
+        )
+    )
 
     /**
      * Evict least-recently-used tiles down to [maxTiles], best-effort.
@@ -572,14 +1203,12 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
      */
     private fun evict() {
         var total = 0
-        for (st in images.values) total += st.tiles.size
+        for (st in pages.values) total += st.tiles.size
         if (total < maxTiles) return
 
-        val candidates = ArrayList<Triple<ImageTiles, Long, Tile>>()
-        for (st in images.values) {
-            for ((k, t) in st.tiles) {
-                if (t.lastUsed < frame - 1) candidates.add(Triple(st, k, t))
-            }
+        val candidates = ArrayList<Triple<PageTiles, Long, Tile>>()
+        for (st in pages.values) {
+            for ((k, t) in st.tiles) if (t.lastUsed < frame - 1) candidates.add(Triple(st, k, t))
         }
         candidates.sortBy { it.third.lastUsed }
         var i = 0
@@ -593,21 +1222,14 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     }
 
     /**
-     * Free every tile. Safe from any thread; the destruction runs on the render thread, where
-     * the worker finds nothing pending and stops. Not a permanent shutdown: the surface can be
-     * torn down and recreated with the same viewer state, and rendering simply refills the cache
-     * - a dead tile layer after the app comes back to the foreground would be a silent quality
-     * regression.
+     * Free every tile. Safe from any thread; destruction runs on the render thread. Not a
+     * permanent shutdown - the surface can be recreated with the same viewer state afterward, and
+     * rendering simply refills the cache.
      */
     fun cleanup() {
         workerScope.launch {
-            images.values.forEach { st ->
-                st.tiles.values.forEach { it.destroy() }
-                st.tiles.clear()
-                st.pending.clear()
-                st.frameUniform.destroy()
-            }
-            images.clear()
+            pages.values.forEach { it.destroyAll() }
+            pages.clear()
         }
     }
 }
@@ -616,10 +1238,10 @@ private const val BLIT_SHADER = """
 const TS: f32 = $TILE_SIZE.0;
 
 struct FrameParams {
-    // Snapped screen-pixel position of the image centre; the tile grid hangs off it.
+    // Snapped screen-pixel position of the grid's centre; the tile grid hangs off it.
     snap: vec2<f32>,
     dst_size: vec2<f32>,
-    // The image's rect inset by a pixel, in screen pixels - the underlay owns the perimeter.
+    // The grid's rect in screen pixels that blits are clipped to - see the class doc.
     clip: vec4<f32>,
 }
 

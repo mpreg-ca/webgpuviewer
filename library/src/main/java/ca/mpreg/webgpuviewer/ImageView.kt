@@ -7,9 +7,12 @@ import androidx.compose.ui.platform.AbstractComposeView
 import ca.mpreg.webgpuviewer.viewer.ImageViewer
 import ca.mpreg.webgpuviewer.viewer.ImageViewerState
 
-open class ImageView(context: Context, attrs: AttributeSet? = null, isVertical: Boolean = false) :
-    AbstractComposeView(context, attrs) {
-
+open class ImageView(
+    context: Context,
+    attrs: AttributeSet? = null,
+    isVertical: Boolean = false,
+    isReversed: Boolean = false,
+) : AbstractComposeView(context, attrs) {
     constructor(context: Context, attrs: AttributeSet? = null) : this(
         context, attrs, context.obtainStyledAttributes(
             attrs, intArrayOf(android.R.attr.orientation)
@@ -19,7 +22,7 @@ open class ImageView(context: Context, attrs: AttributeSet? = null, isVertical: 
             orientation == 1
         })
 
-    open val state: ImageViewerState = ImageViewerState(isVertical)
+    open val state: ImageViewerState = ImageViewerState(isVertical, isReversed)
 
     @Composable
     override fun Content() {

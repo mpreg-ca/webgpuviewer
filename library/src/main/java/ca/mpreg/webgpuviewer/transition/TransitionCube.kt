@@ -18,7 +18,7 @@ import androidx.webgpu.StoreOp
 import ca.mpreg.webgpuviewer.draw.Draw
 import ca.mpreg.webgpuviewer.draw.clear
 import ca.mpreg.webgpuviewer.draw.rect
-import ca.mpreg.webgpuviewer.renderer.RenderPage
+import ca.mpreg.webgpuviewer.renderer.TileRenderer
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.getCachedTexture
 import ca.mpreg.webgpuviewer.viewer.ImagePage
 import java.nio.ByteBuffer
@@ -31,8 +31,7 @@ import kotlin.math.sin
  *
  * Each page is rendered flat into a cached screen-sized texture first, then a face maps that
  * texture onto a rotating quad. [getCachedTexture] keys on the page's own transform, so the flat
- * render happens once per transition while only the rotation is per-frame - which is what lets the
- * flat render use [RenderPage]'s sharp filter instead of something cheap enough to run every frame.
+ * render happens once per transition while only the rotation is per-frame.
  *
  * A face is the whole cached surface, so it is screen-shaped rather than page-shaped - unlike the
  * flips and the sphere, which map the page's rect. Each face also gets a background column behind
@@ -217,13 +216,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         frac: Float,
         pos1: Offset,
         pos2: Offset,
+        tiles: TileRenderer,
     ) {
         val cached1 = getCachedTexture(page1, true, encoder, dst.width, dst.height) { pass, tex ->
-            RenderPage.render(pass, page1, tex, 0f, 0f, 1f)
+            tiles.renderFullyTiled(pass, page1, tex)
         }
 
         val cached2 = getCachedTexture(page2, false, encoder, dst.width, dst.height) { pass, tex ->
-            RenderPage.render(pass, page2, tex, 0f, 0f, 1f)
+            tiles.renderFullyTiled(pass, page2, tex)
         }
 
         val t = if (frac > 0f) frac else 1f + frac
@@ -292,9 +292,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         encoder: GPUCommandEncoder,
         dst: GPUTexture,
         matrix: FloatArray,
+        tiles: TileRenderer,
     ) {
         val cached = getCachedTexture(page, isPage1, encoder, dst.width, dst.height) { pass, tex ->
-            RenderPage.render(pass, page, tex, 0f, 0f, 1f)
+            tiles.renderFullyTiled(pass, page, tex)
         }
         drawFace(cached, page, encoder, dst, matrix)
     }

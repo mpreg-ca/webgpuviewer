@@ -31,9 +31,13 @@ import androidx.webgpu.PrimitiveTopology.Companion.TriangleList
 import androidx.webgpu.StoreOp
 import androidx.webgpu.TextureFormat
 import androidx.webgpu.TextureUsage
+import ca.mpreg.webgpuviewer.renderer.TileRenderer
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.blitCached
+import ca.mpreg.webgpuviewer.transition.Transition.Companion.cacheLock
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.getCachedTexture
+import ca.mpreg.webgpuviewer.transition.Transition.Companion.invalidateCache
+import ca.mpreg.webgpuviewer.transition.Transition.Companion.isCached
 import ca.mpreg.webgpuviewer.viewer.ImagePage
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -84,7 +88,7 @@ abstract class Transition {
         )
     }
 
-    abstract fun render(
+    internal abstract fun render(
         page1: ImagePage,
         page2: ImagePage,
         encoder: GPUCommandEncoder,
@@ -92,6 +96,7 @@ abstract class Transition {
         frac: Float,
         pos1: Offset,
         pos2: Offset,
+        tiles: TileRenderer,
     )
 
     companion object {
@@ -249,24 +254,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
         /**
          * The rect [page]'s flat render occupies inside its cached texture, as normalised
-         * (x1, y1, x2, y2) surface coordinates, or null if the page has nothing to draw.
-         *
-         * [getCachedTexture] renders the page through `RenderPage` at the page's own transform, so
-         * this mirrors the placement that produces. A warp needs it to map the page's rect rather
-         * than the whole surface - otherwise its geometry would be screen-shaped, and a page
-         * narrower or shorter than the surface would fold or rotate as if it filled it.
+         * (x1, y1, x2, y2) surface coordinates, or null if the page has nothing to draw. Mirrors
+         * [getCachedTexture]'s own placement, so a warp maps the page's actual rect rather than
+         * treating it as screen-shaped.
          */
         internal fun pageRect(page: ImagePage, dst: GPUTexture): FloatArray? {
             val image = page.images.firstOrNull() ?: return null
-            val res = image.prepareForRender(dst, page.x, page.y, page.scale) ?: return null
-            val w = res.mipmap.width.toFloat() / dst.width
-            val h = res.mipmap.height.toFloat() / dst.height
-            return floatArrayOf(
-                res.scale * res.x,
-                res.scale * res.y,
-                res.scale * (res.x + w),
-                res.scale * (res.y + h),
-            )
+            if (image.mipmaps.isEmpty()) return null
+            return image.placement(dst, page.x, page.y, page.scale)
         }
 
         /**
@@ -281,8 +276,58 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
 
         /**
-         * Get cached texture view for a page, rendering if needed.
-         * Returns null only if the page has no images.
+         * Called once a page turn settles on [newCurrentPage]. Slot 2 is often already a valid
+         * render of it - prewarmed by [ImageViewerState] while it was still the *next* page - so
+         * this swaps it into slot 1 instead of discarding it. Falls back to a full wipe (like the
+         * unconditional [invalidateCache] this replaces) when neither slot matches.
+         */
+        fun rotateCacheOnPageChange(newCurrentPage: ImagePage) {
+            synchronized(cacheLock) {
+                when {
+                    cacheHitLocked(newCurrentPage, true) -> cachedPage2 = null
+                    cacheHitLocked(newCurrentPage, false) -> {
+                        val t = texture1; texture1 = texture2; texture2 = t
+                        val v = view1; view1 = view2; view2 = v
+                        cachedPage1 = cachedPage2
+                        cachedX1 = cachedX2
+                        cachedY1 = cachedY2
+                        cachedScale1 = cachedScale2
+                        cachedFrameVersion1 = cachedFrameVersion2
+                        cachedPage2 = null
+                    }
+
+                    else -> {
+                        cachedPage1 = null
+                        cachedPage2 = null
+                    }
+                }
+            }
+        }
+
+        /** Must hold [cacheLock]. Shared by [getCachedTexture] and [isCached]. */
+        private fun cacheHitLocked(page: ImagePage, isPage1: Boolean): Boolean {
+            val cachedPage = if (isPage1) cachedPage1 else cachedPage2
+            val cachedX = if (isPage1) cachedX1 else cachedX2
+            val cachedY = if (isPage1) cachedY1 else cachedY2
+            val cachedScale = if (isPage1) cachedScale1 else cachedScale2
+            val cachedFrame = if (isPage1) cachedFrameVersion1 else cachedFrameVersion2
+            return cachedPage === page && cachedX == page.x && cachedY == page.y &&
+                    cachedScale == page.scale && cachedFrame == page.frameVersion
+        }
+
+        /**
+         * True if [getCachedTexture] would return a cache hit for [page] right now, with no
+         * rendering - lets a caller (the shared background worker) decide whether warming this
+         * page is still necessary before spending a turn on it.
+         */
+        internal fun isCached(page: ImagePage, isPage1: Boolean): Boolean =
+            synchronized(cacheLock) { cacheHitLocked(page, isPage1) }
+
+        /**
+         * Get cached texture view for a page, rendering if needed. [renderPage] returns whether it
+         * actually rendered - false leaves the texture cleared but doesn't mark it valid, so the
+         * caller retries later rather than the cache reporting a hit for a blank frame. Returns
+         * null if the page has no images or a needed render didn't happen.
          */
         internal fun getCachedTexture(
             page: ImagePage,
@@ -290,42 +335,28 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             encoder: GPUCommandEncoder,
             dstWidth: Int,
             dstHeight: Int,
-            renderPage: (GPURenderPassEncoder, GPUTexture) -> Unit
+            renderPage: (GPURenderPassEncoder, GPUTexture) -> Boolean
         ): GPUTextureView? {
             if (page.destroyed || page.images.all { it == null }) return null
+
+            // Lock only for metadata - GPU recording runs on the single GPU thread and doesn't
+            // need it; cacheLock only guards against invalidateCache() from the UI thread.
+            val (texture, view, needsRender) = synchronized(cacheLock) {
+                ensureTexturesLocked(dstWidth, dstHeight)
+                val texture = if (isPage1) texture1!! else texture2!!
+                val view = if (isPage1) view1!! else view2!!
+                Triple(texture, view, !cacheHitLocked(page, isPage1))
+            }
+
+            if (!needsRender) return view
 
             val pageX = page.x
             val pageY = page.y
             val pageScale = page.scale
             val pageFrameVersion = page.frameVersion
 
-            // Check cache validity and ensure textures exist (lock only for metadata).
-            // GPU command recording does not need the lock - it always runs on the single
-            // GPU render thread, and cacheLock only guards against invalidateCache() from UI thread.
-            val (texture, view, needsRender) = synchronized(cacheLock) {
-                ensureTexturesLocked(dstWidth, dstHeight)
-
-                val texture = if (isPage1) texture1!! else texture2!!
-                val view = if (isPage1) view1!! else view2!!
-                val cachedPage = if (isPage1) cachedPage1 else cachedPage2
-                val cachedX = if (isPage1) cachedX1 else cachedX2
-                val cachedY = if (isPage1) cachedY1 else cachedY2
-                val cachedScale = if (isPage1) cachedScale1 else cachedScale2
-                val cachedFrame = if (isPage1) cachedFrameVersion1 else cachedFrameVersion2
-
-                val cacheHit =
-                    cachedPage === page && cachedX == pageX && cachedY == pageY && cachedScale == pageScale && cachedFrame == pageFrameVersion
-
-                Triple(texture, view, !cacheHit)
-            }
-
-            if (!needsRender) return view
-
-            // Record GPU commands outside the lock - GPU thread is single-threaded.
-            //
-            // The clear and the page's draws share one pass. Opening it here rather than letting
-            // the callback do it is what lets the callback take a pass at all, and it drops the
-            // separate clear-only pass this used to need.
+            // Record outside the lock - GPU thread is single-threaded. The clear and the page's
+            // draws share one pass, opened here so the callback can just draw into it.
             val pass = encoder.beginRenderPass(
                 GPURenderPassDescriptor(
                     colorAttachments = arrayOf(
@@ -338,11 +369,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                     )
                 )
             )
-            try {
+            val rendered = try {
                 renderPage(pass, texture)
             } finally {
                 pass.end()
             }
+
+            if (!rendered) return null
 
             // Update cache metadata
             synchronized(cacheLock) {
@@ -365,8 +398,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
 
         /**
-         * Blit a cached texture to the destination with an offset.
-         * Does nothing if cachedView is null.
+         * Blit a cached texture to the destination with an offset. If [cachedView] is null, draws
+         * nothing but still clears when [clearFirst] is set, so an undecoded page never leaves
+         * stale swapchain content on screen.
          */
         internal fun blitCached(
             encoder: GPUCommandEncoder,
@@ -376,7 +410,24 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             offsetY: Float,
             clearFirst: Boolean = false
         ) {
-            if (cachedView == null) return
+            if (cachedView == null) {
+                if (clearFirst) {
+                    val pass = encoder.beginRenderPass(
+                        GPURenderPassDescriptor(
+                            colorAttachments = arrayOf(
+                                GPURenderPassColorAttachment(
+                                    view = dst.createView(),
+                                    loadOp = LoadOp.Clear,
+                                    storeOp = StoreOp.Store,
+                                    clearValue = GPUColor(0.0, 0.0, 0.0, 0.0)
+                                )
+                            )
+                        )
+                    )
+                    pass.end()
+                }
+                return
+            }
 
             val byteBuffer = blitByteBuffer.get()
             byteBuffer.clear()

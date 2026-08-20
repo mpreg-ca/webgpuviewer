@@ -1,6 +1,5 @@
 package ca.mpreg.webgpuviewer.viewer
 
-import android.content.res.Resources
 import android.graphics.Bitmap
 import android.util.Log
 import androidx.compose.animation.core.Spring
@@ -50,6 +49,12 @@ open class ImagePage(val images: List<Image?>) {
             }
         }
 
+        init {
+            // Content changes every frame while drawn into - not worth the filtered/tiled paths'
+            // extra sharpness or the fast path's linear-light correction.
+            highQuality = false
+        }
+
         val texture: GPUTexture?
             get() = images.firstOrNull()?.mipmaps?.firstOrNull()?.textures?.firstOrNull()
     }
@@ -92,6 +97,15 @@ open class ImagePage(val images: List<Image?>) {
 
     /** If true, this page owns its images and will clean them up. If false, images are borrowed. */
     var ownsImages: Boolean = true
+
+    /**
+     * When false, this page skips [ca.mpreg.webgpuviewer.renderer.TileRenderer]'s tile cache
+     * entirely and its fast path renders through [ca.mpreg.webgpuviewer.renderer.RenderPage.renderPlain]
+     * instead of [ca.mpreg.webgpuviewer.renderer.RenderPage.renderFast] - for content not worth
+     * either path's extra correctness or sharpness, such as [Draw]'s loading placeholder (always
+     * false, see its `init`) or an app-drawn transition/error bitmap.
+     */
+    var highQuality: Boolean = true
 
     var scale: Float = 1f
     var x: Float = 0f
@@ -138,6 +152,14 @@ open class ImagePage(val images: List<Image?>) {
     var animationTargetX: Float? = null
     var animationTargetY: Float? = null
     var animationTargetScale: Float? = null
+
+    /**
+     * True while [scale] is being animated - by [animateTo] or externally (e.g. fling-zoom decay,
+     * which sets this directly). Gates the tile cache, which otherwise can't tell a settled scale
+     * from a spring that's merely repeating a value for a frame mid-flight.
+     */
+    @Volatile
+    var isScaleAnimating: Boolean = false
 
     var homeScaleOverride: Float? = null
     var homeXOverride: Float? = null
@@ -329,8 +351,7 @@ open class ImagePage(val images: List<Image?>) {
     var maxScale = -1f
         get() = if (field > 0) field else max(doubleTapScale * 2, 2f)
 
-    private val dpi = Resources.getSystem().displayMetrics.densityDpi / 100f
-    val doubleTapScale: Float get() = max(dpi, minScale * 2)
+    val doubleTapScale: Float get() = minScale * 2
 
     fun maxX(scale: Float): Float {
         val parent = parent ?: return 0f
@@ -395,6 +416,7 @@ open class ImagePage(val images: List<Image?>) {
             animationTargetX = endX
             animationTargetY = endY
             animationTargetScale = targetScale
+            if (scaleChanging) isScaleAnimating = true
             try {
                 animate(
                     0f, 1f, animationSpec = spring(
@@ -418,6 +440,7 @@ open class ImagePage(val images: List<Image?>) {
                 animationTargetX = null
                 animationTargetY = null
                 animationTargetScale = null
+                isScaleAnimating = false
             }
         }
     }

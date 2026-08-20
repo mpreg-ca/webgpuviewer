@@ -3,7 +3,7 @@ package ca.mpreg.webgpuviewer.transition
 import androidx.compose.ui.geometry.Offset
 import androidx.webgpu.GPUCommandEncoder
 import androidx.webgpu.GPUTexture
-import ca.mpreg.webgpuviewer.renderer.RenderPage
+import ca.mpreg.webgpuviewer.renderer.TileRenderer
 import ca.mpreg.webgpuviewer.viewer.ImagePage
 
 object TransitionStackDown : Transition() {
@@ -15,13 +15,14 @@ object TransitionStackDown : Transition() {
         frac: Float,
         pos1: Offset,
         pos2: Offset,
+        tiles: TileRenderer,
     ) {
         val cached1 = getCachedTexture(page1, true, encoder, dst.width, dst.height) { pass, tex ->
-            RenderPage.render(pass, page1, tex, 0f, 0f, 1f)
+            tiles.renderFullyTiled(pass, page1, tex)
         }
 
         val cached2 = getCachedTexture(page2, false, encoder, dst.width, dst.height) { pass, tex ->
-            RenderPage.render(pass, page2, tex, 0f, 0f, 1f)
+            tiles.renderFullyTiled(pass, page2, tex)
         }
 
         if (frac > 0f) {

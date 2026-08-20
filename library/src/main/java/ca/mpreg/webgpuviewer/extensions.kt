@@ -1,12 +1,17 @@
 package ca.mpreg.webgpuviewer
 
 import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.ui.MotionDurationScale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.AwaitPointerEventScope
 import androidx.compose.ui.input.pointer.PointerEvent
 import androidx.compose.ui.input.pointer.PointerEventTimeoutCancellationException
 import androidx.compose.ui.input.pointer.PointerId
 import androidx.compose.ui.input.pointer.changedToUp
+
+internal object NormalMotionDurationScale : MotionDurationScale {
+    override val scaleFactor: Float = 1f
+}
 
 suspend fun AwaitPointerEventScope.waitForCleanUp(
     pointerId: PointerId, timeout: Long, touchSlop: Float

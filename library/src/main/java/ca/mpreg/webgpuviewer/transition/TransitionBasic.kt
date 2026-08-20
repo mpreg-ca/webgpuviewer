@@ -3,20 +3,17 @@ package ca.mpreg.webgpuviewer.transition
 import androidx.compose.ui.geometry.Offset
 import androidx.webgpu.GPUCommandEncoder
 import androidx.webgpu.GPUTexture
-import ca.mpreg.webgpuviewer.renderer.RenderPage
+import ca.mpreg.webgpuviewer.renderer.TileRenderer
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.getCachedTexture
 import ca.mpreg.webgpuviewer.viewer.ImagePage
 
 /**
  * Slide transition: both pages go to cached textures, then get blitted side by side at an offset.
  *
- * Drawing a page is [RenderPage]'s job; this only decides where the two end up.
+ * Drawing a page is [TileRenderer.renderFullyTiled]'s job; this only decides where they end up.
  *
- * The page goes through [RenderPage.render] - the sharp, expensive filter - rather than
- * [RenderPage.renderFast]. [getCachedTexture] keys on the page's own transform, and a page turn
- * only animates the offset, so that render happens once per transition and every later frame is a
- * cache hit plus a 1:1 blit. Paying for the good filter once is free; using the cheap one would
- * bake softness into every frame of the animation.
+ * [getCachedTexture] keys on the page's own transform, and a page turn only animates the offset,
+ * so that render happens once per transition and every later frame is a cache hit plus a 1:1 blit.
  */
 object TransitionBasic : Transition() {
     override fun render(
@@ -27,13 +24,14 @@ object TransitionBasic : Transition() {
         frac: Float,
         pos1: Offset,
         pos2: Offset,
+        tiles: TileRenderer,
     ) {
         val cached1 = getCachedTexture(page1, true, encoder, dst.width, dst.height) { pass, tex ->
-            RenderPage.render(pass, page1, tex, 0f, 0f, 1f)
+            tiles.renderFullyTiled(pass, page1, tex)
         }
 
         val cached2 = getCachedTexture(page2, false, encoder, dst.width, dst.height) { pass, tex ->
-            RenderPage.render(pass, page2, tex, 0f, 0f, 1f)
+            tiles.renderFullyTiled(pass, page2, tex)
         }
 
         if (frac > 0f) {
@@ -55,15 +53,16 @@ object TransitionBasic : Transition() {
             frac: Float,
             pos1: Offset,
             pos2: Offset,
+            tiles: TileRenderer,
         ) {
             val cached1 =
                 getCachedTexture(page1, true, encoder, dst.width, dst.height) { pass, tex ->
-                    RenderPage.render(pass, page1, tex, 0f, 0f, 1f)
+                    tiles.renderFullyTiled(pass, page1, tex)
                 }
 
             val cached2 =
                 getCachedTexture(page2, false, encoder, dst.width, dst.height) { pass, tex ->
-                    RenderPage.render(pass, page2, tex, 0f, 0f, 1f)
+                    tiles.renderFullyTiled(pass, page2, tex)
                 }
 
             if (frac > 0f) {
