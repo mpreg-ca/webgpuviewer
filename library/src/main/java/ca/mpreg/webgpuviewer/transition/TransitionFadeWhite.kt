@@ -30,7 +30,7 @@ import java.nio.ByteOrder
 
 object TransitionFadeWhite : Transition() {
     private val fadeWhiteByteBuffer = ThreadLocal.withInitial {
-        ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder())
+        ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder())
     }
 
     private val fadeWhiteSampler by lazy {
@@ -58,6 +58,7 @@ object TransitionFadeWhite : Transition() {
     private const val FADE_WHITE_SHADER = """
 struct Uniforms {
     fade: f32,
+    bg: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -107,20 +108,30 @@ fn to_srgb(linear: vec3<f32>) -> vec3<f32> {
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let c = textureSample(src_tex, src_sampler, in.uv);
-    
+
+    let comp = uniforms.bg.rgb * (1.0 - c.a) + c.rgb;
+
     // Blend toward white in linear space
-    let linear = to_linear(c.rgb);
-    let white = vec3<f32>(1.0);
-    let blended = mix(linear, white, uniforms.fade);
-    
-    return vec4<f32>(to_srgb(blended), c.a);
+    let linear = to_linear(comp);
+    let white = vec4<f32>(1.0);
+    let blended = mix(vec4(linear, 1.0), white, uniforms.fade);
+
+    return vec4<f32>(to_srgb(blended.rgb), blended.a);
 }
 """
+
+    private fun putColor(buffer: ByteBuffer, color: Int) {
+        buffer.putFloat(((color shr 16) and 0xFF) / 255f)
+        buffer.putFloat(((color shr 8) and 0xFF) / 255f)
+        buffer.putFloat((color and 0xFF) / 255f)
+        buffer.putFloat(((color ushr 24) and 0xFF) / 255f)
+    }
 
     private fun fadeWhiteCached(
         encoder: GPUCommandEncoder,
         dst: GPUTexture,
         cachedView: GPUTextureView?,
+        bg: Int,
         fade: Float
     ) {
         if (cachedView == null) return
@@ -128,10 +139,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         val byteBuffer = fadeWhiteByteBuffer.get()
         byteBuffer.clear()
         byteBuffer.putFloat(fade)
+        byteBuffer.putFloat(0f)
+        byteBuffer.putFloat(0f)
+        byteBuffer.putFloat(0f)
+        putColor(byteBuffer, bg)
         byteBuffer.flip()
 
         val uniformBuffer = WebGpuRenderer.device.createBuffer(
-            GPUBufferDescriptor(size = 4, usage = BufferUsage.Uniform or BufferUsage.CopyDst)
+            GPUBufferDescriptor(size = 32, usage = BufferUsage.Uniform or BufferUsage.CopyDst)
         )
         WebGpuRenderer.device.queue.writeBuffer(uniformBuffer, 0, byteBuffer)
 
@@ -190,10 +205,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // Second half: fade white to next
         if (t < 0.5f) {
             // Fade page1 to white (t goes 0 -> 0.5, fadeToWhite goes 0 -> 1)
-            fadeWhiteCached(encoder, dst, cached1, t * 2f)
+            val bg1 = page1.images.firstOrNull()?.backgroundColor ?: 0
+            fadeWhiteCached(encoder, dst, cached1, bg1, t * 2f)
         } else {
             // Fade white to page2 (t goes 0.5 -> 1, fadeToWhite goes 1 -> 0)
-            fadeWhiteCached(encoder, dst, cached2, (1f - t) * 2f)
+            val bg2 = page2.images.firstOrNull()?.backgroundColor ?: 0
+            fadeWhiteCached(encoder, dst, cached2, bg2, (1f - t) * 2f)
         }
     }
 }

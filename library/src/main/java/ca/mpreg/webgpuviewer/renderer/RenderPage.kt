@@ -29,6 +29,9 @@ import ca.mpreg.webgpuviewer.renderer.RenderPage.renderPlain
 import ca.mpreg.webgpuviewer.viewer.ImagePage
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
 
 /**
  * Draws a page or a single image into a render pass. Every path that draws a page's live content
@@ -686,40 +689,54 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             // Draw background color behind the image
             val parent = page.parent
             val minScale = page.minScale
+            val homeScale = page.homeScale
             val currentScale = page.scale * scale
 
-            var bgAlpha = 1f
-            val fadeDistancePixels = 50f
+            val fadeDistancePixels = 200f
+            val imageSize = (page.width.coerceAtLeast(page.height)).toFloat()
 
-            if (parent != null && currentScale < minScale && minScale > 0f) {
-                val imageSize = (page.width.coerceAtLeast(page.height)).toFloat()
-                val sizeAtMinScale = imageSize * minScale
-                val currentSize = imageSize * currentScale
-                val shrinkPixels = sizeAtMinScale - currentSize
-                bgAlpha *= (1f - shrinkPixels / fadeDistancePixels).coerceIn(0f, 1f)
+            fun proximity(anchorScale: Float): Float {
+                if (anchorScale <= 0f) return 0f
+                val deltaPixels = abs(imageSize * (currentScale - anchorScale))
+                return (1f - deltaPixels / fadeDistancePixels).coerceIn(0f, 1f)
             }
 
-            if (parent != null && parent.height > 0) {
-                val minY = page.minY(page.scale)
-                val maxY = page.maxY(page.scale)
-                val currentY = page.y
-                val fadeDistance = fadeDistancePixels / parent.height / page.scale
-
-                if (currentY < minY) {
-                    val overflow = minY - currentY
-                    bgAlpha *= (1f - overflow / fadeDistance).coerceIn(0f, 1f)
-                } else if (currentY > maxY) {
-                    val overflow = currentY - maxY
-                    bgAlpha *= (1f - overflow / fadeDistance).coerceIn(0f, 1f)
+            fun boundProximity(value: Float, lo: Float, hi: Float, pixelsPerUnit: Float): Float {
+                val overflow = when {
+                    value < lo -> lo - value
+                    value > hi -> value - hi
+                    else -> return 1f
                 }
+                return (1f - overflow * pixelsPerUnit / fadeDistancePixels).coerceIn(0f, 1f)
+            }
+
+            fun boundsProximityAt(anchorScale: Float): Float {
+                if (parent == null || anchorScale <= 0f) return 0f
+                val maxX = page.maxX(anchorScale)
+                val minY = page.minY(anchorScale)
+                val maxY = page.maxY(anchorScale)
+                val pixelsPerUnitX = parent.width.toFloat() * anchorScale
+                val pixelsPerUnitY = parent.height.toFloat() * anchorScale
+                return min(
+                    boundProximity(page.x, -maxX, maxX, pixelsPerUnitX),
+                    boundProximity(page.y, minY, maxY, pixelsPerUnitY)
+                )
+            }
+
+            val bgAlpha = if (parent != null) {
+                val homeProximity = min(proximity(homeScale), boundsProximityAt(homeScale))
+                val minProximity = min(proximity(minScale), boundsProximityAt(minScale))
+                max(homeProximity, minProximity)
+            } else {
+                1f
             }
 
             val origA = (image.backgroundColor ushr 24) and 0xFF
             val a = (origA * bgAlpha).toInt()
 
             if (a > 0) {
-                val x1 = rect[0]
-                val x2 = rect[2]
+                val x1 = if (image.position == Image.Position.SINGLE) 0f else rect[0]
+                val x2 = if (image.position == Image.Position.SINGLE) 1f else rect[2]
                 val origR = (image.backgroundColor shr 16) and 0xFF
                 val origG = (image.backgroundColor shr 8) and 0xFF
                 val origB = image.backgroundColor and 0xFF

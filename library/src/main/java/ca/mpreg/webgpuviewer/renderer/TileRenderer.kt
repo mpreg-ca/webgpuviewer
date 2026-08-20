@@ -822,7 +822,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
                     }
                     if (generated == 0) break
                     invalidate()
-                     yield()
+                    yield()
                 }
             } finally {
                 workerActive = false

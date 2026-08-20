@@ -165,56 +165,107 @@ int chooseThreadCount(int width, int height) {
 // Background detection
 // ---------------------------------------------------------------------------
 
-struct EdgeAccum {
-  double sum[3];
-  double sumSq[3];
-  int64_t total;
-};
-
-inline void accumulate(EdgeAccum &acc, const uint8_t *px) {
-  // Alpha is deliberately ignored, matching the edge-detect shader, which reads
-  // .rgb straight out of the texture without compositing.
-  for (int ch = 0; ch < 3; ++ch) {
-    const double v = px[ch] / 255.0;
-    acc.sum[ch] += v;
-    acc.sumSq[ch] += v * v;
-  }
-  acc.total++;
+inline double linearToSrgb(double c) {
+  return c <= 0.0031308 ? c * 12.92 : 1.055 * std::pow(c, 1.0 / 2.4) - 0.055;
 }
 
-/**
- * An edge counts as solid when no channel varies more than threshold^2, in
- * which case its mean colour is written to outRgb as 0xRRGGBB.
- *
- * The GPU path evaluates variance per 4096px tile and requires every tile on
- * the edge to be solid; here the edge is one run, so the variance covers the
- * whole edge. The two agree for any image that fits in a single tile, and for
- * larger ones whole-edge variance is the stricter, more meaningful test.
- */
-bool solidEdgeColor(const EdgeAccum &acc, float threshold, int &outRgb) {
-  if (acc.total == 0) {
-    return false;
-  }
-  const double inv = 1.0 / static_cast<double>(acc.total);
-  double maxVar = 0.0;
-  int rgb = 0;
-
-  for (int ch = 0; ch < 3; ++ch) {
-    const double avg = acc.sum[ch] * inv;
-    // var = E[X^2] - E[X]^2
-    const double var = acc.sumSq[ch] * inv - avg * avg;
-    if (var > maxVar) {
-      maxVar = var;
+struct SrgbToLinearLut {
+  double value[256];
+  SrgbToLinearLut() {
+    for (int i = 0; i < 256; ++i) {
+      const double c = i / 255.0;
+      value[i] = c <= 0.04045 ? c / 12.92 : std::pow((c + 0.055) / 1.055, 2.4);
     }
-    const int v = std::clamp(static_cast<int>(avg * 255.0), 0, 255);
-    rgb = (rgb << 8) | v;
+  }
+};
+
+inline double srgbByteToLinear(uint8_t b) {
+  static const SrgbToLinearLut lut;
+  return lut.value[b];
+}
+
+constexpr double kMinCoverage = 0.9;
+
+constexpr double kColorMatchTolerance = 0.05;
+
+struct EdgeLine {
+  const uint8_t *base;
+  size_t strideBytes;
+  int64_t count;
+};
+
+inline const uint8_t *edgePixel(const EdgeLine &line, int64_t i) {
+  return line.base + static_cast<size_t>(i) * line.strideBytes;
+}
+
+struct EdgeResult {
+  bool solid;
+  bool isWhite;
+  double linearMean[3]; // meaningful only if solid and !isWhite
+  double coverage;      // meaningful only if solid - higher is more confident
+};
+
+EdgeResult classifyEdge(const EdgeLine &line) {
+  if (line.count == 0) {
+    return {false, false, {0.0, 0.0, 0.0}, 0.0};
   }
 
-  if (maxVar >= static_cast<double>(threshold) * threshold) {
-    return false;
+  double sum[3] = {0.0, 0.0, 0.0};
+  for (int64_t i = 0; i < line.count; ++i) {
+    const uint8_t *px = edgePixel(line, i);
+    for (int ch = 0; ch < 3; ++ch) {
+      sum[ch] += srgbByteToLinear(px[ch]);
+    }
   }
-  outRgb = rgb;
-  return true;
+  const double inv = 1.0 / static_cast<double>(line.count);
+  const double mean[3] = {sum[0] * inv, sum[1] * inv, sum[2] * inv};
+
+  const double tol = kColorMatchTolerance;
+  int64_t closeToMean = 0;
+  int64_t closeToWhite = 0;
+  double inlierSum[3] = {0.0, 0.0, 0.0};
+  for (int64_t i = 0; i < line.count; ++i) {
+    const uint8_t *px = edgePixel(line, i);
+    double lin[3];
+    bool nearMean = true;
+    bool nearWhite = true;
+    for (int ch = 0; ch < 3; ++ch) {
+      lin[ch] = srgbByteToLinear(px[ch]);
+      if (std::fabs(lin[ch] - mean[ch]) > tol) {
+        nearMean = false;
+      }
+      if (std::fabs(lin[ch] - 1.0) > tol) {
+        nearWhite = false;
+      }
+    }
+    if (nearMean) {
+      ++closeToMean;
+      for (int ch = 0; ch < 3; ++ch) {
+        inlierSum[ch] += lin[ch];
+      }
+    }
+    if (nearWhite) {
+      ++closeToWhite;
+    }
+  }
+
+  const double meanCoverage = static_cast<double>(closeToMean) * inv;
+  const double whiteCoverage = static_cast<double>(closeToWhite) * inv;
+
+  if (whiteCoverage >= kMinCoverage) {
+    return {true, true, {0.0, 0.0, 0.0}, whiteCoverage};
+  }
+  if (meanCoverage >= kMinCoverage) {
+    const double inlierInv = 1.0 / static_cast<double>(closeToMean);
+    const double refinedMean[3] = {inlierSum[0] * inlierInv,
+                                   inlierSum[1] * inlierInv,
+                                   inlierSum[2] * inlierInv};
+    return {true,
+            false,
+            {refinedMean[0], refinedMean[1], refinedMean[2]},
+            meanCoverage};
+  }
+  return {false, false, {0.0, 0.0, 0.0}, 0.0};
 }
 
 } // namespace
@@ -327,6 +378,7 @@ Java_ca_mpreg_webgpuviewer_TrimNative_detectBackground(JNIEnv *env,
                                                        jobject pixelBuffer,
                                                        jint width, jint height,
                                                        jfloat threshold) {
+  (void)threshold;
   const jint kWhite = static_cast<jint>(0xFFFFFFFFu);
 
   if (width <= 0 || height <= 0) {
@@ -343,50 +395,54 @@ Java_ca_mpreg_webgpuviewer_TrimNative_detectBackground(JNIEnv *env,
     return kWhite;
   }
 
-  EdgeAccum left{}, right{}, top{}, bottom{};
-
   const size_t stride = static_cast<size_t>(width) * kChannels;
-  for (int y = 0; y < height; ++y) {
-    const uint8_t *row = pixels + static_cast<size_t>(y) * stride;
-    accumulate(left, row);
-    accumulate(right, row + static_cast<size_t>(width - 1) * kChannels);
-  }
+  const EdgeLine left{pixels, stride, height};
+  const EdgeLine right{pixels + static_cast<size_t>(width - 1) * kChannels,
+                       stride, height};
+  const EdgeLine top{pixels, kChannels, width};
+  const EdgeLine bottom{pixels + static_cast<size_t>(height - 1) * stride,
+                        kChannels, width};
 
-  const uint8_t *topRow = pixels;
-  const uint8_t *bottomRow = pixels + static_cast<size_t>(height - 1) * stride;
-  for (int x = 0; x < width; ++x) {
-    accumulate(top, topRow + static_cast<size_t>(x) * kChannels);
-    accumulate(bottom, bottomRow + static_cast<size_t>(x) * kChannels);
-  }
+  const EdgeLine *edges[4] = {&left, &right, &top, &bottom};
 
-  // Edge order matters: the "first solid edge wins" rule below resolves ties
-  // the same way the GPU path does, which aggregates left, right, top, bottom.
-  const EdgeAccum *edges[4] = {&left, &right, &top, &bottom};
-
-  int solid[4];
   int solidCount = 0;
-  for (const EdgeAccum *edge : edges) {
-    int rgb = 0;
-    if (solidEdgeColor(*edge, threshold, rgb)) {
-      solid[solidCount++] = rgb;
+  int whiteCount = 0;
+  int nonWhiteCount = 0;
+  double linearSum[3] = {0.0, 0.0, 0.0};
+  for (auto &edge : edges) {
+    const EdgeResult result = classifyEdge(*edge);
+    if (!result.solid) {
+      continue;
+    }
+    solidCount++;
+    if (result.isWhite) {
+      whiteCount++;
+      continue;
+    }
+    nonWhiteCount++;
+    for (int ch = 0; ch < 3; ++ch) {
+      linearSum[ch] += result.linearMean[ch];
     }
   }
 
-  // Rule: any white edge -> white.
-  for (int i = 0; i < solidCount; ++i) {
-    const int r = (solid[i] >> 16) & 0xFF;
-    const int g = (solid[i] >> 8) & 0xFF;
-    const int b = solid[i] & 0xFF;
-    if (r >= 242 && g >= 242 && b >= 242) {
-      return kWhite;
-    }
+  if (nonWhiteCount > 0) {
+    const double inv = 1.0 / static_cast<double>(nonWhiteCount);
+    const int r = std::clamp(
+        static_cast<int>(linearToSrgb(linearSum[0] * inv) * 255.0 + 0.5), 0,
+        255);
+    const int g = std::clamp(
+        static_cast<int>(linearToSrgb(linearSum[1] * inv) * 255.0 + 0.5), 0,
+        255);
+    const int b = std::clamp(
+        static_cast<int>(linearToSrgb(linearSum[2] * inv) * 255.0 + 0.5), 0,
+        255);
+    const int rgb = (r << 16) | (g << 8) | b;
+    return static_cast<jint>(0xFF000000u | static_cast<uint32_t>(rgb));
   }
 
-  // Rule: any colour edge -> that colour, opaque.
-  if (solidCount > 0) {
-    return static_cast<jint>(0xFF000000u | static_cast<uint32_t>(solid[0]));
+  if (whiteCount > 0) {
+    return kWhite;
   }
 
-  // Rule: otherwise white.
   return kWhite;
 }

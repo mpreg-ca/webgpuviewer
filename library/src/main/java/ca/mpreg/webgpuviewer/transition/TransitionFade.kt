@@ -30,7 +30,7 @@ import java.nio.ByteOrder
 
 object TransitionFade : Transition() {
     private val blendByteBuffer = ThreadLocal.withInitial {
-        ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder())
+        ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder())
     }
 
     private val blendSampler by lazy {
@@ -58,6 +58,7 @@ object TransitionFade : Transition() {
     private const val BLEND_SHADER = """
 struct Uniforms {
     blend: f32,
+    bg: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -80,11 +81,11 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
         vec2<f32>(0.0, 1.0),
         vec2<f32>(1.0, 1.0)
     );
-    
+
     let pos = positions[vertex_index];
     let ndc_x = pos.x * 2.0 - 1.0;
     let ndc_y = 1.0 - pos.y * 2.0;
-    
+
     var out: VertexOutput;
     out.position = vec4<f32>(ndc_x, ndc_y, 0.0, 1.0);
     out.uv = pos;
@@ -109,22 +110,30 @@ fn to_srgb(linear: vec3<f32>) -> vec3<f32> {
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let c1 = textureSample(tex1, tex_sampler, in.uv);
     let c2 = textureSample(tex2, tex_sampler, in.uv);
-    
-    // Blend in linear space for correct color mixing
-    let linear1 = to_linear(c1.rgb);
-    let linear2 = to_linear(c2.rgb);
-    let blended = mix(linear1, linear2, uniforms.blend);
+
+    let comp1 = uniforms.bg.rgb * (1.0 - c1.a) + c1.rgb;
+    let comp2 = uniforms.bg.rgb * (1.0 - c2.a) + c2.rgb;
+
+    let blended = mix(to_linear(comp1), to_linear(comp2), uniforms.blend);
     let alpha = mix(c1.a, c2.a, uniforms.blend);
-    
+
     return vec4<f32>(to_srgb(blended), alpha);
 }
 """
+
+    private fun putColor(buffer: ByteBuffer, color: Int) {
+        buffer.putFloat(((color shr 16) and 0xFF) / 255f)
+        buffer.putFloat(((color shr 8) and 0xFF) / 255f)
+        buffer.putFloat((color and 0xFF) / 255f)
+        buffer.putFloat(((color ushr 24) and 0xFF) / 255f)
+    }
 
     private fun blendCached(
         encoder: GPUCommandEncoder,
         dst: GPUTexture,
         cachedView1: GPUTextureView?,
         cachedView2: GPUTextureView?,
+        bg: Int,
         blend: Float
     ) {
         if (cachedView1 == null || cachedView2 == null) return
@@ -132,10 +141,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         val byteBuffer = blendByteBuffer.get()
         byteBuffer.clear()
         byteBuffer.putFloat(blend)
+        byteBuffer.putFloat(0f)
+        byteBuffer.putFloat(0f)
+        byteBuffer.putFloat(0f)
+        putColor(byteBuffer, bg)
         byteBuffer.flip()
 
         val uniformBuffer = WebGpuRenderer.device.createBuffer(
-            GPUBufferDescriptor(size = 4, usage = BufferUsage.Uniform or BufferUsage.CopyDst)
+            GPUBufferDescriptor(size = 32, usage = BufferUsage.Uniform or BufferUsage.CopyDst)
         )
         WebGpuRenderer.device.queue.writeBuffer(uniformBuffer, 0, byteBuffer)
 
@@ -190,6 +203,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
         // blend: 0 = fully page1, 1 = fully page2
         val blend = if (frac > 0f) frac else -frac
-        blendCached(encoder, dst, cached1, cached2, blend)
+
+        val bg1 = page1.images.firstOrNull()?.backgroundColor ?: 0xFFFFFF
+        val bg2 = page2.images.firstOrNull()?.backgroundColor ?: 0xFFFFFF
+        val bg = blendBackgroundColor(bg1, bg2, blend)
+
+        blendCached(encoder, dst, cached1, cached2, bg, blend)
     }
 }

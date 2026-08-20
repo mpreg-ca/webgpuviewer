@@ -3,6 +3,8 @@ package ca.mpreg.webgpuviewer.transition
 import androidx.compose.ui.geometry.Offset
 import androidx.webgpu.GPUCommandEncoder
 import androidx.webgpu.GPUTexture
+import ca.mpreg.webgpuviewer.draw.Draw
+import ca.mpreg.webgpuviewer.draw.clear
 import ca.mpreg.webgpuviewer.renderer.TileRenderer
 import ca.mpreg.webgpuviewer.viewer.ImagePage
 
@@ -25,11 +27,17 @@ object TransitionStackRight : Transition() {
             tiles.renderFullyTiled(pass, page2, tex)
         }
 
+        Draw.clear(encoder, dst, 0)
+
         if (frac > 0f) {
-            blitCached(encoder, dst, cached1, 0f, 0f, clearFirst = true)
+            drawBackground(encoder, dst, page1, 0f, 0f)
+            blitCached(encoder, dst, cached1, 0f, 0f)
+            drawBackground(encoder, dst, page2, 1f - frac, 0f)
             blitCached(encoder, dst, cached2, 1f - frac, 0f)
         } else {
-            blitCached(encoder, dst, cached2, 0f, 0f, clearFirst = true)
+            drawBackground(encoder, dst, page2, 0f, 0f)
+            blitCached(encoder, dst, cached2, 0f, 0f)
+            drawBackground(encoder, dst, page1, -frac, 0f)
             blitCached(encoder, dst, cached1, -frac, 0f)
         }
     }

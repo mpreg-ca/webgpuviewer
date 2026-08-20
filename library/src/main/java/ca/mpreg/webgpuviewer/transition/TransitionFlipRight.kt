@@ -191,17 +191,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         val t = if (frac > 0f) frac else -frac
         val bg1 = page1.images.firstOrNull()?.backgroundColor ?: 0xFFFFFF
         val bg2 = page2.images.firstOrNull()?.backgroundColor ?: 0xFFFFFF
-        val r1 = (bg1 shr 16) and 0xFF
-        val g1 = (bg1 shr 8) and 0xFF
-        val b1 = bg1 and 0xFF
-        val r2 = (bg2 shr 16) and 0xFF
-        val g2 = (bg2 shr 8) and 0xFF
-        val b2 = bg2 and 0xFF
-        val r = (r1 + (r2 - r1) * t).toInt().coerceIn(0, 255)
-        val g = (g1 + (g2 - g1) * t).toInt().coerceIn(0, 255)
-        val b = (b1 + (b2 - b1) * t).toInt().coerceIn(0, 255)
-        val blendedBg = 0xFF000000.toInt() or (r shl 16) or (g shl 8) or b
-        Draw.rect(encoder, dst, 0f, 0f, 1f, 1f, blendedBg)
+        Draw.rect(encoder, dst, 0f, 0f, 1f, 1f, blendBackgroundColor(bg1, bg2, t))
 
         if (frac > 0f) {
             fold(cached1, page1, encoder, dst, 0f, foldAngle)

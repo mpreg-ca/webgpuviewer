@@ -41,6 +41,7 @@ import ca.mpreg.webgpuviewer.transition.Transition.Companion.isCached
 import ca.mpreg.webgpuviewer.viewer.ImagePage
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import kotlin.math.pow
 
 abstract class Transition {
     open val code: String = ""
@@ -262,6 +263,29 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             val image = page.images.firstOrNull() ?: return null
             if (image.mipmaps.isEmpty()) return null
             return image.placement(dst, page.x, page.y, page.scale)
+        }
+
+        private fun srgbToLinear(c: Float): Float =
+            if (c <= 0.04045f) c / 12.92f else ((c + 0.055f) / 1.055f).pow(2.4f)
+
+        private fun linearToSrgb(c: Float): Float =
+            if (c <= 0.0031308f) c * 12.92f else 1.055f * c.pow(1f / 2.4f) - 0.055f
+
+        /**
+         * Blend [bg1] toward [bg2] by [t] in linear space - 50% between white and black should be
+         * linear grey, not the lighter result a straight sRGB-byte lerp gives. [TransitionFade]'s
+         * own shader mix matches this rate: it un-premultiplies before converting to linear and
+         * re-premultiplies after converting back, rather than giving up on linear blending - so
+         * both stay at the same perceptual pace without either one needing to give up correctness.
+         */
+        internal fun blendBackgroundColor(bg1: Int, bg2: Int, t: Float): Int {
+            fun channel(shift: Int): Int {
+                val c1 = srgbToLinear(((bg1 shr shift) and 0xFF) / 255f)
+                val c2 = srgbToLinear(((bg2 shr shift) and 0xFF) / 255f)
+                val blended = linearToSrgb(c1 + (c2 - c1) * t)
+                return (blended * 255f).toInt().coerceIn(0, 255)
+            }
+            return 0xFF000000.toInt() or (channel(16) shl 16) or (channel(8) shl 8) or channel(0)
         }
 
         /**
