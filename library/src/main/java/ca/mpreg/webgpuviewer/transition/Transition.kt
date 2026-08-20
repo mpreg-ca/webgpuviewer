@@ -39,7 +39,6 @@ import ca.mpreg.webgpuviewer.transition.Transition.Companion.cacheLock
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.getCachedTexture
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.invalidateCache
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.isCached
-import ca.mpreg.webgpuviewer.transition.Transition.Companion.renderForCache
 import ca.mpreg.webgpuviewer.viewer.ImagePage
 import java.nio.ByteBuffer
 import java.nio.ByteOrder

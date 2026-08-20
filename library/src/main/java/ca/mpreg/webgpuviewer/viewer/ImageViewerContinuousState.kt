@@ -13,6 +13,10 @@ import ca.mpreg.webgpuviewer.renderer.solveImagePlacement
 import kotlinx.coroutines.launch
 
 class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
+    companion object {
+        private const val MAX_VISIBLE_PAGES = 1
+    }
+
     var scale = 1f
 
     var offsetX = 0f
@@ -182,7 +186,7 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
         var iBack = -1
         var docTopBack = anchorDocY
         val backPages = mutableListOf<VisiblePage>()
-        while (yTop > visTop) {
+        while (yTop > visTop && iBack >= -MAX_VISIBLE_PAGES) {
             val page = getPage(iBack) ?: break
             val pageHeight = getPageHeight(page)
             docTopBack -= pageHeight
@@ -195,8 +199,9 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
         }
         pages.addAll(backPages.asReversed())
 
-        // Walk forward until the viewport (plus margin) is covered, rather than a fixed page
-        // count - zoomed out or with short pages, more can fit than any constant would allow.
+        // Walk forward until the viewport (plus margin) is covered or MAX_VISIBLE_PAGES
+        // is reached, whichever comes first - zoomed out far enough (or with short enough pages),
+        // the document-space bound alone would keep walking past it.
         // Purely local: nothing is written back to a page, so only [anchorDocY] needs to survive
         // across frames for this to stay correct.
         var y = y0
@@ -204,7 +209,7 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
         var docTop = anchorDocY
         var prevHeight = 0f
         var hasPrev = false
-        while (y < visBot) {
+        while (y < visBot && i <= MAX_VISIBLE_PAGES) {
             val page = getPage(i) ?: break
             // Anchor to the previous page in this walk, never frozen: an undecoded page's height
             // is a guess, so re-deriving this fresh every frame self-corrects once it decodes.
@@ -256,8 +261,21 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
 
                 val pageScale = dstW / page.width
 
-                // Sampler shader underneath, with the tile cache's filtered version drawn on top
-                // as it fills in - skipped once tiles alone already cover this page.
+                // Tiles draw first, marking every pixel they cover in the stencil buffer
+                // tiles.draw() writes to; the sampler shader below then only shades what's left
+                // uncovered instead of the whole viewport - skipped entirely once tiles alone
+                // already cover this page.
+                tiles.draw(
+                    pass,
+                    page,
+                    texture,
+                    s.cameraDocY,
+                    vp.docTop,
+                    s.offsetX,
+                    s.scale,
+                    s.suppressGeneration
+                )
+
                 val covered = tiles.isFullyCovered(
                     page, texture, s.cameraDocY, vp.docTop, s.offsetX, s.scale, s.suppressGeneration
                 )
@@ -288,24 +306,15 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
                         )
                         // Content not worth linear-light correctness (ImagePage.highQuality)
                         // gets the plain sampler instead - it never reaches the tile cache either.
+                        // Both are stencil-tested against the tile draw above, skipping pixels it
+                        // already covered.
                         if (page.highQuality) {
                             RenderPage.renderFast(pass, image, texture, x, y, imageScale)
                         } else {
-                            RenderPage.renderPlain(pass, image, texture, x, y, imageScale)
+                            RenderPage.renderPlainMasked(pass, image, texture, x, y, imageScale)
                         }
                     }
                 }
-
-                tiles.draw(
-                    pass,
-                    page,
-                    texture,
-                    s.cameraDocY,
-                    vp.docTop,
-                    s.offsetX,
-                    s.scale,
-                    s.suppressGeneration
-                )
             }
         }
     }

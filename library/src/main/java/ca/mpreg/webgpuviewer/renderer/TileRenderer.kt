@@ -3,35 +3,51 @@ package ca.mpreg.webgpuviewer.renderer
 import android.util.Log
 import androidx.webgpu.BlendFactor
 import androidx.webgpu.BlendOperation
+import androidx.webgpu.BufferBindingType
 import androidx.webgpu.BufferUsage
+import androidx.webgpu.CompareFunction
 import androidx.webgpu.FilterMode
 import androidx.webgpu.GPUBindGroup
 import androidx.webgpu.GPUBindGroupDescriptor
 import androidx.webgpu.GPUBindGroupEntry
+import androidx.webgpu.GPUBindGroupLayoutDescriptor
+import androidx.webgpu.GPUBindGroupLayoutEntry
 import androidx.webgpu.GPUBlendComponent
 import androidx.webgpu.GPUBlendState
 import androidx.webgpu.GPUBuffer
+import androidx.webgpu.GPUBufferBindingLayout
 import androidx.webgpu.GPUBufferDescriptor
 import androidx.webgpu.GPUColor
 import androidx.webgpu.GPUColorTargetState
+import androidx.webgpu.GPUDepthStencilState
 import androidx.webgpu.GPUExtent3D
 import androidx.webgpu.GPUFragmentState
+import androidx.webgpu.GPUPipelineLayoutDescriptor
 import androidx.webgpu.GPUPrimitiveState
 import androidx.webgpu.GPURenderPassColorAttachment
 import androidx.webgpu.GPURenderPassDescriptor
 import androidx.webgpu.GPURenderPassEncoder
 import androidx.webgpu.GPURenderPipeline
 import androidx.webgpu.GPURenderPipelineDescriptor
+import androidx.webgpu.GPUSamplerBindingLayout
 import androidx.webgpu.GPUSamplerDescriptor
 import androidx.webgpu.GPUShaderModuleDescriptor
 import androidx.webgpu.GPUShaderSourceWGSL
+import androidx.webgpu.GPUStencilFaceState
 import androidx.webgpu.GPUTexture
+import androidx.webgpu.GPUTextureBindingLayout
 import androidx.webgpu.GPUTextureDescriptor
+import androidx.webgpu.GPUTextureView
 import androidx.webgpu.GPUVertexState
 import androidx.webgpu.LoadOp
+import androidx.webgpu.OptionalBool
 import androidx.webgpu.PrimitiveTopology
+import androidx.webgpu.SamplerBindingType
+import androidx.webgpu.ShaderStage
+import androidx.webgpu.StencilOperation
 import androidx.webgpu.StoreOp
 import androidx.webgpu.TextureFormat
+import androidx.webgpu.TextureSampleType
 import androidx.webgpu.TextureUsage
 import ca.mpreg.webgpuviewer.renderer.TileRenderer.Companion.OFF_SCREEN_SCORE
 import ca.mpreg.webgpuviewer.renderer.TileRenderer.Companion.TILE_SIZE
@@ -41,7 +57,6 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.yield
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.ceil
@@ -237,13 +252,54 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         )
     }
 
-    private val blitPipeline: GPURenderPipeline by lazy {
+    // Explicit (not auto-inferred) so it can be shared across blitPipeline/blitPipelineStencilWrite -
+    // an implicit/auto pipeline layout is unique to the pipeline it was inferred for, so a bind
+    // group made against one pipeline's auto layout is invalid on the other, even though both
+    // pipelines share the exact same shader and bindings. Tile.bindGroup is created once and
+    // reused across both pipelines (see tileBindGroup), so it must be built against this instead.
+    private val blitBindGroupLayout by lazy {
+        device.createBindGroupLayout(
+            GPUBindGroupLayoutDescriptor(
+                entries = arrayOf(
+                    GPUBindGroupLayoutEntry(
+                        binding = 0,
+                        visibility = ShaderStage.Vertex or ShaderStage.Fragment,
+                        buffer = GPUBufferBindingLayout(type = BufferBindingType.Uniform)
+                    ),
+                    GPUBindGroupLayoutEntry(
+                        binding = 1,
+                        visibility = ShaderStage.Vertex or ShaderStage.Fragment,
+                        buffer = GPUBufferBindingLayout(type = BufferBindingType.Uniform)
+                    ),
+                    GPUBindGroupLayoutEntry(
+                        binding = 2,
+                        visibility = ShaderStage.Fragment,
+                        texture = GPUTextureBindingLayout(sampleType = TextureSampleType.Float)
+                    ),
+                    GPUBindGroupLayoutEntry(
+                        binding = 3,
+                        visibility = ShaderStage.Fragment,
+                        sampler = GPUSamplerBindingLayout(type = SamplerBindingType.Filtering)
+                    ),
+                )
+            )
+        )
+    }
+
+    private val blitPipelineLayout by lazy {
+        device.createPipelineLayout(
+            GPUPipelineLayoutDescriptor(bindGroupLayouts = arrayOf(blitBindGroupLayout))
+        )
+    }
+
+    private fun buildBlitPipeline(depthStencil: GPUDepthStencilState?): GPURenderPipeline {
         val shaderModule = device.createShaderModule(
             GPUShaderModuleDescriptor(shaderSourceWGSL = GPUShaderSourceWGSL(BLIT_SHADER))
         )
-        device.createRenderPipeline(
+        return device.createRenderPipeline(
             GPURenderPipelineDescriptor(
                 vertex = GPUVertexState(module = shaderModule, entryPoint = "vs_main"),
+                layout = blitPipelineLayout,
                 fragment = GPUFragmentState(
                     module = shaderModule, entryPoint = "fs_main", targets = arrayOf(
                         GPUColorTargetState(
@@ -263,9 +319,66 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
                         )
                     )
                 ),
-                primitive = GPUPrimitiveState(topology = PrimitiveTopology.TriangleList)
+                primitive = GPUPrimitiveState(topology = PrimitiveTopology.TriangleList),
+                depthStencil = depthStencil,
             )
         )
+    }
+
+    /** Plain blit, no stencil attachment - [blitIfFullyCovered]/[renderFullyTiled]'s own pass. */
+    private val blitPipeline: GPURenderPipeline by lazy { buildBlitPipeline(null) }
+
+    /**
+     * As [blitPipeline], but always writes 1 into the stencil attachment wherever it draws - for
+     * [drawCore]'s live-render callers ([draw]), which mask [RenderPage.renderFast]'s per-pixel
+     * work against exactly this: a tile pixel drawn here needs no further shading underneath it,
+     * so a pixel [RenderPage] would otherwise redraw stays skipped once this stencil value marks
+     * it done. See [stencilViewFor].
+     */
+    private val blitPipelineStencilWrite: GPURenderPipeline by lazy {
+        buildBlitPipeline(
+            GPUDepthStencilState(
+                format = TextureFormat.Stencil8,
+                depthWriteEnabled = OptionalBool.False,
+                depthCompare = CompareFunction.Always,
+                stencilFront = GPUStencilFaceState(
+                    compare = CompareFunction.Always, passOp = StencilOperation.Replace
+                ),
+                stencilBack = GPUStencilFaceState(
+                    compare = CompareFunction.Always, passOp = StencilOperation.Replace
+                ),
+                stencilWriteMask = 0xFF,
+            )
+        )
+    }
+
+    private var stencilTexture: GPUTexture? = null
+    private var stencilView: GPUTextureView? = null
+    private var stencilWidth = 0
+    private var stencilHeight = 0
+
+    /**
+     * Stencil-only attachment matching [dst]'s size, shared by every live-render pass this frame -
+     * [ImageViewerState]/[ImageViewerContinuousState] attach it to their render pass so
+     * [blitPipelineStencilWrite] can mark tile-covered pixels and [RenderPage]'s masked variants
+     * can skip re-shading them. Recreated only when the destination's size actually changes.
+     */
+    fun stencilViewFor(dst: GPUTexture): GPUTextureView {
+        val view = stencilView
+        if (view != null && stencilWidth == dst.width && stencilHeight == dst.height) return view
+
+        stencilTexture?.destroy()
+        stencilWidth = dst.width
+        stencilHeight = dst.height
+        val texture = device.createTexture(
+            GPUTextureDescriptor(
+                usage = TextureUsage.RenderAttachment,
+                size = GPUExtent3D(dst.width, dst.height),
+                format = TextureFormat.Stencil8,
+            )
+        )
+        stencilTexture = texture
+        return texture.createView().also { stencilView = it }
     }
 
     /**
@@ -610,7 +723,8 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             0f,
             a.pageScale,
             page.isScaleAnimating,
-            applyRetainWindow = true
+            applyRetainWindow = true,
+            useStencilMask = true
         )
     }
 
@@ -646,7 +760,8 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             a.centerYOffset,
             a.pageScale,
             suppressGeneration,
-            applyRetainWindow = false
+            applyRetainWindow = false,
+            useStencilMask = true
         )
     }
 
@@ -666,7 +781,8 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         centerYOffset: Float,
         pageScale: Float,
         suppressGeneration: Boolean,
-        applyRetainWindow: Boolean
+        applyRetainWindow: Boolean,
+        useStencilMask: Boolean = false
     ) {
         if (page.destroyed || !page.highQuality || page.isAnimated) return
         if (page.images.isEmpty() || page.images.all { it == null || it.mipmaps.isEmpty() }) return
@@ -766,7 +882,12 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
                     val py = gp.snapY + tyi * ts
                     if (px < visR && px + ts > visL && py < visB && py + ts > visT) {
                         if (!pipelineSet) {
-                            pass.setPipeline(blitPipeline)
+                            if (useStencilMask) {
+                                pass.setPipeline(blitPipelineStencilWrite)
+                                pass.setStencilReference(1)
+                            } else {
+                                pass.setPipeline(blitPipeline)
+                            }
                             pipelineSet = true
                         }
                         pass.setBindGroup(0, tile.bindGroup)
@@ -1184,7 +1305,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         frameUniform: GPUBuffer, tileUniform: GPUBuffer, texture: GPUTexture
     ): GPUBindGroup = device.createBindGroup(
         GPUBindGroupDescriptor(
-            layout = blitPipeline.getBindGroupLayout(0), entries = arrayOf(
+            layout = blitBindGroupLayout, entries = arrayOf(
                 GPUBindGroupEntry(0, buffer = frameUniform),
                 GPUBindGroupEntry(1, buffer = tileUniform),
                 GPUBindGroupEntry(2, textureView = texture.createView()),
@@ -1291,6 +1412,10 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // 1:1 at integer positions with a nearest sampler: an exact copy of the tile's texels,
     // already premultiplied by RenderPage.
-    return textureSample(src_tex, src_sampler, in.uv);
+    // return textureSample(src_tex, src_sampler, in.uv);
+    var col = textureSample(src_tex, src_sampler, in.uv);
+    col.r = 1.0;
+    col.a = 0.5;
+    return col;
 }
 """

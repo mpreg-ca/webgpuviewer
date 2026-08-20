@@ -14,6 +14,7 @@ import androidx.compose.ui.util.fastCoerceAtMost
 import androidx.webgpu.GPUColor
 import androidx.webgpu.GPUCommandEncoder
 import androidx.webgpu.GPURenderPassColorAttachment
+import androidx.webgpu.GPURenderPassDepthStencilAttachment
 import androidx.webgpu.GPURenderPassDescriptor
 import androidx.webgpu.GPURenderPassEncoder
 import androidx.webgpu.GPUTexture
@@ -245,6 +246,15 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
                         storeOp = StoreOp.Store,
                         clearValue = GPUColor(0.0, 0.0, 0.0, 0.0)
                     )
+                ),
+                // Cleared fresh every frame so TileRenderer's blit can mark which pixels it just
+                // covered and RenderPage's masked draws can skip re-shading them - see
+                // TileRenderer.stencilViewFor. Discarded afterward: nothing reads it across frames.
+                depthStencilAttachment = GPURenderPassDepthStencilAttachment(
+                    view = tiles.stencilViewFor(texture),
+                    stencilLoadOp = LoadOp.Clear,
+                    stencilStoreOp = StoreOp.Discard,
+                    stencilClearValue = 0,
                 )
             )
         )
@@ -281,19 +291,19 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
                 // correctness (see ImagePage.highQuality) skips both entirely - just the plain
                 // sampler, every frame.
                 if (!s.currentPage.highQuality) {
-                    RenderPage.renderPlain(pass, s.currentPage, texture, 0f, 0f, 1f)
+                    RenderPage.renderPlainMasked(pass, s.currentPage, texture, 0f, 0f, 1f)
                     return@renderPass
                 }
-                // Fast path underneath, cached filtered tiles on top; whatever the cache hasn't
-                // produced yet still shows at sampler quality. The background is always drawn
-                // live since its fades are position-dependent, never from a stale tile - skipped
-                // only once tiles alone cover the whole page.
-                if (covered) {
-                    RenderPage.renderBackground(pass, s.currentPage, texture, 0f, 0f, 1f)
-                } else {
-                    RenderPage.renderFast(pass, s.currentPage, texture, 0f, 0f, 1f)
-                }
+                // Background always drawn live first (its fades are position-dependent, never
+                // from a stale tile) so it stays underneath everything else. Tiles draw next,
+                // marking every pixel they cover in the stencil buffer tiles.draw() writes to;
+                // renderFastImageOnly then only shades what's left uncovered instead of the whole
+                // viewport, since tiles.draw() already produced the right pixel wherever it drew.
+                RenderPage.renderBackground(pass, s.currentPage, texture, 0f, 0f, 1f)
                 tiles.draw(pass, s.currentPage, texture, 0f, 0f, 1f)
+                if (!covered) {
+                    RenderPage.renderFastImageOnly(pass, s.currentPage, texture, 0f, 0f, 1f)
+                }
             }
 
             // Opportunistic background work, strictly in order: current tiles (above) > blit them
