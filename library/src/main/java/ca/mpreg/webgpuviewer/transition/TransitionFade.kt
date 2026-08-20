@@ -30,7 +30,7 @@ import java.nio.ByteOrder
 
 object TransitionFade : Transition() {
     private val blendByteBuffer = ThreadLocal.withInitial {
-        ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder())
+        ByteBuffer.allocateDirect(48).order(ByteOrder.nativeOrder())
     }
 
     private val blendSampler by lazy {
@@ -58,7 +58,8 @@ object TransitionFade : Transition() {
     private const val BLEND_SHADER = """
 struct Uniforms {
     blend: f32,
-    bg: vec4<f32>,
+    bg1: vec4<f32>,
+    bg2: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -111,13 +112,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let c1 = textureSample(tex1, tex_sampler, in.uv);
     let c2 = textureSample(tex2, tex_sampler, in.uv);
 
-    let comp1 = uniforms.bg.rgb * (1.0 - c1.a) + c1.rgb;
-    let comp2 = uniforms.bg.rgb * (1.0 - c2.a) + c2.rgb;
+    let comp1 = uniforms.bg1.rgb * (1.0 - c1.a) + c1.rgb;
+    let comp2 = uniforms.bg2.rgb * (1.0 - c2.a) + c2.rgb;
 
     let blended = mix(to_linear(comp1), to_linear(comp2), uniforms.blend);
-    let alpha = mix(c1.a, c2.a, uniforms.blend);
 
-    return vec4<f32>(to_srgb(blended), alpha);
+    return vec4<f32>(to_srgb(blended), 1.0);
 }
 """
 
@@ -133,7 +133,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         dst: GPUTexture,
         cachedView1: GPUTextureView?,
         cachedView2: GPUTextureView?,
-        bg: Int,
+        bg1: Int,
+        bg2: Int,
         blend: Float
     ) {
         if (cachedView1 == null || cachedView2 == null) return
@@ -144,11 +145,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         byteBuffer.putFloat(0f)
         byteBuffer.putFloat(0f)
         byteBuffer.putFloat(0f)
-        putColor(byteBuffer, bg)
+        putColor(byteBuffer, bg1)
+        putColor(byteBuffer, bg2)
         byteBuffer.flip()
 
         val uniformBuffer = WebGpuRenderer.device.createBuffer(
-            GPUBufferDescriptor(size = 32, usage = BufferUsage.Uniform or BufferUsage.CopyDst)
+            GPUBufferDescriptor(size = 48, usage = BufferUsage.Uniform or BufferUsage.CopyDst)
         )
         WebGpuRenderer.device.queue.writeBuffer(uniformBuffer, 0, byteBuffer)
 
@@ -206,8 +208,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
         val bg1 = page1.images.firstOrNull()?.backgroundColor ?: 0xFFFFFF
         val bg2 = page2.images.firstOrNull()?.backgroundColor ?: 0xFFFFFF
-        val bg = blendBackgroundColor(bg1, bg2, blend)
 
-        blendCached(encoder, dst, cached1, cached2, bg, blend)
+        blendCached(encoder, dst, cached1, cached2, bg1, bg2, blend)
     }
 }

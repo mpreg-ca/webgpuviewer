@@ -113,10 +113,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Blend toward white in linear space
     let linear = to_linear(comp);
-    let white = vec4<f32>(1.0);
-    let blended = mix(vec4(linear, 1.0), white, uniforms.fade);
+    let white = vec3<f32>(1.0);
+    let blended = mix(linear, white, uniforms.fade);
 
-    return vec4<f32>(to_srgb(blended.rgb), blended.a);
+    return vec4<f32>(to_srgb(blended.rgb), 1.0);
 }
 """
 
