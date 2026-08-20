@@ -31,6 +31,7 @@ import androidx.webgpu.PrimitiveTopology.Companion.TriangleList
 import androidx.webgpu.StoreOp
 import androidx.webgpu.TextureFormat
 import androidx.webgpu.TextureUsage
+import ca.mpreg.webgpuviewer.renderer.RenderPage
 import ca.mpreg.webgpuviewer.renderer.TileRenderer
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.blitCached
@@ -38,6 +39,7 @@ import ca.mpreg.webgpuviewer.transition.Transition.Companion.cacheLock
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.getCachedTexture
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.invalidateCache
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.isCached
+import ca.mpreg.webgpuviewer.transition.Transition.Companion.renderForCache
 import ca.mpreg.webgpuviewer.viewer.ImagePage
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -346,6 +348,25 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
          */
         internal fun isCached(page: ImagePage, isPage1: Boolean): Boolean =
             synchronized(cacheLock) { cacheHitLocked(page, isPage1) }
+
+        /**
+         * Renders [page] for [getCachedTexture]: the tiled/cached path for highQuality content,
+         * or else a single plain-sampler draw covering the whole page - mirroring the live
+         * viewer's own highQuality fallback (see ImageViewerState.renderSnapshot). TileRenderer's
+         * drawCore refuses non-highQuality pages outright (they're not worth the tile cache's
+         * sharpness), so without this fallback such a page's transition cache slot would just
+         * stay blank for the whole transition, since getCachedTexture keeps retrying every frame
+         * rather than ever treating a false result as a permanent hit.
+         */
+        internal fun renderForCache(
+            pass: GPURenderPassEncoder, page: ImagePage, tex: GPUTexture, tiles: TileRenderer
+        ): Boolean {
+            if (!page.highQuality) {
+                RenderPage.renderPlain(pass, page, tex, 0f, 0f, 1f)
+                return true
+            }
+            return tiles.renderFullyTiled(pass, page, tex)
+        }
 
         /**
          * Get cached texture view for a page, rendering if needed. [renderPage] returns whether it

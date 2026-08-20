@@ -20,6 +20,7 @@ import ca.mpreg.webgpuviewer.draw.rect
 import ca.mpreg.webgpuviewer.renderer.TileRenderer
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.getCachedTexture
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.pageRect
+import ca.mpreg.webgpuviewer.transition.Transition.Companion.renderForCache
 import ca.mpreg.webgpuviewer.viewer.ImagePage
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -191,11 +192,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         tiles: TileRenderer,
     ) {
         val cached1 = getCachedTexture(page1, true, encoder, dst.width, dst.height) { pass, tex ->
-            tiles.renderFullyTiled(pass, page1, tex)
+            renderForCache(pass, page1, tex, tiles)
         }
 
         val cached2 = getCachedTexture(page2, false, encoder, dst.width, dst.height) { pass, tex ->
-            tiles.renderFullyTiled(pass, page2, tex)
+            renderForCache(pass, page2, tex, tiles)
         }
 
         // Draw single background rect that transitions between colors

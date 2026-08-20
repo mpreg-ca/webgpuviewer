@@ -41,8 +41,9 @@ import kotlin.math.min
  *  - [render] - box filter minifying, Catmull-Rom magnifying, in linear light. Sharp and
  *    expensive, so bound to a fixed 2x2-tile window - safe only because its one caller,
  *    [TileRenderer]'s tile generation, always targets a single tile-sized destination.
- *  - [renderFast] - one bilinear tap per pixel, also linear-light (so a [TileRenderer] tile
- *    popping in over it never shows a brightness seam). Draws every tile the viewport overlaps
+ *  - [renderFast] - one bilinear tap per pixel, also linear-light via a cheap gamma-2.2
+ *    approximation (so a [TileRenderer] tile popping in over it never shows a brightness seam,
+ *    close enough that the curve mismatch isn't visible). Draws every tile the viewport overlaps
  *    separately, so the viewport can be any size or position without a window falling short.
  *  - [renderPlain] is [renderFast] without the sRGB<->linear round trip, for
  *    [ImagePage.highQuality] false content where that correctness isn't worth the cost.
@@ -231,20 +232,12 @@ struct TileVertexOutput {
     @location(0) uv: vec2<f32>,
 };
 
-fn tile_to_linear_exact(srgb: vec4<f32>) -> vec4<f32> {
-    let c = max(srgb.rgb, vec3<f32>(0.0));
-    let lower = c / vec3<f32>(12.92);
-    let higher = pow((c + vec3<f32>(0.055)) / vec3<f32>(1.055), vec3<f32>(2.4));
-    let cond = c <= vec3<f32>(0.04045);
-    return vec4(select(higher, lower, cond), srgb.a);
+fn tile_to_linear(srgb: vec4<f32>) -> vec4<f32> {
+    return vec4<f32>(pow(max(srgb.rgb, vec3<f32>(0.0)), vec3<f32>(2.2)), srgb.a);
 }
 
-fn tile_to_srgb_exact(linear_rgb: vec4<f32>) -> vec4<f32> {
-    let c = max(linear_rgb.rgb, vec3<f32>(0.0));
-    let lower = c * vec3<f32>(12.92);
-    let higher = vec3<f32>(1.055) * pow(c, vec3<f32>(1.0 / 2.4)) - vec3<f32>(0.055);
-    let cond = c <= vec3<f32>(0.0031308);
-    return vec4(select(higher, lower, cond), linear_rgb.a);
+fn tile_to_srgb(linear_rgb: vec4<f32>) -> vec4<f32> {
+    return vec4<f32>(pow(max(linear_rgb.rgb, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.2)), linear_rgb.a);
 }
 """
 
@@ -276,7 +269,10 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> TileVertexOutput {
 }
 """
 
-    /** Fragment stage for [renderFast]: one bilinear resolve per pixel, in linear light. */
+    /**
+     * Fragment stage for [renderFast]: one bilinear resolve per pixel, in approximate
+     * (gamma-2.2) linear light - see [tile_to_linear]/[tile_to_srgb].
+     */
     private const val TILE_SAMPLER_FS = """
 @fragment
 fn fs_main(in: TileVertexOutput) -> @location(0) vec4<f32> {
@@ -290,13 +286,13 @@ fn fs_main(in: TileVertexOutput) -> @location(0) vec4<f32> {
     let i1 = clamp(vec2<i32>(base) + 1, vec2<i32>(0), max_coord);
     let f = p - base;
 
-    let c00 = tile_to_linear_exact(textureLoad(src_tex, vec2<i32>(i0.x, i0.y), 0));
-    let c10 = tile_to_linear_exact(textureLoad(src_tex, vec2<i32>(i1.x, i0.y), 0));
-    let c01 = tile_to_linear_exact(textureLoad(src_tex, vec2<i32>(i0.x, i1.y), 0));
-    let c11 = tile_to_linear_exact(textureLoad(src_tex, vec2<i32>(i1.x, i1.y), 0));
+    let c00 = tile_to_linear(textureLoad(src_tex, vec2<i32>(i0.x, i0.y), 0));
+    let c10 = tile_to_linear(textureLoad(src_tex, vec2<i32>(i1.x, i0.y), 0));
+    let c01 = tile_to_linear(textureLoad(src_tex, vec2<i32>(i0.x, i1.y), 0));
+    let c11 = tile_to_linear(textureLoad(src_tex, vec2<i32>(i1.x, i1.y), 0));
 
     let linear_col = mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
-    let col = tile_to_srgb_exact(linear_col);
+    let col = tile_to_srgb(linear_col);
     return vec4<f32>(col.rgb * col.a, col.a);
 }
 """

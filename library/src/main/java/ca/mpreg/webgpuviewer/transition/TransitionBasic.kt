@@ -69,11 +69,11 @@ object TransitionBasic : Transition() {
         tiles: TileRenderer,
     ) {
         val cached1 = getCachedTexture(page1, true, encoder, dst.width, dst.height) { pass, tex ->
-            tiles.renderFullyTiled(pass, page1, tex)
+            renderForCache(pass, page1, tex, tiles)
         }
 
         val cached2 = getCachedTexture(page2, false, encoder, dst.width, dst.height) { pass, tex ->
-            tiles.renderFullyTiled(pass, page2, tex)
+            renderForCache(pass, page2, tex, tiles)
         }
 
         Draw.clear(encoder, dst, 0)
@@ -105,12 +105,12 @@ object TransitionBasic : Transition() {
         ) {
             val cached1 =
                 getCachedTexture(page1, true, encoder, dst.width, dst.height) { pass, tex ->
-                    tiles.renderFullyTiled(pass, page1, tex)
+                    renderForCache(pass, page1, tex, tiles)
                 }
 
             val cached2 =
                 getCachedTexture(page2, false, encoder, dst.width, dst.height) { pass, tex ->
-                    tiles.renderFullyTiled(pass, page2, tex)
+                    renderForCache(pass, page2, tex, tiles)
                 }
 
             Draw.clear(encoder, dst, 0)

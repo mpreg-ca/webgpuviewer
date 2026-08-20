@@ -20,6 +20,7 @@ import ca.mpreg.webgpuviewer.draw.clear
 import ca.mpreg.webgpuviewer.draw.rect
 import ca.mpreg.webgpuviewer.renderer.TileRenderer
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.getCachedTexture
+import ca.mpreg.webgpuviewer.transition.Transition.Companion.renderForCache
 import ca.mpreg.webgpuviewer.viewer.ImagePage
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -219,11 +220,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         tiles: TileRenderer,
     ) {
         val cached1 = getCachedTexture(page1, true, encoder, dst.width, dst.height) { pass, tex ->
-            tiles.renderFullyTiled(pass, page1, tex)
+            renderForCache(pass, page1, tex, tiles)
         }
 
         val cached2 = getCachedTexture(page2, false, encoder, dst.width, dst.height) { pass, tex ->
-            tiles.renderFullyTiled(pass, page2, tex)
+            renderForCache(pass, page2, tex, tiles)
         }
 
         val t = if (frac > 0f) frac else 1f + frac
@@ -295,7 +296,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         tiles: TileRenderer,
     ) {
         val cached = getCachedTexture(page, isPage1, encoder, dst.width, dst.height) { pass, tex ->
-            tiles.renderFullyTiled(pass, page, tex)
+            renderForCache(pass, page, tex, tiles)
         }
         drawFace(cached, page, encoder, dst, matrix)
     }
