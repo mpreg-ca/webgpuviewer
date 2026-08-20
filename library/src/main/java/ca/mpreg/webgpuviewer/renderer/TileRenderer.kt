@@ -1412,10 +1412,6 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // 1:1 at integer positions with a nearest sampler: an exact copy of the tile's texels,
     // already premultiplied by RenderPage.
-    // return textureSample(src_tex, src_sampler, in.uv);
-    var col = textureSample(src_tex, src_sampler, in.uv);
-    col.r = 1.0;
-    col.a = 0.5;
-    return col;
+    return textureSample(src_tex, src_sampler, in.uv);
 }
 """
