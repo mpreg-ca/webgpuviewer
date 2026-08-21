@@ -6,6 +6,7 @@ import androidx.webgpu.BlendOperation
 import androidx.webgpu.BufferBindingType
 import androidx.webgpu.BufferUsage
 import androidx.webgpu.CompareFunction
+import androidx.webgpu.FeatureName
 import androidx.webgpu.FilterMode
 import androidx.webgpu.GPUBindGroup
 import androidx.webgpu.GPUBindGroupDescriptor
@@ -22,8 +23,11 @@ import androidx.webgpu.GPUColorTargetState
 import androidx.webgpu.GPUDepthStencilState
 import androidx.webgpu.GPUExtent3D
 import androidx.webgpu.GPUFragmentState
+import androidx.webgpu.GPUPassTimestampWrites
 import androidx.webgpu.GPUPipelineLayoutDescriptor
 import androidx.webgpu.GPUPrimitiveState
+import androidx.webgpu.GPUQuerySet
+import androidx.webgpu.GPUQuerySetDescriptor
 import androidx.webgpu.GPURenderPassColorAttachment
 import androidx.webgpu.GPURenderPassDescriptor
 import androidx.webgpu.GPURenderPassEncoder
@@ -40,8 +44,10 @@ import androidx.webgpu.GPUTextureDescriptor
 import androidx.webgpu.GPUTextureView
 import androidx.webgpu.GPUVertexState
 import androidx.webgpu.LoadOp
+import androidx.webgpu.MapMode
 import androidx.webgpu.OptionalBool
 import androidx.webgpu.PrimitiveTopology
+import androidx.webgpu.QueryType
 import androidx.webgpu.SamplerBindingType
 import androidx.webgpu.ShaderStage
 import androidx.webgpu.StencilOperation
@@ -50,14 +56,20 @@ import androidx.webgpu.TextureFormat
 import androidx.webgpu.TextureSampleType
 import androidx.webgpu.TextureUsage
 import ca.mpreg.webgpuviewer.renderer.TileRenderer.Companion.OFF_SCREEN_SCORE
+import ca.mpreg.webgpuviewer.renderer.TileRenderer.Companion.STENCIL_BUFFER_COUNT
+import ca.mpreg.webgpuviewer.renderer.TileRenderer.Companion.TILES_PER_BATCH_FALLBACK
 import ca.mpreg.webgpuviewer.renderer.TileRenderer.Companion.TILE_SIZE
 import ca.mpreg.webgpuviewer.transition.Transition
 import ca.mpreg.webgpuviewer.viewer.ImagePage
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.yield
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.ceil
@@ -65,6 +77,7 @@ import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.round
+import kotlin.time.Duration.Companion.milliseconds
 
 /**
  * Solve the (x, y) [RenderPage.render]/[RenderPage.renderFast] need so [image] lands centred at
@@ -121,11 +134,9 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     companion object {
         const val TILE_SIZE = 256
 
-        /**
-         * Tiles per batch before yielding back to the render thread. Kept at 1: the worker and
-         * frame render share one dispatcher, and low latency matters more than fill-in speed.
-         */
-        private const val TILES_PER_BATCH = 1
+        private const val TILES_PER_BATCH_FALLBACK = 1
+        private const val BATCH_TARGET_NS = 4_000_000.0
+        private const val MAX_TILES_PER_BATCH = 8
 
         /**
          * Grace window of extra pages (past "whichever is current") [draw] keeps a grid for, so
@@ -141,6 +152,12 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
          * outside a grid's wanted range (e.g. [prewarm]'s tiles, which leave that range empty).
          */
         private const val OFF_SCREEN_SCORE = 1e6f
+
+        /**
+         * Ring buffer size for [stencilViewFor] - matches a typical Android/Vulkan surface's
+         * buffer count so a rotated stencil texture is never still in flight from a prior frame.
+         */
+        private const val STENCIL_BUFFER_COUNT = 3
     }
 
     /** Upper bound on cached tiles, ~[maxTiles] * 256KB of texture memory. */
@@ -151,6 +168,35 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     private var frame = 0L
     private var workerActive = false
     private val workerScope = CoroutineScope(WebGpuRenderer.dispatcher + SupervisorJob())
+
+    // Timestamp-query based GPU cost measurement for [generateTile]'s batches - null wherever the
+    // adapter didn't have the feature (see WebGpuRenderer's requiredFeatures), in which case
+    // batch sizing just falls back to [TILES_PER_BATCH_FALLBACK] forever.
+    private val timestampQuerySet: GPUQuerySet? by lazy {
+        if (!device.hasFeature(FeatureName.TimestampQuery)) return@lazy null
+        device.createQuerySet(GPUQuerySetDescriptor(type = QueryType.Timestamp, count = 16))
+    }
+
+    private fun createTimestampBuffers(): Pair<GPUBuffer, GPUBuffer> {
+        val resolve = device.createBuffer(
+            GPUBufferDescriptor(size = 16, usage = BufferUsage.QueryResolve or BufferUsage.CopySrc)
+        )
+        val result = device.createBuffer(
+            GPUBufferDescriptor(size = 16, usage = BufferUsage.MapRead or BufferUsage.CopyDst)
+        )
+        return resolve to result
+    }
+
+    // Exponential moving average of one tile's GPU render-pass duration, in nanoseconds - 0
+    // until the first measurement lands, which is when [nextBatchSize] starts trusting it over
+    // [TILES_PER_BATCH_FALLBACK].
+    private var avgTileGpuNs = 0.0
+
+    /** How many tiles [schedule] should generate before its next yield - see [avgTileGpuNs]. */
+    private fun nextBatchSize(): Int {
+        if (avgTileGpuNs <= 0.0) return TILES_PER_BATCH_FALLBACK
+        return (BATCH_TARGET_NS / avgTileGpuNs).toInt().coerceIn(1, MAX_TILES_PER_BATCH)
+    }
 
     private class Tile(
         val texture: GPUTexture, val uniform: GPUBuffer, val bindGroup: GPUBindGroup
@@ -353,8 +399,14 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         )
     }
 
-    private var stencilTexture: GPUTexture? = null
-    private var stencilView: GPUTextureView? = null
+    // Ring-buffered rather than a single shared texture: [dst] itself rotates through the
+    // surface's own swapchain images, so reusing one physical stencil texture every frame would
+    // force the GPU to serialize each frame's stencil clear/write against the previous frame's -
+    // still in flight since render() only serializes encoding, not GPU completion - behind it,
+    // silently undoing the swapchain's buffering and adding a frame (or more) of latency that
+    // shows up as tiles visibly trailing the current pan/scroll position.
+    private val stencilTextures = arrayOfNulls<GPUTexture>(STENCIL_BUFFER_COUNT)
+    private val stencilViews = arrayOfNulls<GPUTextureView>(STENCIL_BUFFER_COUNT)
     private var stencilWidth = 0
     private var stencilHeight = 0
 
@@ -362,24 +414,28 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
      * Stencil-only attachment matching [dst]'s size, shared by every live-render pass this frame -
      * [ImageViewerState]/[ImageViewerContinuousState] attach it to their render pass so
      * [blitPipelineStencilWrite] can mark tile-covered pixels and [RenderPage]'s masked variants
-     * can skip re-shading them. Recreated only when the destination's size actually changes.
+     * can skip re-shading them. Rotates across [STENCIL_BUFFER_COUNT] textures by [frame] so a
+     * still in-flight previous frame is never made to share a stencil resource with this one; all
+     * are recreated together whenever the destination's size actually changes.
      */
     fun stencilViewFor(dst: GPUTexture): GPUTextureView {
-        val view = stencilView
-        if (view != null && stencilWidth == dst.width && stencilHeight == dst.height) return view
-
-        stencilTexture?.destroy()
-        stencilWidth = dst.width
-        stencilHeight = dst.height
-        val texture = device.createTexture(
-            GPUTextureDescriptor(
-                usage = TextureUsage.RenderAttachment,
-                size = GPUExtent3D(dst.width, dst.height),
-                format = TextureFormat.Stencil8,
-            )
-        )
-        stencilTexture = texture
-        return texture.createView().also { stencilView = it }
+        if (stencilWidth != dst.width || stencilHeight != dst.height) {
+            stencilWidth = dst.width
+            stencilHeight = dst.height
+            for (i in 0 until STENCIL_BUFFER_COUNT) {
+                stencilTextures[i]?.destroy()
+                val texture = device.createTexture(
+                    GPUTextureDescriptor(
+                        usage = TextureUsage.RenderAttachment,
+                        size = GPUExtent3D(dst.width, dst.height),
+                        format = TextureFormat.Stencil8,
+                    )
+                )
+                stencilTextures[i] = texture
+                stencilViews[i] = texture.createView()
+            }
+        }
+        return stencilViews[(frame % STENCIL_BUFFER_COUNT).toInt()]!!
     }
 
     /**
@@ -621,8 +677,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             PageTiles(
                 a.pageScale, page, device.createBuffer(
                     GPUBufferDescriptor(
-                        size = 32,
-                        usage = BufferUsage.Uniform or BufferUsage.CopyDst
+                        size = 32, usage = BufferUsage.Uniform or BufferUsage.CopyDst
                     )
                 )
             )
@@ -655,14 +710,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         // [blitIfFullyCovered] uses its tiles, which reads as solid black. Shares [gridPlacement]
         // with [drawCore] now, so this can't happen again without both call sites noticing.
         writeFrameUniformIfChanged(
-            st,
-            dst,
-            gp.snapX,
-            gp.snapY,
-            gp.clipL,
-            gp.clipT,
-            gp.clipR,
-            gp.clipB
+            st, dst, gp.snapX, gp.snapY, gp.clipL, gp.clipT, gp.clipR, gp.clipB
         )
 
         // Captured before the loop below can add to it, so this only fires the one time pending
@@ -853,14 +901,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         st.tyMax = ceil((dst.height - anchorY) / ts).toInt() - 1
 
         writeFrameUniformIfChanged(
-            st,
-            dst,
-            gp.snapX,
-            gp.snapY,
-            gp.clipL,
-            gp.clipT,
-            gp.clipR,
-            gp.clipB
+            st, dst, gp.snapX, gp.snapY, gp.clipL, gp.clipT, gp.clipR, gp.clipB
         )
 
         val dstW = dst.width.toFloat()
@@ -922,19 +963,32 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
      *
      * The worker shares the render thread but not the render mutex, so suspending between
      * batches actually lets a queued frame through - the same reasoning as
-     * [WebGpuRenderer.onDispatcher].
+     * [WebGpuRenderer.onDispatcher]. Batch size comes from [nextBatchSize] - re-read every batch
+     * so it adapts as [avgTileGpuNs] accumulates real measurements instead of staying fixed. Each
+     * tile's [generate] call is scoped to `this` - the worker's own coroutine, not a nested
+     * [coroutineScope] - since that would just be a same-dispatcher context switch for no benefit
+     * here; the returned [Job]s are collected and joined together once the batch is done
+     * generating, so the whole batch's measurements are awaited together rather than one at a
+     * time per tile - that join is itself what lets a queued frame through (the same reasoning a
+     * plain [yield] would otherwise be there for), so no separate yield is needed alongside it.
+     * Without [FeatureName.TimestampQuery] at all, [generate] never returns a [Job], so
+     * [measurements] is always empty and joining it wouldn't suspend for anything - pacing falls
+     * back to a flat [delay] between (always [TILES_PER_BATCH_FALLBACK]-sized) batches instead.
      */
     private fun schedule() {
         if (workerActive) return
         workerActive = true
+        val timestampsSupported = device.hasFeature(FeatureName.TimestampQuery)
         workerScope.launch {
             try {
                 while (true) {
+                    val batchSize = nextBatchSize()
                     var generated = 0
-                    while (generated < TILES_PER_BATCH) {
+                    val measurements = ArrayList<Job>(batchSize)
+                    while (generated < batchSize) {
                         val req = nextRequest() ?: break
                         try {
-                            generate(req)
+                            generate(req, this)?.let { measurements.add(it) }
                             generated++
                         } catch (e: CancellationException) {
                             throw e
@@ -944,7 +998,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
                     }
                     if (generated == 0) break
                     invalidate()
-                    yield()
+                    if (timestampsSupported) measurements.joinAll() else delay(5)
                 }
             } finally {
                 workerActive = false
@@ -1006,10 +1060,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         pendingTransitionPage1?.let { page ->
             pendingTransitionPage1 = null
             return Request.ForTransition(
-                page,
-                true,
-                pendingTransitionDstWidth,
-                pendingTransitionDstHeight
+                page, true, pendingTransitionDstWidth, pendingTransitionDstHeight
             )
         }
 
@@ -1021,32 +1072,46 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         pendingTransitionPage2?.let { page ->
             pendingTransitionPage2 = null
             return Request.ForTransition(
-                page,
-                false,
-                pendingTransitionDstWidth,
-                pendingTransitionDstHeight
+                page, false, pendingTransitionDstWidth, pendingTransitionDstHeight
             )
         }
 
         return null
     }
 
-    private fun generate(req: Request) {
-        when (req) {
-            is Request.ForTile -> generateTileRequest(req)
-            is Request.ForTransition -> generateTransitionRequest(req)
+    /**
+     * Generates [req], returning the just-launched GPU timing measurement's [Job], if this
+     * particular tile happened to start one - [measurementScope] is where it's launched;
+     * [schedule] passes its own coroutine so it can collect and join a whole batch's worth of
+     * these together rather than one at a time. [renderFullyTiled]'s direct [generateTileNow]
+     * call has no such scope to offer and doesn't care to join anything, so it just falls back to
+     * [workerScope] there, fire-and-forget.
+     */
+    private fun generate(req: Request, measurementScope: CoroutineScope): Job? {
+        return when (req) {
+            is Request.ForTile -> generateTileRequest(req, measurementScope)
+            is Request.ForTransition -> {
+                generateTransitionRequest(req)
+                null
+            }
         }
     }
 
-    private fun generateTileRequest(req: Request.ForTile) {
+    private fun generateTileRequest(req: Request.ForTile, measurementScope: CoroutineScope): Job? {
         val st = req.state
-        if (st.destroyed || !st.stable) return
-        generateTileNow(st, req.tx, req.ty)
+        if (st.destroyed || !st.stable) return null
+        return generateTileNow(st, req.tx, req.ty, measurementScope)
     }
 
     /** Generate [st]'s tile at ([tx], [ty]) right now if it isn't already cached. */
-    private fun generateTileNow(st: PageTiles, tx: Int, ty: Int) {
-        generateTile(st, tx, ty) { pass, texture -> renderTileContent(st, tx, ty, pass, texture) }
+    private fun generateTileNow(
+        st: PageTiles, tx: Int, ty: Int, measurementScope: CoroutineScope = workerScope
+    ): Job? {
+        return generateTile(st, tx, ty, measurementScope) { pass, texture ->
+            renderTileContent(
+                st, tx, ty, pass, texture
+            )
+        }
     }
 
     /**
@@ -1096,8 +1161,9 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         if (cached != null) {
             Log.d(
                 TAG,
-                "Pre-warmed transition cache: ${if (req.isPage1) "current" else "next"} " +
-                        "page ${pageId(req.page)}"
+                "Pre-warmed transition cache: ${if (req.isPage1) "current" else "next"} " + "page ${
+                    pageId(req.page)
+                }"
             )
             invalidate()
         }
@@ -1122,9 +1188,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
      * false otherwise. [renderFullyTiled] is the counterpart for when that can't be deferred.
      */
     private fun blitIfFullyCovered(
-        pass: GPURenderPassEncoder,
-        page: ImagePage,
-        dst: GPUTexture
+        pass: GPURenderPassEncoder, page: ImagePage, dst: GPUTexture
     ): Boolean {
         if (!isFullyCovered(page, dst, 0f, 0f, 1f)) return false
         val st = pages[page] ?: return false
@@ -1151,8 +1215,15 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
 
         val a = pagedAnchor(page, dst, 0f, 0f, 1f)
         drawCore(
-            pass, page, dst, a.anchorX, a.anchorY, 0f, a.pageScale,
-            suppressGeneration = false, applyRetainWindow = false
+            pass,
+            page,
+            dst,
+            a.anchorX,
+            a.anchorY,
+            0f,
+            a.pageScale,
+            suppressGeneration = false,
+            applyRetainWindow = false
         )
 
         val st = pages[page] ?: return false
@@ -1167,8 +1238,15 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         // this frame's tiles - without this, the cache below gets marked valid from a blank render.
         if (!st.stable) {
             drawCore(
-                pass, page, dst, a.anchorX, a.anchorY, 0f, a.pageScale,
-                suppressGeneration = false, applyRetainWindow = false
+                pass,
+                page,
+                dst,
+                a.anchorX,
+                a.anchorY,
+                0f,
+                a.pageScale,
+                suppressGeneration = false,
+                applyRetainWindow = false
             )
         }
 
@@ -1189,28 +1267,97 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     }
 
     /**
-     * Render one [TILE_SIZE] tile at ([tx], [ty]) into [st] via [render], then store it.
+     * Render one [TILE_SIZE] tile at ([tx], [ty]) into [st] via [render], then store it. The GPU
+     * timing measurement this starts is launched onto [measurementScope] - see [generate]'s doc
+     * for why that's a per-batch scope from [schedule] rather than [workerScope] directly.
      */
     private inline fun generateTile(
-        st: PageTiles, tx: Int, ty: Int, render: (GPURenderPassEncoder, GPUTexture) -> Unit
-    ) {
+        st: PageTiles,
+        tx: Int,
+        ty: Int,
+        measurementScope: CoroutineScope,
+        render: (GPURenderPassEncoder, GPUTexture) -> Unit
+    ): Job? {
         val key = key(tx, ty)
-        if (st.tiles.containsKey(key)) return
+        if (st.tiles.containsKey(key)) return null
         evict()
+
+        val queries = timestampQuerySet
+        if (queries == null) {
+            withTileTexture { texture, uniform ->
+                val encoder = device.createCommandEncoder()
+                val pass = encoder.beginRenderPass(clearedColorPass(texture))
+                try {
+                    render(pass, texture)
+                } finally {
+                    pass.end()
+                }
+                device.queue.submit(arrayOf(encoder.finish()))
+
+                writeTileUniform(uniform, tx, ty)
+                val bindGroup = tileBindGroup(st.frameUniform, uniform, texture)
+                st.tiles[key] = Tile(texture, uniform, bindGroup).also { it.lastUsed = frame }
+            }
+            return null
+        }
+        val (resolve, result) = createTimestampBuffers()
 
         withTileTexture { texture, uniform ->
             val encoder = device.createCommandEncoder()
-            val pass = encoder.beginRenderPass(clearedColorPass(texture))
+            val pass = encoder.beginRenderPass(
+                clearedColorPass(
+                    texture, timestampWrites = GPUPassTimestampWrites(
+                        queries, beginningOfPassWriteIndex = 0, endOfPassWriteIndex = 1
+                    )
+                )
+            )
+
             try {
                 render(pass, texture)
             } finally {
                 pass.end()
             }
+
+            encoder.resolveQuerySet(queries, 0, 2, resolve, 0)
+            encoder.copyBufferToBuffer(resolve, 0, result, 0, 16)
+
             device.queue.submit(arrayOf(encoder.finish()))
+            resolve.destroy()
 
             writeTileUniform(uniform, tx, ty)
             val bindGroup = tileBindGroup(st.frameUniform, uniform, texture)
             st.tiles[key] = Tile(texture, uniform, bindGroup).also { it.lastUsed = frame }
+        }
+
+        return measurementScope.launch { measureTileGpuTime(result) }
+    }
+
+    private suspend fun measureTileGpuTime(result: GPUBuffer) {
+        awaitPumped { result.mapAndAwait(MapMode.Read, 0, result.size) }
+        val timestamps = result.getConstMappedRange(0, 16)
+        timestamps.order(ByteOrder.nativeOrder())
+        val start = timestamps.getLong(0)
+        val end = timestamps.getLong(8)
+        result.unmap()
+        result.destroy()
+        if (end > start) {
+            val sampleNs = (end - start).toDouble()
+            avgTileGpuNs =
+                if (avgTileGpuNs <= 0.0) sampleNs else avgTileGpuNs * 0.8 + sampleNs * 0.2
+        }
+    }
+
+    private suspend fun awaitPumped(block: suspend () -> Unit) = coroutineScope {
+        val pump = launch {
+            while (isActive) {
+                WebGpuRenderer.instance.processEvents()
+                delay(1.milliseconds)
+            }
+        }
+        try {
+            block()
+        } finally {
+            pump.cancel()
         }
     }
 
@@ -1237,7 +1384,9 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         }
     }
 
-    private fun clearedColorPass(texture: GPUTexture) = GPURenderPassDescriptor(
+    private fun clearedColorPass(
+        texture: GPUTexture, timestampWrites: GPUPassTimestampWrites? = null
+    ) = GPURenderPassDescriptor(
         colorAttachments = arrayOf(
             GPURenderPassColorAttachment(
                 view = texture.createView(),
@@ -1245,7 +1394,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
                 storeOp = StoreOp.Store,
                 clearValue = GPUColor(0.0, 0.0, 0.0, 0.0)
             )
-        )
+        ), timestampWrites = timestampWrites
     )
 
     /**
@@ -1265,11 +1414,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     ) {
         val dstW = dst.width.toFloat()
         val dstH = dst.height.toFloat()
-        if (st.writtenSnapX == snapX && st.writtenSnapY == snapY &&
-            st.writtenDstW == dstW && st.writtenDstH == dstH &&
-            st.writtenClipL == clipL && st.writtenClipT == clipT &&
-            st.writtenClipR == clipR && st.writtenClipB == clipB
-        ) return
+        if (st.writtenSnapX == snapX && st.writtenSnapY == snapY && st.writtenDstW == dstW && st.writtenDstH == dstH && st.writtenClipL == clipL && st.writtenClipT == clipT && st.writtenClipR == clipR && st.writtenClipB == clipB) return
 
         val byteBuffer = byteBufferLocal.get()
         byteBuffer.clear()
@@ -1413,6 +1558,6 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // 1:1 at integer positions with a nearest sampler: an exact copy of the tile's texels,
     // already premultiplied by RenderPage.
-    return textureSample(src_tex, src_sampler, in.uv);
+     return textureSample(src_tex, src_sampler, in.uv);
 }
 """

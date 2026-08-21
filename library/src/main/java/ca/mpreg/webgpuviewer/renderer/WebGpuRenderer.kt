@@ -5,6 +5,7 @@ import android.view.Surface
 import androidx.webgpu.DeviceLostCallback
 import androidx.webgpu.DeviceLostException
 import androidx.webgpu.FeatureLevel
+import androidx.webgpu.FeatureName
 import androidx.webgpu.GPU.createInstance
 import androidx.webgpu.GPUAdapter
 import androidx.webgpu.GPUCommandEncoder
@@ -105,12 +106,20 @@ class WebGpuRenderer {
                 adapter =
                     instance.requestAdapter(GPURequestAdapterOptions(featureLevel = FeatureLevel.Compatibility))
 
+                val requiredFeatures =
+                    if (adapter.hasFeature(FeatureName.TimestampQuery)) {
+                        intArrayOf(FeatureName.TimestampQuery)
+                    } else {
+                        intArrayOf()
+                    }
+
                 device = adapter.requestDevice(
                     GPUDeviceDescriptor(
                         deviceLostCallback = defaultDeviceLostCallback,
                         deviceLostCallbackExecutor = Executor(Runnable::run),
                         uncapturedErrorCallback = defaultUncapturedErrorCallback,
                         uncapturedErrorCallbackExecutor = Executor(Runnable::run),
+                        requiredFeatures = requiredFeatures,
                     )
                 )
             }
