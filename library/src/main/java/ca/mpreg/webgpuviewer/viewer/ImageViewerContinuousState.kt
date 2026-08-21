@@ -14,7 +14,7 @@ import kotlinx.coroutines.launch
 
 class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
     companion object {
-        private const val MAX_VISIBLE_PAGES = 1
+        private const val MAX_VISIBLE_PAGES = 2
     }
 
     var scale = 1f
