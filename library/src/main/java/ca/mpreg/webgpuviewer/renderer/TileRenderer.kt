@@ -59,7 +59,6 @@ import ca.mpreg.webgpuviewer.renderer.TileRenderer.Companion.OFF_SCREEN_SCORE
 import ca.mpreg.webgpuviewer.renderer.TileRenderer.Companion.STENCIL_BUFFER_COUNT
 import ca.mpreg.webgpuviewer.renderer.TileRenderer.Companion.TILES_PER_BATCH_FALLBACK
 import ca.mpreg.webgpuviewer.renderer.TileRenderer.Companion.TILE_SIZE
-import ca.mpreg.webgpuviewer.transition.Transition
 import ca.mpreg.webgpuviewer.viewer.ImagePage
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -258,25 +257,8 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         }
     }
 
-    /**
-     * One unit of work for the shared worker - either a tile, or (paged viewer only) warming a
-     * slot of [Transition]'s cache. Both share [schedule]/[nextRequest]'s pipeline, so one place
-     * decides when non-urgent GPU work runs rather than each task throttling itself separately.
-     */
-    private sealed class Request {
-        class ForTile(val state: PageTiles, val tx: Int, val ty: Int) : Request()
-        class ForTransition(
-            val page: ImagePage, val isPage1: Boolean, val dstWidth: Int, val dstHeight: Int
-        ) : Request()
-    }
-
-    // At most one request per transition slot - a newer call for the same slot just replaces
-    // which page it targets, and nextRequest() clears a slot as soon as it hands the request out
-    // so a since-warmed page doesn't spin the worker forever re-checking a cache hit.
-    private var pendingTransitionPage1: ImagePage? = null
-    private var pendingTransitionPage2: ImagePage? = null
-    private var pendingTransitionDstWidth = 0
-    private var pendingTransitionDstHeight = 0
+    /** One tile of work for the shared worker - see [schedule]/[nextRequest]. */
+    private class Request(val state: PageTiles, val tx: Int, val ty: Int)
 
     // Access-ordered so getOrPut's read-then-maybe-write always moves the touched page to the
     // end (most recently drawn), whether or not it was already present - see RETAIN_MARGIN.
@@ -372,7 +354,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         )
     }
 
-    /** Plain blit, no stencil attachment - [blitIfFullyCovered]/[renderFullyTiled]'s own pass. */
+    /** Plain blit, no stencil attachment - [blitAvailableTiles]/[renderFullyTiled]'s own pass. */
     private val blitPipeline: GPURenderPipeline by lazy { buildBlitPipeline(null) }
 
     /**
@@ -399,24 +381,20 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         )
     }
 
-    // Ring-buffered rather than a single shared texture: [dst] itself rotates through the
-    // surface's own swapchain images, so reusing one physical stencil texture every frame would
-    // force the GPU to serialize each frame's stencil clear/write against the previous frame's -
-    // still in flight since render() only serializes encoding, not GPU completion - behind it,
-    // silently undoing the swapchain's buffering and adding a frame (or more) of latency that
-    // shows up as tiles visibly trailing the current pan/scroll position.
+    // Ring-buffered, not one shared texture: reusing a single stencil texture every frame would
+    // force the GPU to serialize each frame's clear/write against the previous frame's, still
+    // in flight since render() only serializes encoding - silently undoing the swapchain's own
+    // buffering and showing up as tiles trailing the current pan/scroll position.
     private val stencilTextures = arrayOfNulls<GPUTexture>(STENCIL_BUFFER_COUNT)
     private val stencilViews = arrayOfNulls<GPUTextureView>(STENCIL_BUFFER_COUNT)
     private var stencilWidth = 0
     private var stencilHeight = 0
 
     /**
-     * Stencil-only attachment matching [dst]'s size, shared by every live-render pass this frame -
-     * [ImageViewerState]/[ImageViewerContinuousState] attach it to their render pass so
-     * [blitPipelineStencilWrite] can mark tile-covered pixels and [RenderPage]'s masked variants
-     * can skip re-shading them. Rotates across [STENCIL_BUFFER_COUNT] textures by [frame] so a
-     * still in-flight previous frame is never made to share a stencil resource with this one; all
-     * are recreated together whenever the destination's size actually changes.
+     * Stencil-only attachment matching [dst]'s size, shared by every live-render pass this frame
+     * so [blitPipelineStencilWrite] can mark tile-covered pixels and [RenderPage]'s masked
+     * variants can skip re-shading them. Rotates across [STENCIL_BUFFER_COUNT] textures by
+     * [frame] so a still-in-flight previous frame never shares one with this one.
      */
     fun stencilViewFor(dst: GPUTexture): GPUTextureView {
         if (stencilWidth != dst.width || stencilHeight != dst.height) {
@@ -480,14 +458,10 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     private fun pagedAnchor(
         page: ImagePage, dst: GPUTexture, x: Float, y: Float, scale: Float
     ): PagedAnchor {
-        // While actually scale-animating to home, pin the grid to the animation's target (x, y,
-        // scale) instead of live values - jumping straight to the target scale wipes the grid via
-        // drawCore's invalidation check once, and isScaleAnimating keeps it from regenerating
-        // until the animation ends, instead of wiping it on every interpolated frame. Gated on
-        // isScaleAnimating rather than just the target being homeScale: an [ImagePage.animateTo]
-        // that only moves (x, y) at a constant homeScale never sets that flag, and pinning there
-        // would freeze the grid's position at the destination for nothing, since scale never
-        // moved and the cache never needed wiping in the first place.
+        // Pin the grid to the animation's target while actually scale-animating home, so
+        // drawCore wipes it once instead of every interpolated frame. Gated on isScaleAnimating,
+        // not just the target being homeScale, since a pure-position animateTo at a constant
+        // homeScale never sets that flag - pinning then would just freeze the grid for nothing.
         val goingHome = page.isScaleAnimating && page.animationTargetScale == page.homeScale
         val effectivePageX = if (goingHome) page.animationTargetX ?: page.x else page.x
         val effectivePageY = if (goingHome) page.animationTargetY ?: page.y else page.y
@@ -547,6 +521,40 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         val clipB = snapY + centerYOffset + halfH
 
         return GridPlacement(snapX, snapY, clipL, clipT, clipR, clipB, wantL, wantR, wantT, wantB)
+    }
+
+    /**
+     * Every (tx, ty) [gp] wants, visible or not - the one definition [drawCore],
+     * [isFullyCoveredCore], and [availableTileKeys] all share, so they can't drift apart the way
+     * [gridPlacement]'s own doc describes [prewarm] once doing. Visibility is a separate per-tile
+     * question - see [tileVisible].
+     */
+    private inline fun forEachWantedGridTile(
+        gp: GridPlacement,
+        action: (txi: Int, tyi: Int) -> Unit
+    ) {
+        val ts = TILE_SIZE.toFloat()
+        val tx0 = floor(gp.wantL / ts).toInt()
+        val tx1 = ceil(gp.wantR / ts).toInt() - 1
+        val ty0 = floor(gp.wantT / ts).toInt()
+        val ty1 = ceil(gp.wantB / ts).toInt() - 1
+        for (tyi in ty0..ty1) {
+            for (txi in tx0..tx1) {
+                action(txi, tyi)
+            }
+        }
+    }
+
+    /** True if tile ([txi], [tyi]) of [gp]'s grid actually overlaps [dst]'s visible bounds. */
+    private fun tileVisible(gp: GridPlacement, dst: GPUTexture, txi: Int, tyi: Int): Boolean {
+        val ts = TILE_SIZE.toFloat()
+        val px = gp.snapX + txi * ts
+        val py = gp.snapY + tyi * ts
+        val visL = max(gp.clipL, 0f)
+        val visT = max(gp.clipT, 0f)
+        val visR = min(gp.clipR, dst.width.toFloat())
+        val visB = min(gp.clipB, dst.height.toFloat())
+        return px < visR && px + ts > visL && py < visB && py + ts > visT
     }
 
     /** As [PagedAnchor], for the continuous overloads; also carries [centerYOffset]. */
@@ -638,28 +646,38 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         // tiles to be "covering".
         if (gp.wantL >= gp.wantR || gp.wantT >= gp.wantB) return true
 
-        val ts = TILE_SIZE.toFloat()
-        val visL = max(gp.clipL, 0f)
-        val visT = max(gp.clipT, 0f)
-        val visR = min(gp.clipR, dst.width.toFloat())
-        val visB = min(gp.clipB, dst.height.toFloat())
-        if (visL >= visR || visT >= visB) return true
-
-        val tx0 = floor((visL - gp.snapX) / ts).toInt()
-        val tx1 = ceil((visR - gp.snapX) / ts).toInt() - 1
-        val ty0 = floor((visT - gp.snapY) / ts).toInt()
-        val ty1 = ceil((visB - gp.snapY) / ts).toInt() - 1
-
-        for (tyi in ty0..ty1) {
-            for (txi in tx0..tx1) {
-                val px = gp.snapX + txi * ts
-                val py = gp.snapY + tyi * ts
-                if (px < visR && px + ts > visL && py < visB && py + ts > visT) {
-                    if (!st.tiles.containsKey(key(txi, tyi))) return false
-                }
+        var covered = true
+        forEachWantedGridTile(gp) { txi, tyi ->
+            if (covered && tileVisible(gp, dst, txi, tyi) && !st.tiles.containsKey(key(txi, tyi))) {
+                covered = false
             }
         }
-        return true
+        return covered
+    }
+
+    /**
+     * The set of (tx, ty) grid keys [page]'s tile cache currently has cached and visible within
+     * [dst] - lets a caller like [Transition] track exactly what it's already blitted and detect
+     * when something new lands, instead of re-deriving a "done yet" boolean that has to agree
+     * with [drawCore] (see [forEachWantedGridTile]'s doc). Null if the page isn't drawable.
+     */
+    fun availableTileKeys(page: ImagePage, dst: GPUTexture): Set<Long>? {
+        if (page.destroyed || !page.highQuality || page.isAnimated) return null
+        if (page.images.isEmpty() || page.images.all { it == null || it.mipmaps.isEmpty() }) return null
+
+        val st = pages[page] ?: return null
+        val a = pagedAnchor(page, dst, 0f, 0f, 1f)
+        val gp = gridPlacement(page, dst, a.anchorX, a.anchorY, 0f, a.pageScale) ?: return null
+        if (gp.wantL >= gp.wantR || gp.wantT >= gp.wantB) return emptySet()
+
+        val keys = HashSet<Long>()
+        forEachWantedGridTile(gp) { txi, tyi ->
+            if (tileVisible(gp, dst, txi, tyi)) {
+                val tkey = key(txi, tyi)
+                if (st.tiles.containsKey(tkey)) keys.add(tkey)
+            }
+        }
+        return keys
     }
 
     /**
@@ -711,7 +729,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         // A prewarmed tile's bind group references this same frame uniform, but unlike [drawCore]
         // this grid is never drawn on screen to write it - without this, a page that's only ever
         // been prewarmed (never on screen) blits with a stale/never-written clip rect once
-        // [blitIfFullyCovered] uses its tiles, which reads as solid black. Shares [gridPlacement]
+        // [blitAvailableTiles] uses its tiles, which reads as solid black. Shares [gridPlacement]
         // with [drawCore] now, so this can't happen again without both call sites noticing.
         writeFrameUniformIfChanged(
             st, dst, gp.snapX, gp.snapY, gp.clipL, gp.clipT, gp.clipR, gp.clipB
@@ -736,18 +754,6 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             if (!alreadyPrewarming) Log.d(TAG, "Pre-warming next page tiles ${pageId(page)}")
             schedule()
         }
-    }
-
-    /**
-     * Enqueue [page] to have [Transition]'s cache slot [isPage1] warmed via the shared worker,
-     * once nothing more urgent is pending - see [nextRequest] for the priority ordering.
-     */
-    fun prewarmTransition(page: ImagePage, isPage1: Boolean, dstWidth: Int, dstHeight: Int) {
-        if (page.destroyed) return
-        if (isPage1) pendingTransitionPage1 = page else pendingTransitionPage2 = page
-        pendingTransitionDstWidth = dstWidth
-        pendingTransitionDstHeight = dstHeight
-        schedule()
     }
 
     /**
@@ -892,10 +898,6 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         }
 
         val ts = TILE_SIZE.toFloat()
-        val tx0 = floor(gp.wantL / ts).toInt()
-        val tx1 = ceil(gp.wantR / ts).toInt() - 1
-        val ty0 = floor(gp.wantT / ts).toInt()
-        val ty1 = ceil(gp.wantB / ts).toInt() - 1
 
         // In tile coordinates, unlike wantT/wantB - not offset by centerYOffset, since a tile's
         // blit position is snapY + ty*ts regardless of which page it belongs to.
@@ -908,40 +910,29 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             st, dst, gp.snapX, gp.snapY, gp.clipL, gp.clipT, gp.clipR, gp.clipB
         )
 
-        val dstW = dst.width.toFloat()
-        val dstH = dst.height.toFloat()
-        val visL = max(gp.clipL, 0f)
-        val visT = max(gp.clipT, 0f)
-        val visR = min(gp.clipR, dstW)
-        val visB = min(gp.clipB, dstH)
-
         var pipelineSet = false
         val desired = HashSet<Long>()
-        for (tyi in ty0..ty1) {
-            for (txi in tx0..tx1) {
-                val tkey = key(txi, tyi)
-                desired.add(tkey)
-                val tile = st.tiles[tkey]
-                if (tile != null) {
-                    tile.lastUsed = frame
-                    val px = gp.snapX + txi * ts
-                    val py = gp.snapY + tyi * ts
-                    if (px < visR && px + ts > visL && py < visB && py + ts > visT) {
-                        if (!pipelineSet) {
-                            if (useStencilMask) {
-                                pass.setPipeline(blitPipelineStencilWrite)
-                                pass.setStencilReference(1)
-                            } else {
-                                pass.setPipeline(blitPipeline)
-                            }
-                            pipelineSet = true
+        forEachWantedGridTile(gp) { txi, tyi ->
+            val tkey = key(txi, tyi)
+            desired.add(tkey)
+            val tile = st.tiles[tkey]
+            if (tile != null) {
+                tile.lastUsed = frame
+                if (tileVisible(gp, dst, txi, tyi)) {
+                    if (!pipelineSet) {
+                        if (useStencilMask) {
+                            pass.setPipeline(blitPipelineStencilWrite)
+                            pass.setStencilReference(1)
+                        } else {
+                            pass.setPipeline(blitPipeline)
                         }
-                        pass.setBindGroup(0, tile.bindGroup)
-                        pass.draw(6)
+                        pipelineSet = true
                     }
-                } else if (st.stable) {
-                    st.pending.add(tkey)
+                    pass.setBindGroup(0, tile.bindGroup)
+                    pass.draw(6)
                 }
+            } else if (st.stable) {
+                st.pending.add(tkey)
             }
         }
         st.pending.retainAll(desired)
@@ -967,17 +958,13 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
      *
      * The worker shares the render thread but not the render mutex, so suspending between
      * batches actually lets a queued frame through - the same reasoning as
-     * [WebGpuRenderer.onDispatcher]. Batch size comes from [nextBatchSize] - re-read every batch
-     * so it adapts as [avgTileGpuNs] accumulates real measurements instead of staying fixed. Each
-     * tile's [generate] call is scoped to `this` - the worker's own coroutine, not a nested
-     * [coroutineScope] - since that would just be a same-dispatcher context switch for no benefit
-     * here; the returned [Job]s are collected and joined together once the batch is done
-     * generating, so the whole batch's measurements are awaited together rather than one at a
-     * time per tile - that join is itself what lets a queued frame through (the same reasoning a
-     * plain [yield] would otherwise be there for), so no separate yield is needed alongside it.
-     * Without [FeatureName.TimestampQuery] at all, [generate] never returns a [Job], so
-     * [measurements] is always empty and joining it wouldn't suspend for anything - pacing falls
-     * back to a flat [delay] between (always [TILES_PER_BATCH_FALLBACK]-sized) batches instead.
+     * [WebGpuRenderer.onDispatcher]. Batch size comes from [nextBatchSize], re-read every batch
+     * as [avgTileGpuNs] accumulates measurements. Each tile's [generate] job is collected and
+     * joined once per batch (not per tile) on `this` coroutine directly - no nested
+     * [coroutineScope], and that join is itself what lets a queued frame through, so no separate
+     * [yield] is needed. Without [FeatureName.TimestampQuery], [generate] never returns a [Job],
+     * so joining an always-empty [measurements] does nothing - pacing falls back to a flat
+     * [delay] between [TILES_PER_BATCH_FALLBACK]-sized batches instead.
      */
     private fun schedule() {
         if (workerActive) return
@@ -1002,7 +989,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
                     }
                     if (generated == 0) break
                     invalidate()
-                    if (timestampsSupported) measurements.joinAll() else delay(5)
+                    if (timestampsSupported) measurements.joinAll() else delay(5.milliseconds)
                 }
             } finally {
                 workerActive = false
@@ -1011,11 +998,8 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     }
 
     /**
-     * Pull the highest-priority request, in four tiers: on-screen tile > current page's
-     * transition warm > everything else ([prewarm]'d tiles or a stability-losing grid's
-     * leftovers) > next page's transition warm. That last tier trails the third because the next
-     * page's slot can only warm once [prewarm] has fed it tiles (see [blitIfFullyCovered]) -
-     * warming any earlier would just find nothing ready.
+     * Pull the highest-priority pending tile: on-screen first, then everything else ([prewarm]'d
+     * tiles or a stability-losing grid's leftovers).
      *
      * The on-screen/other split reuses the per-tile distance score: [prewarm] leaves a grid's
      * [PageTiles.txMin]/etc at their empty default, so its tiles always score at or above
@@ -1056,52 +1040,18 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             }
         }
 
-        if (bestState != null && bestPriority < OFF_SCREEN_SCORE) {
-            bestState.pending.remove(bestKey)
-            return Request.ForTile(bestState, (bestKey shr 32).toInt(), bestKey.toInt())
-        }
-
-        pendingTransitionPage1?.let { page ->
-            pendingTransitionPage1 = null
-            return Request.ForTransition(
-                page, true, pendingTransitionDstWidth, pendingTransitionDstHeight
-            )
-        }
-
-        if (bestState != null) {
-            bestState.pending.remove(bestKey)
-            return Request.ForTile(bestState, (bestKey shr 32).toInt(), bestKey.toInt())
-        }
-
-        pendingTransitionPage2?.let { page ->
-            pendingTransitionPage2 = null
-            return Request.ForTransition(
-                page, false, pendingTransitionDstWidth, pendingTransitionDstHeight
-            )
-        }
-
-        return null
+        if (bestState == null) return null
+        bestState.pending.remove(bestKey)
+        return Request(bestState, (bestKey shr 32).toInt(), bestKey.toInt())
     }
 
     /**
-     * Generates [req], returning the just-launched GPU timing measurement's [Job], if this
-     * particular tile happened to start one - [measurementScope] is where it's launched;
-     * [schedule] passes its own coroutine so it can collect and join a whole batch's worth of
-     * these together rather than one at a time. [renderFullyTiled]'s direct [generateTileNow]
-     * call has no such scope to offer and doesn't care to join anything, so it just falls back to
-     * [workerScope] there, fire-and-forget.
+     * Generates [req], returning the GPU timing measurement's [Job] if this tile started one -
+     * launched onto [measurementScope], which [schedule] sets to its own coroutine so a whole
+     * batch's worth can be joined together. [blitAvailableTiles]'s direct [generateTileNow] call
+     * has no such scope, so it just falls back to [workerScope], fire-and-forget.
      */
     private fun generate(req: Request, measurementScope: CoroutineScope): Job? {
-        return when (req) {
-            is Request.ForTile -> generateTileRequest(req, measurementScope)
-            is Request.ForTransition -> {
-                generateTransitionRequest(req)
-                null
-            }
-        }
-    }
-
-    private fun generateTileRequest(req: Request.ForTile, measurementScope: CoroutineScope): Job? {
         val st = req.state
         if (st.destroyed || !st.stable) return null
         return generateTileNow(st, req.tx, req.ty, measurementScope)
@@ -1151,29 +1101,6 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     }
 
     /**
-     * Warm one slot of [Transition]'s cache from [page]'s already-generated tiles - see
-     * [blitIfFullyCovered]'s doc for why this never forces a missing one. A stale request (page
-     * destroyed, or already warmed by the time this was pulled) cheaply no-ops via [isCached].
-     */
-    private fun generateTransitionRequest(req: Request.ForTransition) {
-        if (req.page.destroyed || Transition.isCached(req.page, req.isPage1)) return
-        val encoder = device.createCommandEncoder()
-        val cached = Transition.getCachedTexture(
-            req.page, req.isPage1, encoder, req.dstWidth, req.dstHeight
-        ) { pass, tex -> blitIfFullyCovered(pass, req.page, tex) }
-        device.queue.submit(arrayOf(encoder.finish()))
-        if (cached != null) {
-            Log.d(
-                TAG,
-                "Pre-warmed transition cache: ${if (req.isPage1) "current" else "next"} " + "page ${
-                    pageId(req.page)
-                }"
-            )
-            invalidate()
-        }
-    }
-
-    /**
      * Compact, stable-per-object identifier for [page] in log messages - "current"/"next" are
      * relative labels that get reassigned to a different actual page on every turn, so this is
      * what lets a log reader tell whether two log lines are really about the same page.
@@ -1181,41 +1108,15 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     private fun pageId(page: ImagePage) = Integer.toHexString(System.identityHashCode(page))
 
     /**
-     * Draw every one of [page]'s currently cached tiles into [pass], covering the whole page - for
-     * [Transition]'s *background* cache warm only (see [generateTransitionRequest]), which wants
-     * exactly the pixels [draw] already produced rather than a second, separately-filtered render
-     * (which would hit [Image.prepareForRender]'s fixed-quad-window limit - see [RenderPage]'s doc).
-     *
-     * Deliberately never generates a missing tile itself, so background warming stays one tile's
-     * worth of work per worker turn; [prewarm]/[draw] are what drive a page's tiles to completion
-     * beforehand, and this only checks whether that's finished yet, drawing nothing and returning
-     * false otherwise. [renderFullyTiled] is the counterpart for when that can't be deferred.
+     * Shared setup for [renderFullyTiled]/[blitAvailableTiles]: draws whatever's cached into
+     * [dst] and queues anything missing (via [drawCore]'s own `schedule()` call), returning the
+     * grid's state - or null if [page] has no drawable images.
      */
-    private fun blitIfFullyCovered(
+    private fun drawGridForFullPage(
         pass: GPURenderPassEncoder, page: ImagePage, dst: GPUTexture
-    ): Boolean {
-        if (!isFullyCovered(page, dst, 0f, 0f, 1f)) return false
-        val st = pages[page] ?: return false
-        pass.setPipeline(blitPipeline)
-        st.tiles.values.forEach { tile ->
-            tile.lastUsed = frame
-            pass.setBindGroup(0, tile.bindGroup)
-            pass.draw(6)
-        }
-        return true
-    }
-
-    /**
-     * Render [page]'s full tile grid into [dst], generating any tile the background worker hasn't
-     * reached yet right here instead of leaving it queued - for [Transition]'s live mid-transition
-     * render, which is showing the result to the user *right now* and can't defer an incomplete
-     * page. The background warm (see [blitIfFullyCovered]) is meant to make this unnecessary in
-     * the common case, so this only pays for real when the user turns the page faster than that
-     * work can keep up. Returns false, drawing nothing, if the page has no drawable images.
-     */
-    fun renderFullyTiled(pass: GPURenderPassEncoder, page: ImagePage, dst: GPUTexture): Boolean {
-        if (page.destroyed || !page.highQuality || page.isAnimated) return false
-        if (page.images.isEmpty() || page.images.all { it == null || it.mipmaps.isEmpty() }) return false
+    ): PageTiles? {
+        if (page.destroyed || !page.highQuality || page.isAnimated) return null
+        if (page.images.isEmpty() || page.images.all { it == null || it.mipmaps.isEmpty() }) return null
 
         val a = pagedAnchor(page, dst, 0f, 0f, 1f)
         drawCore(
@@ -1230,7 +1131,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             applyRetainWindow = false
         )
 
-        val st = pages[page] ?: return false
+        val st = pages[page] ?: return null
 
         // A scale (or centerYOffset) change wipes the grid and marks it unstable within that same
         // drawCore call - which also means its want/pending pass ran before stability was granted,
@@ -1239,7 +1140,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         // that - it must finish now regardless, e.g. a page turn triggered while the page is still
         // mid-animation back to its home scale. Re-running once more (same anchor/scale, so no
         // further wipe) grants stability immediately and lets the want/pending pass actually queue
-        // this frame's tiles - without this, the cache below gets marked valid from a blank render.
+        // this frame's tiles.
         if (!st.stable) {
             drawCore(
                 pass,
@@ -1254,6 +1155,17 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             )
         }
 
+        return st
+    }
+
+    /**
+     * Render [page]'s full tile grid into [dst], generating any tile the worker hasn't reached
+     * yet right here rather than leaving it queued - for callers that can't show less than fully
+     * complete. [blitAvailableTiles] is the partial/progressive counterpart. Returns false,
+     * drawing nothing, if the page has no drawable images.
+     */
+    fun renderFullyTiled(pass: GPURenderPassEncoder, page: ImagePage, dst: GPUTexture): Boolean {
+        val st = drawGridForFullPage(pass, page, dst) ?: return false
         if (st.pending.isEmpty()) return true
 
         val toGenerate = st.pending.toList()
@@ -1269,6 +1181,16 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         }
         return true
     }
+
+    /**
+     * Blit whatever's already cached into [dst], queuing anything missing for the background
+     * worker rather than force-generating it - see [renderFullyTiled] for the force-complete
+     * counterpart. Used by [Transition]'s cache to layer tiles over an immediate fast-rendered
+     * seed without blocking on full coverage. Returns false, drawing nothing, if [page] has no
+     * drawable images.
+     */
+    fun blitAvailableTiles(pass: GPURenderPassEncoder, page: ImagePage, dst: GPUTexture): Boolean =
+        drawGridForFullPage(pass, page, dst) != null
 
     /**
      * Render one [TILE_SIZE] tile at ([tx], [ty]) into [st] via [render], then store it. The GPU

@@ -195,13 +195,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         pos2: Offset,
         tiles: TileRenderer,
     ) {
-        val cached1 = getCachedTexture(page1, true, encoder, dst.width, dst.height) { pass, tex ->
-            renderForCache(pass, page1, tex, tiles)
-        }
+        val cached1 = getCachedTexture(page1, true, encoder, dst.width, dst.height, tiles)
 
-        val cached2 = getCachedTexture(page2, false, encoder, dst.width, dst.height) { pass, tex ->
-            renderForCache(pass, page2, tex, tiles)
-        }
+        val cached2 = getCachedTexture(page2, false, encoder, dst.width, dst.height, tiles)
 
         // blend: 0 = fully page1, 1 = fully page2
         val blend = if (frac > 0f) frac else -frac

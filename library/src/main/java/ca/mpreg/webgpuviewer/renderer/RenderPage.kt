@@ -33,6 +33,7 @@ import ca.mpreg.webgpuviewer.renderer.RenderPage.render
 import ca.mpreg.webgpuviewer.renderer.RenderPage.renderBackground
 import ca.mpreg.webgpuviewer.renderer.RenderPage.renderFast
 import ca.mpreg.webgpuviewer.renderer.RenderPage.renderFastImageOnly
+import ca.mpreg.webgpuviewer.renderer.RenderPage.renderFastUnmasked
 import ca.mpreg.webgpuviewer.renderer.RenderPage.renderImage
 import ca.mpreg.webgpuviewer.renderer.RenderPage.renderPage
 import ca.mpreg.webgpuviewer.renderer.RenderPage.renderPlain
@@ -60,8 +61,8 @@ import kotlin.math.min
  *  - [renderPlain] is [renderFast] without the sRGB<->linear round trip, for
  *    [ImagePage.highQuality] false content where that correctness isn't worth the cost.
  *
- * A cached transition's own snapshot is instead composed from [TileRenderer]'s already-generated
- * tiles - see [TileRenderer.blitIfFullyCovered] and [TileRenderer.renderFullyTiled].
+ * A cached transition's own snapshot seeds with [renderFastUnmasked], then layers in
+ * [TileRenderer]'s tiles as they land - see [Transition.getCachedTexture].
  */
 object RenderPage {
     private val device get() = WebGpuRenderer.device
@@ -94,9 +95,14 @@ object RenderPage {
     }
     private val filteredVariant = Variant { buildPipeline(HEADER + VS_MAIN + FILTERED_FS) }
 
-    // Used by Transition's renderForCache fallback, whose pass has no stencil attachment at all -
-    // must stay stencil-free. See [plainVariantMasked] for the stencil-pass-compatible twin
-    // ImageViewerState/Continuous use instead.
+    // As samplerVariant, but stencil-free - Transition's cache-seed pass has none, and doesn't
+    // need one: it fills once, then tiles blit on top in later passes via ordinary blending.
+    private val samplerVariantUnmasked =
+        Variant { buildPipeline(TILE_HEADER + TILE_VS_MAIN + TILE_SAMPLER_FS) }
+
+    // Used by Transition's cache seed for non-highQuality pages, whose pass has no stencil
+    // attachment at all - must stay stencil-free. See [plainVariantMasked] for the
+    // stencil-pass-compatible twin ImageViewerState/Continuous use instead.
     private val plainVariant = Variant { buildPipeline(TILE_HEADER + TILE_VS_MAIN + TILE_PLAIN_FS) }
 
     // As plainVariant, but declares a no-op stencil state (always passes, never writes) purely so
@@ -781,6 +787,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         y: Float,
         scale: Float
     ) = renderPage(pass, page, dst, x, y, scale, samplerVariant, drawBackground = false)
+
+    /** As [renderFastImageOnly] plus the background, no stencil needed - [Transition]'s cache seed. */
+    internal fun renderFastUnmasked(
+        pass: GPURenderPassEncoder,
+        page: ImagePage,
+        dst: GPUTexture,
+        x: Float,
+        y: Float,
+        scale: Float
+    ) = renderPage(pass, page, dst, x, y, scale, samplerVariantUnmasked)
 
     /**
      * Draw a page into [pass] with the plain (non-linear-light) sampler shader - the

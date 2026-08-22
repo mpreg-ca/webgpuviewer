@@ -38,7 +38,7 @@ import ca.mpreg.webgpuviewer.transition.Transition.Companion.blitCached
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.cacheLock
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.getCachedTexture
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.invalidateCache
-import ca.mpreg.webgpuviewer.transition.Transition.Companion.isCached
+import ca.mpreg.webgpuviewer.transition.Transition.Companion.renderCacheSeed
 import ca.mpreg.webgpuviewer.viewer.ImagePage
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -208,6 +208,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         private var cachedScale2 = 0f
         private var cachedFrameVersion2 = -1
 
+        // Which tile keys [getCachedTexture] has actually blitted into each slot - compared
+        // against [TileRenderer.availableTileKeys] to know exactly when a slot needs another
+        // incremental blit, instead of a "done yet" boolean that has to agree with drawCore.
+        private var blittedKeys1: Set<Long> = emptySet()
+        private var blittedKeys2: Set<Long> = emptySet()
+
         private var cacheWidth = 0
         private var cacheHeight = 0
 
@@ -249,6 +255,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 // Invalidate cache
                 cachedPage1 = null
                 cachedPage2 = null
+                blittedKeys1 = emptySet()
+                blittedKeys2 = emptySet()
                 cacheWidth = width
                 cacheHeight = height
             }
@@ -297,6 +305,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             synchronized(cacheLock) {
                 cachedPage1 = null
                 cachedPage2 = null
+                blittedKeys1 = emptySet()
+                blittedKeys2 = emptySet()
             }
         }
 
@@ -309,7 +319,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         fun rotateCacheOnPageChange(newCurrentPage: ImagePage) {
             synchronized(cacheLock) {
                 when {
-                    cacheHitLocked(newCurrentPage, true) -> cachedPage2 = null
+                    cacheHitLocked(newCurrentPage, true) -> {
+                        cachedPage2 = null
+                        blittedKeys2 = emptySet()
+                    }
+
                     cacheHitLocked(newCurrentPage, false) -> {
                         val t = texture1; texture1 = texture2; texture2 = t
                         val v = view1; view1 = view2; view2 = v
@@ -318,18 +332,22 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                         cachedY1 = cachedY2
                         cachedScale1 = cachedScale2
                         cachedFrameVersion1 = cachedFrameVersion2
+                        blittedKeys1 = blittedKeys2
                         cachedPage2 = null
+                        blittedKeys2 = emptySet()
                     }
 
                     else -> {
                         cachedPage1 = null
                         cachedPage2 = null
+                        blittedKeys1 = emptySet()
+                        blittedKeys2 = emptySet()
                     }
                 }
             }
         }
 
-        /** Must hold [cacheLock]. Shared by [getCachedTexture] and [isCached]. */
+        /** Must hold [cacheLock]. Used by [getCachedTexture] to decide seed vs. incremental vs. skip. */
         private fun cacheHitLocked(page: ImagePage, isPage1: Boolean): Boolean {
             val cachedPage = if (isPage1) cachedPage1 else cachedPage2
             val cachedX = if (isPage1) cachedX1 else cachedX2
@@ -341,37 +359,38 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
 
         /**
-         * True if [getCachedTexture] would return a cache hit for [page] right now, with no
-         * rendering - lets a caller (the shared background worker) decide whether warming this
-         * page is still necessary before spending a turn on it.
+         * Seeds [page]'s cache slot from scratch: an immediate fast (or plain, for non-highQuality)
+         * fill, then whatever tiles are already cached layered on top. Only for a fresh identity
+         * ([getCachedTexture]'s `LoadOp.Clear` branch) - an unchanged one calls
+         * [TileRenderer.blitAvailableTiles] directly instead, without repeating the fill.
          */
-        internal fun isCached(page: ImagePage, isPage1: Boolean): Boolean =
-            synchronized(cacheLock) { cacheHitLocked(page, isPage1) }
-
-        /**
-         * Renders [page] for [getCachedTexture]: the tiled/cached path for highQuality content,
-         * or else a single plain-sampler draw covering the whole page - mirroring the live
-         * viewer's own highQuality fallback (see ImageViewerState.renderSnapshot). TileRenderer's
-         * drawCore refuses non-highQuality pages outright (they're not worth the tile cache's
-         * sharpness), so without this fallback such a page's transition cache slot would just
-         * stay blank for the whole transition, since getCachedTexture keeps retrying every frame
-         * rather than ever treating a false result as a permanent hit.
-         */
-        internal fun renderForCache(
+        private fun renderCacheSeed(
             pass: GPURenderPassEncoder, page: ImagePage, tex: GPUTexture, tiles: TileRenderer
-        ): Boolean {
+        ) {
             if (!page.highQuality) {
                 RenderPage.renderPlain(pass, page, tex, 0f, 0f, 1f)
-                return true
+                return
             }
-            return tiles.renderFullyTiled(pass, page, tex)
+            RenderPage.renderFastUnmasked(pass, page, tex, 0f, 0f, 1f)
+            tiles.blitAvailableTiles(pass, page, tex)
         }
 
         /**
-         * Get cached texture view for a page, rendering if needed. [renderPage] returns whether it
-         * actually rendered - false leaves the texture cleared but doesn't mark it valid, so the
-         * caller retries later rather than the cache reporting a hit for a blank frame. Returns
-         * null if the page has no images or a needed render didn't happen.
+         * Get cached texture view for a page, rendering into it as needed rather than requiring
+         * full tile coverage up front:
+         *  - Identity unchanged (same page/x/y/scale/frameVersion) and either the page never gets
+         *    tiles (not highQuality, or animated) or [TileRenderer.availableTileKeys] matches
+         *    what's already tracked as blitted - nothing to add, return the view as-is.
+         *  - Identity unchanged but something new is available - `LoadOp.Load` layers it on top
+         *    and the newly-available set becomes the tracked one.
+         *  - Identity changed - `LoadOp.Clear` and [renderCacheSeed] from scratch.
+         *
+         * Comparing tracked key sets, not a derived "fully covered" boolean, means this can never
+         * desync from what [TileRenderer.drawCore] actually blits.
+         *
+         * Never forces generation: whatever isn't cached fills in on the background worker as
+         * usual, and each later call picks up what's landed since. Null only if the page has no
+         * images to draw at all.
          */
         internal fun getCachedTexture(
             page: ImagePage,
@@ -379,67 +398,96 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             encoder: GPUCommandEncoder,
             dstWidth: Int,
             dstHeight: Int,
-            renderPage: (GPURenderPassEncoder, GPUTexture) -> Boolean
+            tiles: TileRenderer,
         ): GPUTextureView? {
             if (page.destroyed || page.images.all { it == null }) return null
 
             // Lock only for metadata - GPU recording runs on the single GPU thread and doesn't
             // need it; cacheLock only guards against invalidateCache() from the UI thread.
-            val (texture, view, needsRender) = synchronized(cacheLock) {
+            val (texture, view, identityMatches, blittedKeys) = synchronized(cacheLock) {
                 ensureTexturesLocked(dstWidth, dstHeight)
                 val texture = if (isPage1) texture1!! else texture2!!
                 val view = if (isPage1) view1!! else view2!!
-                Triple(texture, view, !cacheHitLocked(page, isPage1))
+                val blitted = if (isPage1) blittedKeys1 else blittedKeys2
+                CacheReadResult(texture, view, cacheHitLocked(page, isPage1), blitted)
             }
 
-            if (!needsRender) return view
+            // isAnimated pages never get tiles either (drawGridForFullPage always refuses them,
+            // same as !highQuality) - availableTileKeys would return null for them forever, which
+            // never equals a real (even empty) Set, so without this they'd fail the skip check
+            // and reopen a pass every single frame indefinitely.
+            val neverTiled = !page.highQuality || page.isAnimated
+            val available = if (neverTiled) null else tiles.availableTileKeys(page, texture)
+
+            if (identityMatches && (neverTiled || available == blittedKeys)) {
+                return view
+            }
 
             val pageX = page.x
             val pageY = page.y
             val pageScale = page.scale
             val pageFrameVersion = page.frameVersion
 
-            // Record outside the lock - GPU thread is single-threaded. The clear and the page's
-            // draws share one pass, opened here so the callback can just draw into it.
+            // Record outside the lock - GPU thread is single-threaded.
             val pass = encoder.beginRenderPass(
                 GPURenderPassDescriptor(
                     colorAttachments = arrayOf(
                         GPURenderPassColorAttachment(
                             view = view,
-                            loadOp = LoadOp.Clear,
+                            loadOp = if (identityMatches) LoadOp.Load else LoadOp.Clear,
                             storeOp = StoreOp.Store,
                             clearValue = GPUColor(0.0, 0.0, 0.0, 0.0)
                         )
                     )
                 )
             )
-            val rendered = try {
-                renderPage(pass, texture)
+            try {
+                if (identityMatches) {
+                    tiles.blitAvailableTiles(pass, page, texture)
+                } else {
+                    renderCacheSeed(pass, page, texture, tiles)
+                }
             } finally {
                 pass.end()
             }
 
-            if (!rendered) return null
+            // [available] is still accurate after the render: blitAvailableTiles/renderCacheSeed
+            // only blit what's already cached and queue what's missing for the background worker
+            // - generation itself is async, so st.tiles can't have gained anything in between.
+            // Reusing it here instead of re-walking the grid halves this call's cost.
+            val newBlitted = available ?: emptySet()
 
-            // Update cache metadata
             synchronized(cacheLock) {
-                if (isPage1) {
-                    cachedPage1 = page
-                    cachedX1 = pageX
-                    cachedY1 = pageY
-                    cachedScale1 = pageScale
-                    cachedFrameVersion1 = pageFrameVersion
-                } else {
-                    cachedPage2 = page
-                    cachedX2 = pageX
-                    cachedY2 = pageY
-                    cachedScale2 = pageScale
-                    cachedFrameVersion2 = pageFrameVersion
+                if (isPage1) blittedKeys1 = newBlitted else blittedKeys2 = newBlitted
+                if (!identityMatches) {
+                    // Update cache metadata - only needed on a real identity change; an unchanged
+                    // identity's metadata is already correct.
+                    if (isPage1) {
+                        cachedPage1 = page
+                        cachedX1 = pageX
+                        cachedY1 = pageY
+                        cachedScale1 = pageScale
+                        cachedFrameVersion1 = pageFrameVersion
+                    } else {
+                        cachedPage2 = page
+                        cachedX2 = pageX
+                        cachedY2 = pageY
+                        cachedScale2 = pageScale
+                        cachedFrameVersion2 = pageFrameVersion
+                    }
                 }
             }
 
             return view
         }
+
+        /** [getCachedTexture]'s locked metadata read - a plain [Triple] runs out of slots. */
+        private data class CacheReadResult(
+            val texture: GPUTexture,
+            val view: GPUTextureView,
+            val identityMatches: Boolean,
+            val blittedKeys: Set<Long>
+        )
 
         /**
          * Blit a cached texture to the destination with an offset. If [cachedView] is null, draws

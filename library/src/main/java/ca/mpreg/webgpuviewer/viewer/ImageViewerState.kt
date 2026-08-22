@@ -306,27 +306,14 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
                 }
             }
 
-            // Opportunistic background work, strictly in order: current tiles (above) > blit them
-            // to the transition cache's current-page slot > next page's tiles > blit those to the
-            // next-page slot. Each stage waits for the previous to actually finish, not just be
-            // requested, so next's tiles never compete with current's pending transition blit for
-            // the worker's attention - see TileRenderer.prewarmTransition/prewarm. Gated on atHome
-            // since the cache is keyed by (x, y, scale), and warming at a pan/zoom the user won't
-            // stay at would be wasted work.
+            // Opportunistic: once the current page's tiles settle, prewarm the next page's too,
+            // so a transition into it starts already mostly sharp (Transition.getCachedTexture
+            // seeds itself and layers tiles in live, so this no longer needs to be complete
+            // first). Gated on atHome since the cache is keyed by (x, y, scale).
             if (s.currentPage.highQuality && !s.currentPage.isAnimated && s.currentPage.atHome && covered) {
-                val currentTransitionWarm = Transition.isCached(s.currentPage, true)
-                if (!currentTransitionWarm) {
-                    tiles.prewarmTransition(s.currentPage, true, texture.width, texture.height)
-                }
-
                 val next = s.nextPage
-                if (currentTransitionWarm && next != null && next.highQuality && !next.isAnimated && next.atHome) {
+                if (next != null && next.highQuality && !next.isAnimated && next.atHome) {
                     tiles.prewarm(next, texture)
-
-                    val nextCovered = tiles.isFullyCovered(next, texture, 0f, 0f, 1f)
-                    if (nextCovered && !Transition.isCached(next, false)) {
-                        tiles.prewarmTransition(next, false, texture.width, texture.height)
-                    }
                 }
             }
         }
