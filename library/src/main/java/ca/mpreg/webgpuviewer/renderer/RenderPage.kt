@@ -82,8 +82,7 @@ object RenderPage {
     // TileRenderer's blit already wrote (stencil == 1) instead of shading it a second time.
     private val samplerVariant = Variant {
         buildPipeline(
-            TILE_HEADER + TILE_VS_MAIN + TILE_SAMPLER_FS,
-            depthStencil = GPUDepthStencilState(
+            TILE_HEADER + TILE_VS_MAIN + TILE_SAMPLER_FS, depthStencil = GPUDepthStencilState(
                 format = TextureFormat.Stencil8,
                 depthWriteEnabled = OptionalBool.False,
                 depthCompare = CompareFunction.Always,
@@ -105,8 +104,7 @@ object RenderPage {
     // samplerVariant/renderBackground's pipelines - it doesn't itself participate in masking.
     private val plainVariantMasked = Variant {
         buildPipeline(
-            TILE_HEADER + TILE_VS_MAIN + TILE_PLAIN_FS,
-            depthStencil = GPUDepthStencilState(
+            TILE_HEADER + TILE_VS_MAIN + TILE_PLAIN_FS, depthStencil = GPUDepthStencilState(
                 format = TextureFormat.Stencil8,
                 depthWriteEnabled = OptionalBool.False,
                 depthCompare = CompareFunction.Always,
@@ -903,10 +901,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 }
 
                 fun boundProximity(
-                    value: Float,
-                    lo: Float,
-                    hi: Float,
-                    pixelsPerUnit: Float
+                    value: Float, lo: Float, hi: Float, pixelsPerUnit: Float
                 ): Float {
                     val overflow = when {
                         value < lo -> lo - value
@@ -930,9 +925,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 }
 
                 val bgAlpha = if (parent != null) {
-                    val homeProximity = min(proximity(homeScale), boundsProximityAt(homeScale))
-                    val minProximity = min(proximity(minScale), boundsProximityAt(minScale))
-                    max(homeProximity, minProximity)
+                    if (currentScale > minScale) {
+                        boundsProximityAt(currentScale)
+                    } else {
+                        val homeProximity = min(proximity(homeScale), boundsProximityAt(homeScale))
+                        val minProximity = min(proximity(minScale), boundsProximityAt(minScale))
+                        max(homeProximity, minProximity)
+                    }
                 } else {
                     1f
                 }
