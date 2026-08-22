@@ -364,8 +364,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
          * plain fill for non-highQuality; fast fill plus whatever tiles are cached for highQuality.
          * Only for a fresh identity ([getCachedTexture]'s `LoadOp.Clear` branch) - an unchanged
          * one calls [TileRenderer.blitAvailableTiles] directly instead, without repeating the fill.
+         * Internal (not private) so [TransitionNone] can reuse it to draw straight to the screen
+         * texture, skipping the cache slot entirely.
          */
-        private fun renderCacheSeed(
+        internal fun renderCacheSeed(
             pass: GPURenderPassEncoder, page: ImagePage, tex: GPUTexture, tiles: TileRenderer
         ) {
             if (page.isAnimated) {
