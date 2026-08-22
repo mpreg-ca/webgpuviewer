@@ -281,6 +281,14 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
                 s.currentPos,
                 tiles
             )
+        } else if (s.currentPage.isAnimated) {
+            // Animated pages (never highQuality) always want the fast path, unlike an ordinary
+            // non-highQuality page's plain one - and never worth the tile cache, so this skips
+            // tiles.draw()/isFullyCovered rather than falling into the !highQuality branch below.
+            renderPass(encoder, texture) { pass ->
+                RenderPage.renderBackground(pass, s.currentPage, texture, 0f, 0f, 1f)
+                RenderPage.renderPage(pass, s.currentPage, texture, 0f, 0f, 1f)
+            }
         } else {
             // Computed once and reused below - isFullyCoveredCore already treats a false
             // highQuality as "not covered", so the plain-sampler branch just ends up unused.
@@ -291,18 +299,18 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
                 // correctness (see ImagePage.highQuality) skips both entirely - just the plain
                 // sampler, every frame.
                 if (!s.currentPage.highQuality) {
-                    RenderPage.renderPlainMasked(pass, s.currentPage, texture, 0f, 0f, 1f)
+                    RenderPage.renderPage(pass, s.currentPage, texture, 0f, 0f, 1f, linear = false)
                     return@renderPass
                 }
                 // Background always drawn live first (its fades are position-dependent, never
                 // from a stale tile) so it stays underneath everything else. Tiles draw next,
                 // marking every pixel they cover in the stencil buffer tiles.draw() writes to;
-                // renderFastImageOnly then only shades what's left uncovered instead of the whole
+                // renderPage then only shades what's left uncovered instead of the whole
                 // viewport, since tiles.draw() already produced the right pixel wherever it drew.
                 RenderPage.renderBackground(pass, s.currentPage, texture, 0f, 0f, 1f)
                 tiles.draw(pass, s.currentPage, texture, 0f, 0f, 1f)
                 if (!covered) {
-                    RenderPage.renderFastImageOnly(pass, s.currentPage, texture, 0f, 0f, 1f)
+                    RenderPage.renderPage(pass, s.currentPage, texture, 0f, 0f, 1f)
                 }
             }
 
@@ -310,7 +318,7 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
             // so a transition into it starts already mostly sharp (Transition.getCachedTexture
             // seeds itself and layers tiles in live, so this no longer needs to be complete
             // first). Gated on atHome since the cache is keyed by (x, y, scale).
-            if (s.currentPage.highQuality && !s.currentPage.isAnimated && s.currentPage.atHome && covered) {
+            if (s.currentPage.highQuality && s.currentPage.atHome && covered) {
                 val next = s.nextPage
                 if (next != null && next.highQuality && !next.isAnimated && next.atHome) {
                     tiles.prewarm(next, texture)

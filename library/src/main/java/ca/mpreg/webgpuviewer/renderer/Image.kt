@@ -19,13 +19,12 @@ import kotlin.math.round
 const val BUFFER_SIZE = 96L
 
 class Image private constructor(
-    val width: Int, val height: Int, var x: Float = 0f, var y: Float = 0f
-) {
-    /**
-     * Background color detected from image edges, in 0xAARRGGBB format.
-     * Defaults to opaque black (0xFF000000).
-     */
+    val width: Int,
+    val height: Int,
+    var x: Float = 0f,
+    var y: Float = 0f,
     var backgroundColor: Int = 0xFF000000.toInt()
+) {
 
     /**
      * Trim bounds detected from image content, or null if not trimmed.
@@ -36,15 +35,25 @@ class Image private constructor(
      * Position of this image in a spread.
      */
     enum class Position {
-        LEFT,
-        RIGHT,
-        SINGLE
+        LEFT, RIGHT, SINGLE
     }
 
     var position: Position = Position.SINGLE
 
+    /**
+     * Pixel shift of a LEFT/RIGHT spread image from its page's anchor (0 for SINGLE) - the seam
+     * sits at the anchor, so each side extends outward by half its own width. Callers scale this
+     * into their own coordinate space rather than recomputing the formula.
+     */
+    val spreadOffsetX: Float
+        get() = when (position) {
+            Position.LEFT -> -0.5f * width
+            Position.RIGHT -> 0.5f * width
+            Position.SINGLE -> 0f
+        }
+
     companion object {
-        suspend fun createWithTrim(
+        suspend operator fun invoke(
             pixels: ByteBuffer, width: Int, height: Int,
             createMipMaps: Boolean = true,
             trimColors: List<FloatArray>? = null,
@@ -68,17 +77,16 @@ class Image private constructor(
                 if (trimWith != null) {
                     // Find trim for each color and pick the smallest rect
                     val rects = Trim.findAllCpu(pixels, width, height, trimWith, trimThreshold)
-                    val best = trimWith.zip(rects)
-                        .minByOrNull { it.second.width() * it.second.height() }
+                    val best =
+                        trimWith.zip(rects).minByOrNull { it.second.width() * it.second.height() }
 
                     if (best != null) {
                         image.trim = best.second
                         // Set background color from the winning trim color
                         if (backgroundColor == null) {
                             val c = best.first
-                            image.backgroundColor = 0xFF000000.toInt() or
-                                    ((c[0] * 255).toInt() shl 16) or
-                                    ((c[1] * 255).toInt() shl 8) or (c[2] * 255).toInt()
+                            image.backgroundColor =
+                                0xFF000000.toInt() or ((c[0] * 255).toInt() shl 16) or ((c[1] * 255).toInt() shl 8) or (c[2] * 255).toInt()
                             backgroundFromTrim = true
                         }
                     }
@@ -144,12 +152,6 @@ class Image private constructor(
             return image
         }
 
-        suspend operator fun invoke(
-            pixels: ByteBuffer, width: Int, height: Int, createMipMaps: Boolean = true
-        ): Image {
-            return createWithTrim(pixels, width, height, createMipMaps, null)
-        }
-
         suspend operator fun invoke(width: Int, height: Int): Image {
             return Image(width, height).apply {
                 WebGpuRenderer.withContext { _ ->
@@ -193,10 +195,7 @@ class Image private constructor(
         val x1 = 0.5f + scale * (adjustedX - 0.5f * width / dst.width)
         val y1 = 0.5f + scale * (adjustedY - 0.5f * height / dst.height)
         return floatArrayOf(
-            x1,
-            y1,
-            x1 + scale * width / dst.width,
-            y1 + scale * height / dst.height
+            x1, y1, x1 + scale * width / dst.width, y1 + scale * height / dst.height
         )
     }
 
@@ -262,10 +261,7 @@ class Image private constructor(
      * guard is needed here since any viewport is just whichever tiles it happens to overlap.
      */
     fun prepareTilesForRender(
-        dst: GPUTexture,
-        x: Float,
-        y: Float,
-        scale: Float
+        dst: GPUTexture, x: Float, y: Float, scale: Float
     ): List<TileForDraw> {
         if (mipmaps.isEmpty()) return emptyList()
 

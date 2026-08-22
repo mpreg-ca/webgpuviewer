@@ -100,8 +100,8 @@ open class ImagePage(val images: List<Image?>) {
 
     /**
      * When false, this page skips [ca.mpreg.webgpuviewer.renderer.TileRenderer]'s tile cache
-     * entirely and its fast path renders through [ca.mpreg.webgpuviewer.renderer.RenderPage.renderPlain]
-     * instead of [ca.mpreg.webgpuviewer.renderer.RenderPage.renderFast] - for content not worth
+     * entirely and its fast path renders through [ca.mpreg.webgpuviewer.renderer.RenderPage.renderPage]
+     * with `linear = false` instead of the default `linear = true` - for content not worth
      * either path's extra correctness or sharpness, such as [Draw]'s loading placeholder (always
      * false, see its `init`) or an app-drawn transition/error bitmap.
      */

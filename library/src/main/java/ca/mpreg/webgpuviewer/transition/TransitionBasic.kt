@@ -28,11 +28,7 @@ internal fun drawBackground(
     renderImages.forEach { image ->
         image ?: return@forEach
         if (image.mipmaps.isEmpty()) return@forEach
-        val imgOffsetX = when (image.position) {
-            Image.Position.LEFT -> (-0.5f * image.width) / dst.width
-            Image.Position.RIGHT -> (0.5f * image.width) / dst.width
-            Image.Position.SINGLE -> 0f
-        }
+        val imgOffsetX = image.spreadOffsetX / dst.width
         val rect = image.placement(dst, page.x + imgOffsetX, page.y, page.scale)
         val x1 = if (image.position == Image.Position.SINGLE) 0f else rect[0]
         val x2 = if (image.position == Image.Position.SINGLE) 1f else rect[2]

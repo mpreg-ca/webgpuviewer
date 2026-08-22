@@ -359,38 +359,40 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
 
         /**
-         * Seeds [page]'s cache slot from scratch: an immediate fast (or plain, for non-highQuality)
-         * fill, then whatever tiles are already cached layered on top. Only for a fresh identity
-         * ([getCachedTexture]'s `LoadOp.Clear` branch) - an unchanged one calls
-         * [TileRenderer.blitAvailableTiles] directly instead, without repeating the fill.
+         * Seeds [page]'s cache slot from scratch: fast fill only for an animated page (never
+         * highQuality, redone every call per [getCachedTexture]'s `identityMatches` override);
+         * plain fill for non-highQuality; fast fill plus whatever tiles are cached for highQuality.
+         * Only for a fresh identity ([getCachedTexture]'s `LoadOp.Clear` branch) - an unchanged
+         * one calls [TileRenderer.blitAvailableTiles] directly instead, without repeating the fill.
          */
         private fun renderCacheSeed(
             pass: GPURenderPassEncoder, page: ImagePage, tex: GPUTexture, tiles: TileRenderer
         ) {
-            if (!page.highQuality) {
-                RenderPage.renderPlain(pass, page, tex, 0f, 0f, 1f)
+            if (page.isAnimated) {
+                RenderPage.renderPage(pass, page, tex, 0f, 0f, 1f, masked = false)
                 return
             }
-            RenderPage.renderFastUnmasked(pass, page, tex, 0f, 0f, 1f)
+            if (!page.highQuality) {
+                RenderPage.renderPage(pass, page, tex, 0f, 0f, 1f, linear = false, masked = false)
+                return
+            }
+            RenderPage.renderPage(pass, page, tex, 0f, 0f, 1f, masked = false)
             tiles.blitAvailableTiles(pass, page, tex)
         }
 
         /**
-         * Get cached texture view for a page, rendering into it as needed rather than requiring
+         * Get cached texture view for a page, rendering into it as needed instead of requiring
          * full tile coverage up front:
-         *  - Identity unchanged (same page/x/y/scale/frameVersion) and either the page never gets
-         *    tiles (not highQuality, or animated) or [TileRenderer.availableTileKeys] matches
-         *    what's already tracked as blitted - nothing to add, return the view as-is.
-         *  - Identity unchanged but something new is available - `LoadOp.Load` layers it on top
-         *    and the newly-available set becomes the tracked one.
+         *  - Identity unchanged and the page never gets tiles (not highQuality, or animated) or
+         *    [TileRenderer.availableTileKeys] matches what's tracked as blitted - return as-is.
+         *  - Identity unchanged but something new is available - `LoadOp.Load` layers it on and
+         *    that becomes the tracked set.
          *  - Identity changed - `LoadOp.Clear` and [renderCacheSeed] from scratch.
          *
-         * Comparing tracked key sets, not a derived "fully covered" boolean, means this can never
-         * desync from what [TileRenderer.drawCore] actually blits.
-         *
-         * Never forces generation: whatever isn't cached fills in on the background worker as
-         * usual, and each later call picks up what's landed since. Null only if the page has no
-         * images to draw at all.
+         * Tracked key sets, not a derived "fully covered" boolean, so this can't desync from what
+         * [TileRenderer.drawCore] actually blits. Never forces generation - whatever isn't cached
+         * fills in on the background worker, and later calls pick up what's landed. Null only if
+         * the page has no images to draw.
          */
         internal fun getCachedTexture(
             page: ImagePage,
@@ -409,13 +411,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 val texture = if (isPage1) texture1!! else texture2!!
                 val view = if (isPage1) view1!! else view2!!
                 val blitted = if (isPage1) blittedKeys1 else blittedKeys2
-                CacheReadResult(texture, view, cacheHitLocked(page, isPage1), blitted)
+                // Never a hit for an animated page - it swaps images every frame, so every call
+                // needs a fresh LoadOp.Clear + renderCacheSeed to blit whatever frame is current
+                // right now, rather than relying on frameVersion happening to have ticked.
+                val matches = !page.isAnimated && cacheHitLocked(page, isPage1)
+                CacheReadResult(texture, view, matches, blitted)
             }
 
-            // isAnimated pages never get tiles either (drawGridForFullPage always refuses them,
-            // same as !highQuality) - availableTileKeys would return null for them forever, which
-            // never equals a real (even empty) Set, so without this they'd fail the skip check
-            // and reopen a pass every single frame indefinitely.
+            // Also true for isAnimated (on top of the identityMatches override above): it never
+            // gets tiles either (drawGridForFullPage always refuses it, same as !highQuality), so
+            // there's no point calling availableTileKeys - it would just return null.
             val neverTiled = !page.highQuality || page.isAnimated
             val available = if (neverTiled) null else tiles.availableTileKeys(page, texture)
 

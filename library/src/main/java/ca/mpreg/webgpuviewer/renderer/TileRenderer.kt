@@ -1085,15 +1085,8 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         st.page.images.forEach { image ->
             image ?: return@forEach
             if (image.mipmaps.isEmpty()) return@forEach
-            // Same convention as RenderPage.renderPage's spread offset and the continuous
-            // overload's own docCenterX - keyed off the image's own position, in raw
-            // (unscaled) pixels since solveImagePlacement scales by s itself.
-            val spreadShift = when (image.position) {
-                Image.Position.LEFT -> -0.5f * image.width
-                Image.Position.RIGHT -> 0.5f * image.width
-                Image.Position.SINGLE -> 0f
-            }
-            val targetX = -tx * ts + s * (spreadShift + image.x)
+            // In raw (unscaled) pixels since solveImagePlacement scales by s itself.
+            val targetX = -tx * ts + s * (image.spreadOffsetX + image.x)
             val targetY = st.centerYOffset - ty * ts + s * image.y
             val (x, y) = solveImagePlacement(targetX, targetY, s, image, ts, ts)
             RenderPage.render(pass, image, texture, x, y, s)

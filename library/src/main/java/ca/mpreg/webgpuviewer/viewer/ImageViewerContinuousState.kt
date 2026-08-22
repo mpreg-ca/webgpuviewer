@@ -5,7 +5,6 @@ import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.spring
 import androidx.webgpu.GPUCommandEncoder
 import androidx.webgpu.GPUTexture
-import ca.mpreg.webgpuviewer.renderer.Image
 import ca.mpreg.webgpuviewer.renderer.RenderPage
 import ca.mpreg.webgpuviewer.renderer.TileRenderer.Companion.TILE_SIZE
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
@@ -263,36 +262,38 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
 
                 // Tiles draw first, marking every pixel they cover in the stencil buffer
                 // tiles.draw() writes to; the sampler shader below then only shades what's left
-                // uncovered instead of the whole viewport - skipped entirely once tiles alone
-                // already cover this page.
-                tiles.draw(
-                    pass,
-                    page,
-                    texture,
-                    s.cameraDocY,
-                    vp.docTop,
-                    s.offsetX,
-                    s.scale,
-                    s.suppressGeneration
-                )
-
-                val covered = tiles.isFullyCovered(
-                    page, texture, s.cameraDocY, vp.docTop, s.offsetX, s.scale, s.suppressGeneration
-                )
+                // uncovered - skipped entirely once tiles alone cover this page. Animated pages
+                // never get tiles (they swap images every frame), so both calls are skipped
+                // outright rather than letting them no-op/report false every frame.
+                val covered = if (page.isAnimated) {
+                    false
+                } else {
+                    tiles.draw(
+                        pass,
+                        page,
+                        texture,
+                        s.cameraDocY,
+                        vp.docTop,
+                        s.offsetX,
+                        s.scale,
+                        s.suppressGeneration
+                    )
+                    tiles.isFullyCovered(
+                        page,
+                        texture,
+                        s.cameraDocY,
+                        vp.docTop,
+                        s.offsetX,
+                        s.scale,
+                        s.suppressGeneration
+                    )
+                }
                 if (!covered) {
                     val imageScale = pageScale * s.scale
                     page.images.forEach { image ->
                         image ?: return@forEach
                         if (image.mipmaps.isEmpty()) return@forEach
-                        // Same convention as RenderPage/TileRenderer's spread offset, keyed off
-                        // the image's own position rather than its list index, so a spread
-                        // renders identically here and in the paged viewer.
-                        val spreadShiftDocX = when (image.position) {
-                            Image.Position.LEFT -> -0.5f * image.width * pageScale
-                            Image.Position.RIGHT -> 0.5f * image.width * pageScale
-                            Image.Position.SINGLE -> 0f
-                        }
-                        val docCenterX = spreadShiftDocX + pageScale * image.x
+                        val docCenterX = pageScale * (image.spreadOffsetX + image.x)
                         val docCenterY = vp.docTop + 0.5f * vp.pageHeight + pageScale * image.y
                         val targetX = anchorX + s.scale * docCenterX
                         val targetY = anchorY + s.scale * docCenterY
@@ -305,13 +306,22 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
                             dstH
                         )
                         // Content not worth linear-light correctness (ImagePage.highQuality)
-                        // gets the plain sampler instead - it never reaches the tile cache either.
-                        // Both are stencil-tested against the tile draw above, skipping pixels it
-                        // already covered.
-                        if (page.highQuality) {
+                        // gets the plain sampler - it never reaches the tile cache either. Animated
+                        // pages are never highQuality but always want the fast sampler regardless,
+                        // since they swap images every frame. Both are stencil-tested against the
+                        // tile draw above, skipping pixels it already covered.
+                        if (page.isAnimated || page.highQuality) {
                             RenderPage.renderFast(pass, image, texture, x, y, imageScale)
                         } else {
-                            RenderPage.renderPlainMasked(pass, image, texture, x, y, imageScale)
+                            RenderPage.renderFast(
+                                pass,
+                                image,
+                                texture,
+                                x,
+                                y,
+                                imageScale,
+                                linear = false
+                            )
                         }
                     }
                 }
