@@ -212,7 +212,7 @@ fun ImageViewer(
                             val velocity = velocityTracker.calculateVelocity()
                             if (willFlingZoom) {
                                 // fling zoom
-                                state.animationJob = scope.launch(NormalMotionDurationScale) {
+                                page.animationJob = scope.launch(NormalMotionDurationScale) {
                                     try {
                                         Animatable(0f).animateDecay(
                                             velocity.y,

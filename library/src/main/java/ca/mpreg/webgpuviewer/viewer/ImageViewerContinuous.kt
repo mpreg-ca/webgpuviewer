@@ -51,7 +51,6 @@ fun ImageViewerContinuous(
     val flingX = remember { Animatable(0f) }
     val decay = remember(density) { splineBasedDecay<Float>(density) }
 
-    val dpi = view.resources.displayMetrics.densityDpi / 100f
     val minScale = 1f
     val doubleTapScale = minScale * 2f
     val maxScale = max(doubleTapScale * 2f, 4f)
