@@ -328,7 +328,13 @@ open class ImagePage(val images: List<Image?>) {
     val atHome: Boolean
         get() {
             val eps = 0.0001f
-            return abs(x - homeX) < eps && abs(y - homeY) < eps && abs(scale - homeScale) < eps
+            return abs(x - homeX) < eps && abs(y - homeY) < eps && atHomeScale
+        }
+
+    val atHomeScale: Boolean
+        get() {
+            val eps = 0.0001f
+            return abs(scale - homeScale) < eps
         }
 
     var minScale = -1f
@@ -351,7 +357,7 @@ open class ImagePage(val images: List<Image?>) {
     var maxScale = -1f
         get() = if (field > 0) field else max(doubleTapScale * 2, 2f)
 
-    val doubleTapScale: Float get() = minScale * 2
+    val doubleTapScale: Float get() = max(minScale, homeScale) * 2
 
     fun maxX(scale: Float): Float {
         val parent = parent ?: return 0f
@@ -420,7 +426,7 @@ open class ImagePage(val images: List<Image?>) {
             try {
                 animate(
                     0f, 1f, animationSpec = spring(
-                        stiffness = Spring.StiffnessMediumLow, visibilityThreshold = 0.001f
+                        stiffness = Spring.StiffnessMediumLow, visibilityThreshold = 0.002f
                     )
                 ) { value, _ ->
                     val currentScale = startScale + (targetScale - startScale) * value

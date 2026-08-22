@@ -89,7 +89,7 @@ fun ImageViewerContinuous(
                                         animate(
                                             0f, 1f, animationSpec = spring(
                                                 stiffness = Spring.StiffnessMediumLow,
-                                                visibilityThreshold = 0.001f
+                                                visibilityThreshold = 0.002f
                                             )
                                         ) { t, _ ->
                                             state.scale = startScale + (minScale - startScale) * t
@@ -114,7 +114,7 @@ fun ImageViewerContinuous(
                                         animate(
                                             0f, 1f, animationSpec = spring(
                                                 stiffness = Spring.StiffnessMediumLow,
-                                                visibilityThreshold = 0.001f
+                                                visibilityThreshold = 0.002f
                                             )
                                         ) { t, _ ->
                                             state.scale = startScale + (maxScale - startScale) * t
@@ -146,7 +146,7 @@ fun ImageViewerContinuous(
                                         animate(
                                             0f, 1f, animationSpec = spring(
                                                 stiffness = Spring.StiffnessMediumLow,
-                                                visibilityThreshold = 0.001f
+                                                visibilityThreshold = 0.002f
                                             )
                                         ) { t, _ ->
                                             val newScale = startScale + (minScale - startScale) * t
@@ -173,7 +173,7 @@ fun ImageViewerContinuous(
                                         animate(
                                             0f, 1f, animationSpec = spring(
                                                 stiffness = Spring.StiffnessMediumLow,
-                                                visibilityThreshold = 0.001f
+                                                visibilityThreshold = 0.002f
                                             )
                                         ) { t, _ ->
                                             val newScale =
@@ -282,7 +282,7 @@ fun ImageViewerContinuous(
                                             animate(
                                                 0f, 1f, animationSpec = spring(
                                                     stiffness = Spring.StiffnessMediumLow,
-                                                    visibilityThreshold = 0.001f
+                                                    visibilityThreshold = 0.002f
                                                 )
                                             ) { t, _ ->
                                                 state.scale =
@@ -441,7 +441,7 @@ fun ImageViewerContinuous(
                                     animate(
                                         0f, 1f, animationSpec = spring(
                                             stiffness = Spring.StiffnessMediumLow,
-                                            visibilityThreshold = 0.001f
+                                            visibilityThreshold = 0.002f
                                         )
                                     ) { t, _ ->
                                         state.scale = startScale + (minScale - startScale) * t
@@ -469,7 +469,7 @@ fun ImageViewerContinuous(
                                     animate(
                                         0f, 1f, animationSpec = spring(
                                             stiffness = Spring.StiffnessMediumLow,
-                                            visibilityThreshold = 0.001f
+                                            visibilityThreshold = 0.002f
                                         )
                                     ) { t, _ ->
                                         state.scale = startScale + (maxScale - startScale) * t
@@ -521,7 +521,7 @@ fun ImageViewerContinuous(
                                         animate(
                                             0f, 1f, animationSpec = spring(
                                                 stiffness = Spring.StiffnessMediumLow,
-                                                visibilityThreshold = 0.001f
+                                                visibilityThreshold = 0.002f
                                             )
                                         ) { t, _ ->
                                             state.offsetX = startX + (clampedX - startX) * t

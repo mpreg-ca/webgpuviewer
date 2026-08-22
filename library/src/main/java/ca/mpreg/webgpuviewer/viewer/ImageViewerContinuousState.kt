@@ -130,7 +130,7 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
             animate(
                 0f, deltaPixels, animationSpec = spring(
                     stiffness = Spring.StiffnessMediumLow,
-                    visibilityThreshold = 0.001f
+                    visibilityThreshold = 0.002f
                 )
             ) { value, _ ->
                 scrollBy(value - lastValue)

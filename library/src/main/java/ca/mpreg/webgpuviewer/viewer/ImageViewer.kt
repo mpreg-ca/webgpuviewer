@@ -112,7 +112,7 @@ fun ImageViewer(
                                     Animatable(state.pageOffset).animateTo(
                                         0f, animationSpec = spring(
                                             stiffness = Spring.StiffnessMediumLow,
-                                            visibilityThreshold = 0.001f
+                                            visibilityThreshold = 0.002f
                                         )
                                     ) {
                                         state.pageOffset = value
@@ -137,13 +137,16 @@ fun ImageViewer(
                             scope.launch {
                                 pageTurnJob?.join()
                                 val zoomPage = state.getPage(0) ?: return@launch
-                                if (zoomPage.atHome) {
+                                if (zoomPage.atHomeScale) {
                                     zoomPage.animateTo(
                                         Offset(tapX, tapY),
                                         targetScale = zoomPage.doubleTapScale
                                     )
                                 } else {
-                                    zoomPage.home()
+                                    zoomPage.animateTo(
+                                        Offset(tapX, tapY),
+                                        targetScale = zoomPage.homeScale
+                                    )
                                 }
                             }
                         } else {
@@ -422,7 +425,7 @@ fun ImageViewer(
                                     initialVelocity = initialVelocity,
                                     animationSpec = spring(
                                         stiffness = Spring.StiffnessMediumLow,
-                                        visibilityThreshold = 0.001f
+                                        visibilityThreshold = 0.002f
                                     )
                                 ) {
                                     state.pageOffset = value

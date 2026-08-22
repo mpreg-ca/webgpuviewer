@@ -480,11 +480,15 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     private fun pagedAnchor(
         page: ImagePage, dst: GPUTexture, x: Float, y: Float, scale: Float
     ): PagedAnchor {
-        // While animating to home, pin the grid to that animation's (x, y, scale) target instead
-        // of the live in-flight values - avoids drawCore wiping/destabilizing the grid every
-        // frame scale interpolates. Invisible on screen (the grid draws nothing there anyway via
-        // isScaleAnimating), so this only affects Transition's cache warm/force-complete render.
-        val goingHome = page.animationTargetScale == page.homeScale
+        // While actually scale-animating to home, pin the grid to the animation's target (x, y,
+        // scale) instead of live values - jumping straight to the target scale wipes the grid via
+        // drawCore's invalidation check once, and isScaleAnimating keeps it from regenerating
+        // until the animation ends, instead of wiping it on every interpolated frame. Gated on
+        // isScaleAnimating rather than just the target being homeScale: an [ImagePage.animateTo]
+        // that only moves (x, y) at a constant homeScale never sets that flag, and pinning there
+        // would freeze the grid's position at the destination for nothing, since scale never
+        // moved and the cache never needed wiping in the first place.
+        val goingHome = page.isScaleAnimating && page.animationTargetScale == page.homeScale
         val effectivePageX = if (goingHome) page.animationTargetX ?: page.x else page.x
         val effectivePageY = if (goingHome) page.animationTargetY ?: page.y else page.y
         val effectivePageScale = if (goingHome) page.homeScale else page.scale

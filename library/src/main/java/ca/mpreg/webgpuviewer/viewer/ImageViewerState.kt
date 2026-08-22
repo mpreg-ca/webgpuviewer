@@ -116,7 +116,7 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
             try {
                 Animatable(direction.toFloat()).animateTo(
                     0f, animationSpec = spring(
-                        stiffness = Spring.StiffnessMediumLow, visibilityThreshold = 0.001f
+                        stiffness = Spring.StiffnessMediumLow, visibilityThreshold = 0.002f
                     )
                 ) {
                     setPageOffsetDirect(value)
