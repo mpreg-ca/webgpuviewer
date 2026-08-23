@@ -887,13 +887,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
         fun boundsProximityAt(anchorScale: Float): Float {
             if (parent == null || anchorScale <= 0f) return 0f
+            val minX = page.minX(anchorScale)
             val maxX = page.maxX(anchorScale)
             val minY = page.minY(anchorScale)
             val maxY = page.maxY(anchorScale)
             val pixelsPerUnitX = parent.width.toFloat() * anchorScale
             val pixelsPerUnitY = parent.height.toFloat() * anchorScale
             return min(
-                boundProximity(page.x, -maxX, maxX, pixelsPerUnitX),
+                boundProximity(page.x, minX, maxX, pixelsPerUnitX),
                 boundProximity(page.y, minY, maxY, pixelsPerUnitY)
             )
         }

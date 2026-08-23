@@ -253,76 +253,17 @@ open class ImagePage(val images: List<Image?>) {
             return minOf(contentWidth / w, contentHeight / h).coerceAtLeast(0.01f)
         }
 
+    // Coerced since homeXOverride/homeYOverride are externally settable.
     val homeX: Float
         get() {
-            homeXOverride?.let { return it }
-            val parent = parent ?: return 0f
-
-            // Half-width layout: no trim offset
-            if (isHalfWidth) return 0f
-
-            // Single SINGLE page: center the trim
-            if (images.all { it?.trim == null }) return 0f
-            val trim = images.firstOrNull()?.trim ?: return 0f
-            val center = (trim.left + trim.right) / 2f
-            val maxX = maxX(homeScale)
-            return ((0.5f * width - center) / parent.width).fastCoerceIn(-maxX, maxX)
+            val scale = homeScale
+            return (homeXOverride ?: maxX(scale)).fastCoerceIn(minX(scale), maxX(scale))
         }
 
     val homeY: Float
         get() {
-            homeYOverride?.let { return it }
-            val parent = parent ?: return 0f
-
-            // Half-width layout: no trim, just cutout
-            if (isHalfWidth) {
-                if (parent.cutoutTopPx > 0f && parent.height > 0) {
-                    val imageOnScreen = height * homeScale
-                    // homeScale fits to contentHeight; image is centered in full parent.height
-                    val imageTopY = (parent.height - imageOnScreen) / 2f
-                    val cutoutOffset = when {
-                        parent.alwaysAvoidCutout -> parent.cutoutTopPx / 2f
-                        imageTopY < parent.cutoutTopPx -> parent.cutoutTopPx - imageTopY
-                        else -> 0f
-                    }
-                    if (cutoutOffset > 0f) {
-                        return cutoutOffset / (homeScale * parent.height)
-                    }
-                }
-                return 0f
-            }
-
-            // Single SINGLE page: use trim
-            val trimTop =
-                images.mapNotNull { img -> img?.let { it.trim?.top ?: 0 } }.minOrNull() ?: 0
-            val trimBottom =
-                images.mapNotNull { it?.trim?.bottom ?: it?.height }.maxOrNull() ?: height
-
-            val trimBaseY = if (images.any { it?.trim != null }) {
-                (0.5f * height - (trimTop + trimBottom) / 2f) / parent.height
-            } else 0f
-
-            if (parent.cutoutTopPx > 0f && parent.height > 0) {
-                val imageOnScreen = height * homeScale
-                // Image top in screen pixels when centered in full parent.height at y=0
-                val imageTopY = (parent.height - imageOnScreen) / 2f
-                // Trim top = image top + trimTop scaled to screen pixels
-                val trimTopY = imageTopY + trimTop * homeScale
-                val cutoutOffset = when {
-                    parent.alwaysAvoidCutout -> parent.cutoutTopPx / 2f
-                    trimTopY < parent.cutoutTopPx -> parent.cutoutTopPx - trimTopY
-                    else -> 0f
-                }
-                if (cutoutOffset > 0f) {
-                    return cutoutOffset / (homeScale * parent.height)
-                }
-            }
-
-            // Clamp trimBaseY so the image edge doesn't go past the screen edge.
-            // When image is smaller than screen, the blank margin on each side limits the shift.
-            // When image is larger than screen, any trim centering is valid (full scroll range available).
-            val halfRange = max(0f, (1 / homeScale - height.toFloat() / parent.height) / 2)
-            return trimBaseY.fastCoerceIn(-halfRange, halfRange)
+            val scale = homeScale
+            return (homeYOverride ?: maxY(scale)).fastCoerceIn(minY(scale), maxY(scale))
         }
 
     val atHome: Boolean
@@ -359,22 +300,127 @@ open class ImagePage(val images: List<Image?>) {
 
     val doubleTapScale: Float get() = max(minScale, homeScale) * 2
 
-    fun maxX(scale: Float): Float {
-        val parent = parent ?: return 0f
-        return max(0f, (width.toFloat() / parent.width - 1 / scale) / 2)
+    // BOUNDS:
+    // cutout ignore:
+    //  with trim:
+    //      >= homeScale: viewport pan over trimmed content
+    //      < homeScale: viewport pan over untrimmed content
+    //  without trim: viewport pan over content
+    //
+    // cutout avoid:
+    //  with trim:
+    //      >= homeScale: cut viewport pan over trimmed content
+    //      < homeScale: cut viewport pan over untrimmed content
+    //  without trim: cut viewport pan over content
+    //  if content is fully visible: nudge below cutout
+    //
+    // cutout shift:
+    //  with trim:
+    //      >= homeScale: cut viewport pan over trimmed content
+    //      < homeScale: cut viewport pan over untrimmed content
+    //  without trim: cut viewport pan over content
+    //  if content is fully visible: center in cut viewport
+
+    /**
+     * Natural pan range at [scale] (no cutout nudge): [nearEdge]/[farEdge] bound where they'd
+     * land exactly on the viewport's near/far edge. Collapses to center when content fits.
+     */
+    private fun edgeRange(
+        size: Int, nearEdge: Float, farEdge: Float, parentSize: Int, scale: Float
+    ): Pair<Float, Float> {
+        val (minV, maxV) = rawBounds(size, nearEdge, farEdge, parentSize, scale)
+        if (minV > maxV) {
+            val center = (minV + maxV) / 2f
+            return center to center
+        }
+        return minV to maxV
     }
 
-    fun minY(scale: Float): Float {
-        if (abs(scale - homeScale) < 0.0001f) return homeY
-        val parent = parent ?: return 0f
-        return -max(0f, (height.toFloat() / parent.height - 1 / scale) / 2)
+    /**
+     * As [edgeRange] but never collapsed (min > max when there's slack). [nudgedYBounds] needs
+     * the true floor - the collapsed center sits below it, letting panning reveal past it.
+     */
+    private fun rawBounds(
+        size: Int, nearEdge: Float, farEdge: Float, parentSize: Int, scale: Float
+    ): Pair<Float, Float> {
+        val maxV = (0.5f * size - nearEdge) / parentSize - 0.5f / scale
+        val minV = (0.5f * size - farEdge) / parentSize + 0.5f / scale
+        return minV to maxV
     }
 
-    fun maxY(scale: Float): Float {
-        if (abs(scale - homeScale) < 0.0001f) return homeY
-        val parent = parent ?: return 0f
-        return max(0f, (height.toFloat() / parent.height - 1 / scale) / 2)
+    /** Left/right edges [minX]/[maxX] pan between: trim's edges once [trimmed], else raw span. */
+    private fun xEdges(trimmed: Boolean): Pair<Float, Float> {
+        if (isHalfWidth || !trimmed) return 0f to width.toFloat()
+        val trim = images.firstOrNull()?.trim ?: return 0f to width.toFloat()
+        return trim.left.toFloat() to trim.right.toFloat()
     }
+
+    /**
+     * As [xEdges], for top/bottom - null (not the raw fallback) so [nudgedYBounds] can tell real
+     * trim edges (margin worth protecting) from the raw image's own (safe to pan past).
+     */
+    private fun yEdges(trimmed: Boolean): Pair<Int, Int>? {
+        if (isHalfWidth || !trimmed || images.all { it?.trim == null }) return null
+        val trimTop = images.mapNotNull { img -> img?.let { it.trim?.top ?: 0 } }.minOrNull() ?: 0
+        val trimBottom = images.mapNotNull { it?.trim?.bottom ?: it?.height }.maxOrNull() ?: height
+        return trimTop to trimBottom
+    }
+
+    /** [minX]/[maxX] together, computing [homeScale] and [edgeRange] only once per call. */
+    private fun xBounds(scale: Float): Pair<Float, Float> {
+        val parent = parent ?: return 0f to 0f
+        val (left, right) = xEdges(scale >= homeScale)
+        return edgeRange(width, left, right, parent.width, scale)
+    }
+
+    fun minX(scale: Float): Float = xBounds(scale).first
+
+    fun maxX(scale: Float): Float = xBounds(scale).second
+
+    /**
+     * "Ignore": [edgeRange]'s plain collapse-when-it-fits.
+     *
+     * "Avoid"/"shift": near/top bound pushed further by the *full* [ImageViewerState.cutoutTopPx]
+     * so the cut viewport (real viewport minus the cutout) can pan over all the content - unless
+     * still fully visible there even after the push, which collapses to one rest point instead of
+     * a pointless range: "shift" centers with *half* the push (shrinking the viewport only moves
+     * its center by half); "avoid" lands on the same point either way, since its deficit-from-
+     * center push is algebraically identical to the full push from the touch point.
+     */
+    private fun nudgedYBounds(scale: Float): Pair<Float, Float> {
+        val parent = parent ?: return 0f to 0f
+        val trimmed = scale >= homeScale
+        val (top, bottom) = yEdges(trimmed) ?: (0 to height)
+        val (floor, natMax) = rawBounds(
+            height,
+            top.toFloat(),
+            bottom.toFloat(),
+            parent.height,
+            scale
+        )
+        val slack = floor > natMax
+
+        if (!parent.avoidCutout || parent.cutoutTopPx <= 0f || parent.height <= 0) {
+            if (!slack) return floor to natMax
+            val center = (floor + natMax) / 2f
+            return center to center
+        }
+
+        val fullPush =
+            if (isHalfWidth && !trimmed) 0f else parent.cutoutTopPx / (scale * parent.height)
+        val pushed = natMax + fullPush
+
+        if (slack && pushed < floor) {
+            val rest =
+                if (parent.alwaysAvoidCutout) (floor + natMax) / 2f + fullPush / 2f else pushed
+            return rest to rest
+        }
+        return floor to pushed
+    }
+
+    fun minY(scale: Float): Float = nudgedYBounds(scale).first
+
+    fun maxY(scale: Float): Float = nudgedYBounds(scale).second
 
     fun home() {
         animateTo(targetScale = homeScale)
@@ -394,6 +440,7 @@ open class ImagePage(val images: List<Image?>) {
 
         val targetScale = targetScale.fastCoerceIn(minScale, maxScale)
 
+        val minX = minX(targetScale)
         val maxX = maxX(targetScale)
         val minY = minY(targetScale)
         val maxY = maxY(targetScale)
@@ -403,10 +450,10 @@ open class ImagePage(val images: List<Image?>) {
 
         val endX = when {
             origin != null && scaleChanging -> (startX + (origin.x - 0.5f) * diffEnd).fastCoerceIn(
-                -maxX, maxX
+                minX, maxX
             )
 
-            origin != null -> x.fastCoerceIn(-maxX, maxX)
+            origin != null -> x.fastCoerceIn(minX, maxX)
             else -> targetX
         }
         val endY = when {

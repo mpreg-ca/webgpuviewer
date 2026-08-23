@@ -234,12 +234,13 @@ fun ImageViewer(
                                             val x = (originalX + px * diff).orZero()
                                             val y = (originalY + py * diff).orZero()
 
+                                            val minX = page.minX(page.scale)
                                             val maxX = page.maxX(page.scale)
                                             val minY = page.minY(page.scale)
                                             val maxY = page.maxY(page.scale)
 
                                             page.setPos(
-                                                x.fastCoerceIn(-maxX, maxX),
+                                                x.fastCoerceIn(minX, maxX),
                                                 y.fastCoerceIn(minY, maxY)
                                             )
                                         }
@@ -358,12 +359,13 @@ fun ImageViewer(
                                             x += (centroid.x / state.width - 0.5f) * diff
                                             y += (centroid.y / state.height - 0.5f) * diff
 
+                                            val minX = page.minX(newScale)
                                             val maxX = page.maxX(newScale)
                                             val minY = page.minY(newScale)
                                             val maxY = page.maxY(newScale)
 
                                             if (single) {
-                                                val clampedX = x.fastCoerceIn(-maxX, maxX)
+                                                val clampedX = x.fastCoerceIn(minX, maxX)
                                                 val clampedY = y.fastCoerceIn(minY, maxY)
                                                 val overflow = if (state.isVertical) {
                                                     y - clampedY
@@ -436,6 +438,7 @@ fun ImageViewer(
                                 }
                             }
                         } else {
+                            val minX = page.minX(page.scale)
                             val maxX = page.maxX(page.scale)
                             val minY = page.minY(page.scale)
                             val maxY = page.maxY(page.scale)
@@ -444,7 +447,7 @@ fun ImageViewer(
                             if ((page.scale >= page.homeScale) && (page.scale <= page.maxScale) && (lastEventTime - lastMoveTime) < 100 && (abs(
                                     velocity.x
                                 ) > 400 || abs(velocity.y) > 400) && (page.x.fastCoerceIn(
-                                    -maxX, maxX
+                                    minX, maxX
                                 ) == page.x || page.y.fastCoerceIn(minY, maxY) == page.y)
                             ) {
                                 // fling pan
@@ -459,7 +462,7 @@ fun ImageViewer(
                                         val dx = (delta.x / state.width) / page.scale
                                         val dy = (delta.y / state.height) / page.scale
                                         page.setPos(
-                                            (page.x + dx).fastCoerceIn(-maxX, maxX).orZero(),
+                                            (page.x + dx).fastCoerceIn(minX, maxX).orZero(),
                                             (page.y + dy).fastCoerceIn(minY, maxY).orZero()
                                         )
                                     }
