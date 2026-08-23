@@ -10,6 +10,7 @@ import androidx.webgpu.LoadOp
 import androidx.webgpu.StoreOp
 import ca.mpreg.webgpuviewer.renderer.TileRenderer
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.renderCacheSeed
+import ca.mpreg.webgpuviewer.transition.TransitionNone.render
 import ca.mpreg.webgpuviewer.viewer.ImagePage
 
 /**

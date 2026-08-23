@@ -64,67 +64,35 @@ fun ImageViewerContinuous(
 
                 awaitEachGesture {
                     val firstDown = awaitFirstDown(pass = PointerEventPass.Initial)
+                    val isScaleAnimating = state.isScaleAnimating
                     state.animationJob?.cancel()
                     view.parent?.requestDisallowInterceptTouchEvent(true)
 
+                    var longPressed = false
+                    val longPressJob = scope.launch {
+                        delay(viewConfiguration.longPressTimeoutMillis.milliseconds)
+                        longPressed = true
+                        state.onLongTap?.invoke(
+                            Offset(
+                                firstDown.position.x / state.width,
+                                firstDown.position.y / state.height
+                            )
+                        )
+                    }
+
                     if (waitForCleanUp(firstDown.id, doubleTapTimeout, touchSlop) != null) {
+                        longPressJob.cancel()
                         // Tap - wait for possible double tap
                         val secondDown = waitForDown(doubleTapTimeout)
                         if (secondDown == null) {
                             // Single tap
-                            state.onTap?.invoke(
-                                Offset(
-                                    firstDown.position.x / state.width,
-                                    firstDown.position.y / state.height
+                            if (!isScaleAnimating) {
+                                state.onTap?.invoke(
+                                    Offset(
+                                        firstDown.position.x / state.width,
+                                        firstDown.position.y / state.height
+                                    )
                                 )
-                            )
-
-                            if (state.scale < minScale) {
-                                state.animationJob = scope.launch {
-                                    state.isScaleAnimating = true
-                                    try {
-                                        val startScale = state.scale
-                                        val startOffsetX = state.offsetX
-                                        animate(
-                                            0f, 1f, animationSpec = spring(
-                                                stiffness = Spring.StiffnessMediumLow,
-                                                visibilityThreshold = 0.002f
-                                            )
-                                        ) { t, _ ->
-                                            state.scale = startScale + (minScale - startScale) * t
-                                            state.offsetX = startOffsetX * (1f - t)
-                                            state.invalidate()
-                                        }
-                                    } finally {
-                                        state.isScaleAnimating = false
-                                    }
-                                }
-                            } else if (state.scale > maxScale) {
-                                state.animationJob = scope.launch {
-                                    state.isScaleAnimating = true
-                                    try {
-                                        val startScale = state.scale
-                                        val startOffsetX = state.offsetX
-                                        val targetMaxOffsetX =
-                                            max(0f, (maxScale - 1f) / (2f * maxScale))
-                                        val targetOffsetX = startOffsetX.fastCoerceIn(
-                                            -targetMaxOffsetX, targetMaxOffsetX
-                                        )
-                                        animate(
-                                            0f, 1f, animationSpec = spring(
-                                                stiffness = Spring.StiffnessMediumLow,
-                                                visibilityThreshold = 0.002f
-                                            )
-                                        ) { t, _ ->
-                                            state.scale = startScale + (maxScale - startScale) * t
-                                            state.offsetX =
-                                                startOffsetX + (targetOffsetX - startOffsetX) * t
-                                            state.invalidate()
-                                        }
-                                    } finally {
-                                        state.isScaleAnimating = false
-                                    }
-                                }
                             }
                             return@awaitEachGesture
                         }
@@ -232,7 +200,7 @@ fun ImageViewerContinuous(
                                 // Decided before the finally below, so isScaleAnimating has no
                                 // gap between this drag ending and its fling starting.
                                 willFlingZoom =
-                                    abs(dragVelocity.y) > 200 && state.scale in minScale..maxScale
+                                    abs(dragVelocity.y) > 200 && state.scale > minScale && state.scale < maxScale
                             } finally {
                                 if (!willFlingZoom) state.isScaleAnimating = false
                             }
@@ -307,18 +275,6 @@ fun ImageViewerContinuous(
                         var zoomVelocity = 0f
                         var lastCentroid = Offset(0.5f, 0.5f)
 
-                        var longPressed = false
-                        val longPressJob = scope.launch {
-                            delay(viewConfiguration.longPressTimeoutMillis.milliseconds)
-                            longPressed = true
-                            state.onLongTap?.invoke(
-                                Offset(
-                                    firstDown.position.x / state.width,
-                                    firstDown.position.y / state.height
-                                )
-                            )
-                        }
-
                         var willFlingZoom = false
                         try {
                             do {
@@ -390,7 +346,7 @@ fun ImageViewerContinuous(
                                 // left it, which could already be false during a quiet panning tail.
                                 willFlingZoom =
                                     !longPressed && !single && abs(zoomVelocity) > 0.5f &&
-                                            state.scale in minScale..maxScale
+                                            state.scale > minScale && state.scale < maxScale
                                 if (willFlingZoom) state.isScaleAnimating = true
                             } while (!canceled && event.changes.any { it.pressed })
                         } finally {

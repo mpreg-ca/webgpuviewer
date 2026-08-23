@@ -80,6 +80,7 @@ fun ImageViewer(
                     val wasScrolling = state.pageOffset != 0f
                     val pageTurnJob = state.animationJob
                     val page = state.getPage(0) ?: return@awaitEachGesture
+                    val isScaleAnimating = page.isScaleAnimating
                     page.animationJob?.cancel()
 
                     view.parent?.requestDisallowInterceptTouchEvent(true)
@@ -121,12 +122,14 @@ fun ImageViewer(
                                 }
                             }
                             page.animateTo(Offset(0.5f, 0.5f))
-                            state.onTap?.invoke(
-                                Offset(
-                                    firstDown.position.x / state.width,
-                                    firstDown.position.y / state.height
+                            if (!isScaleAnimating) {
+                                state.onTap?.invoke(
+                                    Offset(
+                                        firstDown.position.x / state.width,
+                                        firstDown.position.y / state.height
+                                    )
                                 )
-                            )
+                            }
                             return@awaitEachGesture
                         }
 
