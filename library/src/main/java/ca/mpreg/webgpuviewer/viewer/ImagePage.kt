@@ -966,6 +966,16 @@ open class ImagePage {
     @Volatile
     var isScaleAnimating: Boolean = false
 
+    /**
+     * True while a plain (non-zoom) pan fling is actively decaying - set/cleared directly around
+     * that decay in [ca.mpreg.webgpuviewer.viewer.ImageViewer]'s gesture handling. Checked there
+     * so a tap landing while a fling from the previous gesture is still gliding doesn't also fire
+     * [ImageViewerState.onTap] - the tap itself has no motion (that's what makes it a tap, not a
+     * drag), so nothing else would otherwise tell the two apart.
+     */
+    @Volatile
+    var isFlinging: Boolean = false
+
     var parent: ImageViewerState? = null
         set(value) {
             val wasNull = field == null

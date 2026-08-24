@@ -70,6 +70,7 @@ fun ImageViewerContinuous(
                 awaitEachGesture {
                     val firstDown = awaitFirstDown(pass = PointerEventPass.Initial)
                     val isScaleAnimating = state.isScaleAnimating
+                    val wasFlinging = state.isFlinging
                     state.animationJob?.cancel()
                     view.parent?.requestDisallowInterceptTouchEvent(true)
 
@@ -91,7 +92,7 @@ fun ImageViewerContinuous(
                         val secondDown = waitForDown(doubleTapTimeout)
                         if (secondDown == null) {
                             // Single tap
-                            if (!isScaleAnimating) {
+                            if (!isScaleAnimating && !wasFlinging) {
                                 state.onTap?.invoke(
                                     Offset(
                                         firstDown.position.x / state.width,

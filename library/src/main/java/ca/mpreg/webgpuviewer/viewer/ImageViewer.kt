@@ -85,6 +85,7 @@ fun ImageViewer(
                     val pageTurnJob = state.animationJob
                     val page = state.getPage(0) ?: return@awaitEachGesture
                     val isScaleAnimating = page.isScaleAnimating
+                    val wasFlinging = page.isFlinging
                     page.animationJob?.cancel()
 
                     view.parent?.requestDisallowInterceptTouchEvent(true)
@@ -126,7 +127,7 @@ fun ImageViewer(
                                 }
                             }
                             page.animateTo(Offset(0.5f, 0.5f))
-                            if (!isScaleAnimating) {
+                            if (!isScaleAnimating && !wasFlinging) {
                                 state.onTap?.invoke(
                                     Offset(
                                         firstDown.position.x / state.width,
@@ -456,19 +457,24 @@ fun ImageViewer(
                             ) {
                                 // fling pan
                                 page.animationJob = scope.launch(NormalMotionDurationScale) {
-                                    fling.snapTo(Offset.Zero)
-                                    var lastOffset = Offset.Zero
-                                    fling.animateDecay(
-                                        Offset(velocity.x, velocity.y), exponentialDecay()
-                                    ) {
-                                        val delta = value - lastOffset
-                                        lastOffset = value
-                                        val dx = (delta.x / state.width) / page.scale
-                                        val dy = (delta.y / state.height) / page.scale
-                                        page.setPos(
-                                            (page.x + dx).fastCoerceIn(minX, maxX).orZero(),
-                                            (page.y + dy).fastCoerceIn(minY, maxY).orZero()
-                                        )
+                                    page.isFlinging = true
+                                    try {
+                                        fling.snapTo(Offset.Zero)
+                                        var lastOffset = Offset.Zero
+                                        fling.animateDecay(
+                                            Offset(velocity.x, velocity.y), exponentialDecay()
+                                        ) {
+                                            val delta = value - lastOffset
+                                            lastOffset = value
+                                            val dx = (delta.x / state.width) / page.scale
+                                            val dy = (delta.y / state.height) / page.scale
+                                            page.setPos(
+                                                (page.x + dx).fastCoerceIn(minX, maxX).orZero(),
+                                                (page.y + dy).fastCoerceIn(minY, maxY).orZero()
+                                            )
+                                        }
+                                    } finally {
+                                        page.isFlinging = false
                                     }
                                 }
                             } else {
