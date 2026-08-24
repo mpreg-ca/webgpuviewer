@@ -35,10 +35,14 @@ import androidx.webgpu.GPUTexelCopyTextureInfo
 import androidx.webgpu.GPUTexture
 import androidx.webgpu.GPUTextureDescriptor
 import androidx.webgpu.GPUTextureView
+import androidx.webgpu.GPUVertexAttribute
+import androidx.webgpu.GPUVertexBufferLayout
 import androidx.webgpu.GPUVertexState
 import androidx.webgpu.PrimitiveTopology
 import androidx.webgpu.TextureFormat
 import androidx.webgpu.TextureUsage
+import androidx.webgpu.VertexFormat
+import androidx.webgpu.VertexStepMode
 import ca.mpreg.webgpuviewer.draw.Font.Companion.FIXED_RASTER_SIZE
 import ca.mpreg.webgpuviewer.draw.Font.Companion.forFamily
 import ca.mpreg.webgpuviewer.draw.Font.Companion.invoke
@@ -686,7 +690,22 @@ private val pipeline: GPURenderPipeline by lazy {
     )
     device.createRenderPipeline(
         GPURenderPipelineDescriptor(
-            vertex = GPUVertexState(module = shaderModule, entryPoint = "vs_main"),
+            vertex = GPUVertexState(
+                module = shaderModule, entryPoint = "vs_main", buffers = arrayOf(
+                    GPUVertexBufferLayout(
+                        arrayStride = 32L,
+                        stepMode = VertexStepMode.Instance,
+                        attributes = arrayOf(
+                            GPUVertexAttribute(
+                                format = VertexFormat.Float32x4, offset = 0L, shaderLocation = 0
+                            ),
+                            GPUVertexAttribute(
+                                format = VertexFormat.Float32x4, offset = 16L, shaderLocation = 1
+                            ),
+                        )
+                    )
+                )
+            ),
             fragment = GPUFragmentState(
                 module = shaderModule, entryPoint = "fs_main", targets = arrayOf(
                     GPUColorTargetState(
@@ -717,10 +736,15 @@ private val sampler by lazy {
     )
 }
 
+// One instance per glyph, its (dst_rect, uv_rect) coming from a per-instance vertex buffer rather
+// than a storage buffer - see Draw.text: the whole string draws as a single instanced call
+// instead of one draw (and one uniform buffer, one bind group) per glyph, which used to dominate
+// the cost of drawing any non-trivial amount of text. A storage buffer would have been simpler
+// (no vertex-buffer-layout boilerplate), but this adapter's maxStorageBuffersInVertexStage
+// defaults to 0 - a per-adapter limit an app would have to opt into raising via requiredLimits at
+// device creation - so a plain instanced vertex buffer (no such limit) is the portable choice.
 private const val TEXT_SHADER = """
-struct GlyphUniforms {
-    dst_rect: vec4<f32>,     // x1, y1, x2, y2 - normalised [0, 1] within the destination
-    uv_rect: vec4<f32>,      // u1, v1, u2, v2 - into the atlas texture
+struct Params {
     color: vec4<f32>,
     screen_px_range: f32,
     _pad0: f32,
@@ -728,9 +752,15 @@ struct GlyphUniforms {
     _pad2: f32,
 }
 
-@group(0) @binding(0) var<uniform> params: GlyphUniforms;
+@group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var atlas_tex: texture_2d<f32>;
 @group(0) @binding(2) var atlas_sampler: sampler;
+
+struct VertexInput {
+    @builtin(vertex_index) vertex_index: u32,
+    @location(0) dst_rect: vec4<f32>,     // x1, y1, x2, y2 - normalised [0, 1] within the destination
+    @location(1) uv_rect: vec4<f32>,      // u1, v1, u2, v2 - into the atlas texture
+}
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -738,7 +768,7 @@ struct VertexOutput {
 }
 
 @vertex
-fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
+fn vs_main(in: VertexInput) -> VertexOutput {
     var positions = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0),
         vec2<f32>(0.0, 1.0),
@@ -747,16 +777,16 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
         vec2<f32>(0.0, 1.0),
         vec2<f32>(1.0, 1.0)
     );
-    let pos = positions[vertex_index];
+    let pos = positions[in.vertex_index];
 
-    let x = mix(params.dst_rect.x, params.dst_rect.z, pos.x);
-    let y = mix(params.dst_rect.y, params.dst_rect.w, pos.y);
+    let x = mix(in.dst_rect.x, in.dst_rect.z, pos.x);
+    let y = mix(in.dst_rect.y, in.dst_rect.w, pos.y);
 
     var out: VertexOutput;
     out.position = vec4<f32>(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0);
     out.uv = vec2<f32>(
-        mix(params.uv_rect.x, params.uv_rect.z, pos.x),
-        mix(params.uv_rect.y, params.uv_rect.w, pos.y)
+        mix(in.uv_rect.x, in.uv_rect.z, pos.x),
+        mix(in.uv_rect.y, in.uv_rect.w, pos.y)
     );
     return out;
 }
@@ -775,12 +805,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 }
 """
 
-// One glyph's uniform buffer, refreshed and rebound per draw call - see [Draw.rect]/[Draw.circle]
-// for why a fresh buffer per call is required rather than reusing one across a batch.
-private val byteBufferLocal = ThreadLocal.withInitial {
-    ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder())
-}
-
 /**
  * Draws [text] into [pass] using [font]'s msdf atlas, staying crisp at any [size] despite the
  * atlas's own fixed resolution. [x]/[y] are in [dst]'s pixels: [y] is the first line's baseline,
@@ -788,8 +812,9 @@ private val byteBufferLocal = ThreadLocal.withInitial {
  * [Font.lineHeight] `* size`. A codepoint [font] doesn't have a glyph for yet is rasterized and
  * uploaded on the spot if [font] supports it (see [Font.forFamily]); otherwise it's skipped.
  *
- * One draw call per glyph, matching this file's siblings ([Draw.rect]/[Draw.circle]) - sets its
- * own pipeline, so the caller must set theirs again before drawing something else.
+ * One instanced draw call for the *whole string* (see [TEXT_SHADER]) rather than one draw call
+ * per glyph - sets its own pipeline, so the caller must set theirs again before drawing something
+ * else.
  *
  * Each `\n`-delimited line is word-wrapped to [maxWidth] pixels first (default: unbounded, so no
  * wrapping) - a lone word wider than [maxWidth] is hard-broken by character rather than left
@@ -813,10 +838,9 @@ fun Draw.text(
     val dstWidth = dst.width.toFloat()
     val dstHeight = dst.height.toFloat()
 
-    val r = ((color shr 16) and 0xFF) / 255f
-    val g = ((color shr 8) and 0xFF) / 255f
-    val b = (color and 0xFF) / 255f
-    val a = ((color ushr 24) and 0xFF) / 255f
+    // 8 floats (dst_rect + uv_rect) per glyph - collected first so the whole string can go into
+    // one storage buffer and one draw call instead of one of each per glyph.
+    val instances = ArrayList<Float>(text.length * 8)
 
     var penY = y
     for (rawLine in text.split("\n")) for (line in wrapLine(font, rawLine, size, maxWidth)) {
@@ -834,10 +858,7 @@ fun Draw.text(
             val glyph = font.ensureGlyph(cp)
             if (glyph != null) {
                 if (glyph.hasQuad) {
-                    drawGlyph(
-                        pass, font, glyph, penX, penY, size, r, g, b, a,
-                        dstWidth, dstHeight, screenPxRange
-                    )
+                    addGlyphInstance(instances, font, glyph, penX, penY, size, dstWidth, dstHeight)
                 }
                 penX += glyph.advance * size
             }
@@ -846,6 +867,9 @@ fun Draw.text(
 
         penY += font.lineHeight * size
     }
+
+    if (instances.isEmpty()) return
+    drawGlyphInstances(pass, font, instances, color, screenPxRange)
 }
 
 /**
@@ -953,16 +977,16 @@ private fun wrapLine(font: Font, line: String, size: Float, maxWidth: Float): Li
     return result
 }
 
-private fun drawGlyph(
-    pass: GPURenderPassEncoder,
+/** Appends one glyph's `(dst_rect, uv_rect)` - 8 floats - to [instances]. */
+private fun addGlyphInstance(
+    instances: ArrayList<Float>,
     font: Font,
     glyph: Font.Glyph,
     penX: Float,
     baselineY: Float,
     size: Float,
-    r: Float, g: Float, b: Float, a: Float,
-    dstWidth: Float, dstHeight: Float,
-    screenPxRange: Float,
+    dstWidth: Float,
+    dstHeight: Float,
 ) {
     // Plane bounds are y-up around the baseline (top positive); dst is y-down pixels.
     val x1 = (penX + glyph.planeLeft * size) / dstWidth
@@ -979,42 +1003,72 @@ private fun drawGlyph(
     val u2 = (glyph.atlasX + glyph.atlasW) / atlasWidth
     val v2 = (glyph.atlasY + glyph.atlasH) / atlasHeight
 
-    val byteBuffer = byteBufferLocal.get()
-    byteBuffer.clear()
-    byteBuffer.putFloat(x1)
-    byteBuffer.putFloat(y1)
-    byteBuffer.putFloat(x2)
-    byteBuffer.putFloat(y2)
-    byteBuffer.putFloat(u1)
-    byteBuffer.putFloat(v1)
-    byteBuffer.putFloat(u2)
-    byteBuffer.putFloat(v2)
-    byteBuffer.putFloat(r)
-    byteBuffer.putFloat(g)
-    byteBuffer.putFloat(b)
-    byteBuffer.putFloat(a)
-    byteBuffer.putFloat(screenPxRange)
-    byteBuffer.putFloat(0f)
-    byteBuffer.putFloat(0f)
-    byteBuffer.putFloat(0f)
-    byteBuffer.flip()
+    instances.add(x1)
+    instances.add(y1)
+    instances.add(x2)
+    instances.add(y2)
+    instances.add(u1)
+    instances.add(v1)
+    instances.add(u2)
+    instances.add(v2)
+}
 
-    val uniformBuffer = device.createBuffer(
-        GPUBufferDescriptor(size = 64L, usage = BufferUsage.Uniform or BufferUsage.CopyDst)
+/**
+ * Uploads [instances] (8 floats per glyph: `dst_rect` then `uv_rect`) into one per-instance
+ * vertex buffer and draws every glyph with a single instanced [GPURenderPassEncoder.draw] call,
+ * rather than one buffer/bind group/draw call per glyph - see [TEXT_SHADER].
+ */
+private fun drawGlyphInstances(
+    pass: GPURenderPassEncoder,
+    font: Font,
+    instances: List<Float>,
+    color: Int,
+    screenPxRange: Float,
+) {
+    val glyphCount = instances.size / 8
+
+    val vertexBytes = ByteBuffer.allocateDirect(instances.size * 4).order(ByteOrder.nativeOrder())
+    instances.forEach { vertexBytes.putFloat(it) }
+    vertexBytes.rewind()
+    val vertexBuffer = device.createBuffer(
+        GPUBufferDescriptor(
+            size = vertexBytes.capacity().toLong(), usage = BufferUsage.Vertex or BufferUsage.CopyDst
+        )
     )
-    device.queue.writeBuffer(uniformBuffer, 0, byteBuffer)
+    device.queue.writeBuffer(vertexBuffer, 0, vertexBytes)
+
+    val r = ((color shr 16) and 0xFF) / 255f
+    val g = ((color shr 8) and 0xFF) / 255f
+    val b = (color and 0xFF) / 255f
+    val a = ((color ushr 24) and 0xFF) / 255f
+
+    val paramsBytes = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder())
+    paramsBytes.putFloat(r)
+    paramsBytes.putFloat(g)
+    paramsBytes.putFloat(b)
+    paramsBytes.putFloat(a)
+    paramsBytes.putFloat(screenPxRange)
+    paramsBytes.putFloat(0f)
+    paramsBytes.putFloat(0f)
+    paramsBytes.putFloat(0f)
+    paramsBytes.rewind()
+    val paramsBuffer = device.createBuffer(
+        GPUBufferDescriptor(size = 32L, usage = BufferUsage.Uniform or BufferUsage.CopyDst)
+    )
+    device.queue.writeBuffer(paramsBuffer, 0, paramsBytes)
 
     pass.setPipeline(pipeline)
+    pass.setVertexBuffer(0, vertexBuffer)
     pass.setBindGroup(
         0, device.createBindGroup(
             GPUBindGroupDescriptor(
                 layout = pipeline.getBindGroupLayout(0), entries = arrayOf(
-                    GPUBindGroupEntry(0, buffer = uniformBuffer),
+                    GPUBindGroupEntry(0, buffer = paramsBuffer),
                     GPUBindGroupEntry(1, textureView = font.atlasView),
                     GPUBindGroupEntry(2, sampler = sampler),
                 )
             )
         )
     )
-    pass.draw(6)
+    pass.draw(6, glyphCount)
 }
