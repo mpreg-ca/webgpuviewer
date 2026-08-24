@@ -31,14 +31,12 @@ import androidx.webgpu.PrimitiveTopology.Companion.TriangleList
 import androidx.webgpu.StoreOp
 import androidx.webgpu.TextureFormat
 import androidx.webgpu.TextureUsage
-import ca.mpreg.webgpuviewer.renderer.RenderPage
 import ca.mpreg.webgpuviewer.renderer.TileRenderer
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.blitCached
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.cacheLock
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.getCachedTexture
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.invalidateCache
-import ca.mpreg.webgpuviewer.transition.Transition.Companion.renderCacheSeed
 import ca.mpreg.webgpuviewer.viewer.ImagePage
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -262,18 +260,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             }
         }
 
-        /**
-         * The rect [page]'s flat render occupies inside its cached texture, as normalised
-         * (x1, y1, x2, y2) surface coordinates, or null if the page has nothing to draw. Mirrors
-         * [getCachedTexture]'s own placement, so a warp maps the page's actual rect rather than
-         * treating it as screen-shaped.
-         */
-        internal fun pageRect(page: ImagePage, dst: GPUTexture): FloatArray? {
-            val image = page.images.firstOrNull() ?: return null
-            if (image.mipmaps.isEmpty()) return null
-            return image.placement(dst, page.x, page.y, page.scale)
-        }
-
         private fun srgbToLinear(c: Float): Float =
             if (c <= 0.04045f) c / 12.92f else ((c + 0.055f) / 1.055f).pow(2.4f)
 
@@ -359,42 +345,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
 
         /**
-         * Seeds [page]'s cache slot from scratch: fast fill only for an animated page (never
-         * highQuality, redone every call per [getCachedTexture]'s `identityMatches` override);
-         * plain fill for non-highQuality; fast fill plus whatever tiles are cached for highQuality.
-         * Only for a fresh identity ([getCachedTexture]'s `LoadOp.Clear` branch) - an unchanged
-         * one calls [TileRenderer.blitAvailableTiles] directly instead, without repeating the fill.
-         * Internal (not private) so [TransitionNone] can reuse it to draw straight to the screen
-         * texture, skipping the cache slot entirely.
-         */
-        internal fun renderCacheSeed(
-            pass: GPURenderPassEncoder, page: ImagePage, tex: GPUTexture, tiles: TileRenderer
-        ) {
-            if (page.isAnimated) {
-                RenderPage.renderPage(pass, page, tex, 0f, 0f, 1f, masked = false)
-                return
-            }
-            if (!page.highQuality) {
-                RenderPage.renderPage(pass, page, tex, 0f, 0f, 1f, linear = false, masked = false)
-                return
-            }
-            RenderPage.renderPage(pass, page, tex, 0f, 0f, 1f, masked = false)
-            tiles.blitAvailableTiles(pass, page, tex)
-        }
-
-        /**
          * Get cached texture view for a page, rendering into it as needed instead of requiring
          * full tile coverage up front:
-         *  - Identity unchanged and the page never gets tiles (not highQuality, or animated) or
-         *    [TileRenderer.availableTileKeys] matches what's tracked as blitted - return as-is.
+         *  - Identity unchanged and the page never gets tiles ([ImagePage.newlyAvailableTileKeys]
+         *    null) or matches what's tracked as blitted - return as-is.
          *  - Identity unchanged but something new is available - `LoadOp.Load` layers it on and
          *    that becomes the tracked set.
-         *  - Identity changed - `LoadOp.Clear` and [renderCacheSeed] from scratch.
+         *  - Identity changed - `LoadOp.Clear` and [ImagePage.renderCacheSeed] from scratch.
          *
          * Tracked key sets, not a derived "fully covered" boolean, so this can't desync from what
          * [TileRenderer.drawCore] actually blits. Never forces generation - whatever isn't cached
          * fills in on the background worker, and later calls pick up what's landed. Null only if
-         * the page has no images to draw.
+         * the page isn't [ImagePage.isDecoded].
          */
         internal fun getCachedTexture(
             page: ImagePage,
@@ -404,7 +366,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             dstHeight: Int,
             tiles: TileRenderer,
         ): GPUTextureView? {
-            if (page.destroyed || page.images.all { it == null }) return null
+            if (page.destroyed || !page.isDecoded) return null
 
             // Lock only for metadata - GPU recording runs on the single GPU thread and doesn't
             // need it; cacheLock only guards against invalidateCache() from the UI thread.
@@ -420,13 +382,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 CacheReadResult(texture, view, matches, blitted)
             }
 
-            // Also true for isAnimated (on top of the identityMatches override above): it never
-            // gets tiles either (drawGridForFullPage always refuses it, same as !highQuality), so
-            // there's no point calling availableTileKeys - it would just return null.
-            val neverTiled = !page.highQuality || page.isAnimated
-            val available = if (neverTiled) null else tiles.availableTileKeys(page, texture)
+            // Null for a page that never gets tiles - not highQuality, animated, or not an Images
+            // page at all - in which case there's nothing further to compare against blittedKeys.
+            val available = page.newlyAvailableTileKeys(tiles, texture)
 
-            if (identityMatches && (neverTiled || available == blittedKeys)) {
+            if (identityMatches && (available == null || available == blittedKeys)) {
                 return view
             }
 
@@ -435,30 +395,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             val pageScale = page.scale
             val pageFrameVersion = page.frameVersion
 
-            // Record outside the lock - GPU thread is single-threaded.
-            val pass = encoder.beginRenderPass(
-                GPURenderPassDescriptor(
-                    colorAttachments = arrayOf(
-                        GPURenderPassColorAttachment(
-                            view = view,
-                            loadOp = if (identityMatches) LoadOp.Load else LoadOp.Clear,
-                            storeOp = StoreOp.Store,
-                            clearValue = GPUColor(0.0, 0.0, 0.0, 0.0)
-                        )
-                    )
-                )
-            )
-            try {
-                if (identityMatches) {
-                    tiles.blitAvailableTiles(pass, page, texture)
-                } else {
-                    renderCacheSeed(pass, page, texture, tiles)
-                }
-            } finally {
-                pass.end()
-            }
+            // Record outside the lock - GPU thread is single-threaded. renderIntoCache opens its
+            // own pass (Load or Clear, matching identityMatches) rather than sharing one from here.
+            page.renderIntoCache(encoder, texture, tiles, identityMatches)
 
-            // [available] is still accurate after the render: blitAvailableTiles/renderCacheSeed
+            // [available] is still accurate after the render: renderIntoCache
             // only blit what's already cached and queue what's missing for the background worker
             // - generation itself is async, so st.tiles can't have gained anything in between.
             // Reusing it here instead of re-walking the grid halves this call's cost.
@@ -497,36 +438,34 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         )
 
         /**
-         * Blit a cached texture to the destination with an offset. If [cachedView] is null, draws
-         * nothing but still clears when [clearFirst] is set, so an undecoded page never leaves
-         * stale swapchain content on screen.
+         * Open one cleared pass on [dst] for a transition's whole frame - [drawBackground] and
+         * [blitCached] each used to open and close their own, costing an attachment load/store
+         * apiece; sharing one pass across all of them instead is just as correct, since none of
+         * them read back what an earlier one in the same frame wrote.
          */
+        internal fun beginClearedPass(
+            encoder: GPUCommandEncoder, dst: GPUTexture
+        ): GPURenderPassEncoder = encoder.beginRenderPass(
+            GPURenderPassDescriptor(
+                colorAttachments = arrayOf(
+                    GPURenderPassColorAttachment(
+                        view = dst.createView(),
+                        loadOp = LoadOp.Clear,
+                        storeOp = StoreOp.Store,
+                        clearValue = GPUColor(0.0, 0.0, 0.0, 0.0)
+                    )
+                )
+            )
+        )
+
+        /** Blit a cached texture into [pass] with an offset. Draws nothing if [cachedView] is null. */
         internal fun blitCached(
-            encoder: GPUCommandEncoder,
-            dst: GPUTexture,
+            pass: GPURenderPassEncoder,
             cachedView: GPUTextureView?,
             offsetX: Float,
-            offsetY: Float,
-            clearFirst: Boolean = false
+            offsetY: Float
         ) {
-            if (cachedView == null) {
-                if (clearFirst) {
-                    val pass = encoder.beginRenderPass(
-                        GPURenderPassDescriptor(
-                            colorAttachments = arrayOf(
-                                GPURenderPassColorAttachment(
-                                    view = dst.createView(),
-                                    loadOp = LoadOp.Clear,
-                                    storeOp = StoreOp.Store,
-                                    clearValue = GPUColor(0.0, 0.0, 0.0, 0.0)
-                                )
-                            )
-                        )
-                    )
-                    pass.end()
-                }
-                return
-            }
+            if (cachedView == null) return
 
             val byteBuffer = blitByteBuffer.get()
             byteBuffer.clear()
@@ -538,19 +477,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 GPUBufferDescriptor(size = 8, usage = BufferUsage.Uniform or BufferUsage.CopyDst)
             )
             WebGpuRenderer.device.queue.writeBuffer(uniformBuffer, 0, byteBuffer)
-
-            val pass = encoder.beginRenderPass(
-                GPURenderPassDescriptor(
-                    colorAttachments = arrayOf(
-                        GPURenderPassColorAttachment(
-                            view = dst.createView(),
-                            loadOp = if (clearFirst) LoadOp.Clear else LoadOp.Load,
-                            storeOp = StoreOp.Store,
-                            clearValue = GPUColor(0.0, 0.0, 0.0, 0.0)
-                        )
-                    )
-                )
-            )
 
             pass.setPipeline(blitPipeline)
             pass.setBindGroup(
@@ -565,7 +491,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 )
             )
             pass.draw(6)
-            pass.end()
         }
     }
 }

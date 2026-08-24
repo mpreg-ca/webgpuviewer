@@ -140,7 +140,7 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
     }
 
     /** One page visible this frame, with the document-space top [captureRenderState] found it at. */
-    private class VisiblePage(val page: ImagePage, val docTop: Float, val pageHeight: Float)
+    private class VisiblePage(val page: ImagePage.Images, val docTop: Float, val pageHeight: Float)
 
     private class ContinuousRenderSnapshot(
         val pages: List<VisiblePage>,
@@ -190,7 +190,7 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
             val pageHeight = getPageHeight(page)
             docTopBack -= pageHeight
             yTop -= pageHeight
-            if (page.images.any { it != null }) {
+            if (page is ImagePage.Images && page.images.any { it != null }) {
                 backPages.add(VisiblePage(page, docTopBack, pageHeight))
             }
             if (pageHeight <= 0f) break
@@ -216,7 +216,7 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
             hasPrev = true
             val pageHeight = getPageHeight(page)
 
-            if (y + pageHeight > visTop && page.images.any { it != null }) {
+            if (y + pageHeight > visTop && page is ImagePage.Images && page.images.any { it != null }) {
                 pages.add(VisiblePage(page, docTop, pageHeight))
             }
 
@@ -305,7 +305,7 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
                             dstW,
                             dstH
                         )
-                        // Content not worth linear-light correctness (ImagePage.highQuality)
+                        // Content not worth linear-light correctness (ImagePage.Images.highQuality)
                         // gets the plain sampler - it never reaches the tile cache either. Animated
                         // pages are never highQuality but always want the fast sampler regardless,
                         // since they swap images every frame. Both are stencil-tested against the

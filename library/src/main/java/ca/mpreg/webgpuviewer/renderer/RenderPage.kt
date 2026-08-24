@@ -24,28 +24,25 @@ import androidx.webgpu.GPUVertexState
 import androidx.webgpu.OptionalBool
 import androidx.webgpu.PrimitiveTopology.Companion.TriangleList
 import androidx.webgpu.TextureFormat
-import ca.mpreg.webgpuviewer.draw.Draw
-import ca.mpreg.webgpuviewer.draw.rect
 import ca.mpreg.webgpuviewer.renderer.RenderPage.TILE_SAMPLER_FS
 import ca.mpreg.webgpuviewer.renderer.RenderPage.draw
 import ca.mpreg.webgpuviewer.renderer.RenderPage.drawMaskedRect
+import ca.mpreg.webgpuviewer.renderer.RenderPage.drawTile
 import ca.mpreg.webgpuviewer.renderer.RenderPage.plainVariant
 import ca.mpreg.webgpuviewer.renderer.RenderPage.render
-import ca.mpreg.webgpuviewer.renderer.RenderPage.renderBackground
 import ca.mpreg.webgpuviewer.renderer.RenderPage.renderFast
 import ca.mpreg.webgpuviewer.renderer.RenderPage.renderImage
-import ca.mpreg.webgpuviewer.renderer.RenderPage.renderPage
 import ca.mpreg.webgpuviewer.renderer.RenderPage.samplerVariant
+import ca.mpreg.webgpuviewer.renderer.RenderPage.variantFor
 import ca.mpreg.webgpuviewer.viewer.ImagePage
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import kotlin.math.abs
-import kotlin.math.max
-import kotlin.math.min
 
 /**
- * Draws a page or a single image into a render pass. Every path that draws a page's live content
- * comes through here: the continuous viewer and the paged viewer when no page turn is in flight.
+ * Draws a single image into a render pass. Every path that draws a page's live content comes
+ * through here: the continuous viewer and the paged viewer when no page turn is in flight.
+ * [ImagePage.Images.renderPage]/[ImagePage.Images.renderBackground] are the page-level
+ * counterparts, sharing [variantFor]/[drawTile]/[drawMaskedRect] with this object.
  *
  * Three shaders, picked per call:
  *  - [render] - box filter minifying, Catmull-Rom magnifying, in linear light. Sharp and
@@ -54,12 +51,12 @@ import kotlin.math.min
  *  - [renderFast] - one bilinear tap per pixel, also linear-light via a cheap gamma-2.2
  *    approximation (so a [TileRenderer] tile popping in over it never shows a brightness seam,
  *    close enough that the curve mismatch isn't visible) unless called with `linear = false`,
- *    which skips the sRGB<->linear round trip for [ImagePage.highQuality] false content where
+ *    which skips the sRGB<->linear round trip for [ImagePage.Images.highQuality] false content where
  *    that correctness isn't worth the cost. Draws every tile the viewport overlaps separately,
  *    so the viewport can be any size or position without a window falling short.
  *
- * A cached transition's own snapshot seeds with [renderPage] (`masked = false`), then layers in
- * [TileRenderer]'s tiles as they land - see [Transition.getCachedTexture].
+ * A cached transition's own snapshot seeds with [ImagePage.Images.renderPage] (`masked = false`),
+ * then layers in [TileRenderer]'s tiles as they land - see [Transition.getCachedTexture].
  */
 object RenderPage {
     private val device get() = WebGpuRenderer.device
@@ -70,7 +67,7 @@ object RenderPage {
     }
 
     /** One of the three shaders, pipeline built on first use. */
-    private class Variant(build: () -> GPURenderPipeline) {
+    internal class Variant(build: () -> GPURenderPipeline) {
         val pipeline: GPURenderPipeline by lazy(build)
     }
 
@@ -153,7 +150,7 @@ object RenderPage {
      * valid to use inside ImageViewerState/Continuous's stencil-attached pass - the shared
      * [ca.mpreg.webgpuviewer.draw.Draw.rect] pipeline has none, and every other place it's used
      * (transitions, etc.) has no stencil attachment at all, so it can't just gain one here.
-     * [renderPage]'s background rect is the only thing that needs this twin.
+     * [ImagePage.Images.renderPage]'s background rect is the only thing that needs this twin.
      */
     private const val MASKED_RECT_SHADER = """
 struct Params {
@@ -231,7 +228,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder())
     }
 
-    private fun drawMaskedRect(
+    internal fun drawMaskedRect(
         pass: GPURenderPassEncoder, x1: Float, y1: Float, x2: Float, y2: Float, color: Int
     ) {
         val r = ((color shr 16) and 0xFF) / 255f
@@ -382,7 +379,7 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 """
 
     /**
-     * Uniforms, single-texture binding and vertex stage shared by [renderFast]/[renderPage]'s
+     * Uniforms, single-texture binding and vertex stage shared by [renderFast]/[ImagePage.Images.renderPage]'s
      * per-tile draws - no [tile_size]/[tiles_width]/[tiles_height] bookkeeping, since a draw
      * through here is always exactly one tile.
      */
@@ -749,8 +746,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         pass: GPURenderPassEncoder, image: Image, dst: GPUTexture, x: Float, y: Float, scale: Float
     ) = renderImage(pass, image, dst, x, y, scale, filteredVariant)
 
-    /** Picks one of the 4 tile pipelines - shared by [renderFast] and [renderPage]. */
-    private fun variantFor(linear: Boolean, masked: Boolean): Variant = when {
+    /** Picks one of the 4 tile pipelines - shared by [renderFast] and [ImagePage.Images.renderPage]. */
+    internal fun variantFor(linear: Boolean, masked: Boolean): Variant = when {
         linear && masked -> samplerVariant
         linear -> samplerVariantUnmasked
         masked -> plainVariantMasked
@@ -760,7 +757,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     /**
      * Draw an image into [pass], one bilinear tap per pixel. [linear] picks [samplerVariant]'s
      * linear-light gamma correction over [plainVariant]'s straight sRGB sampling - pass `false`
-     * for [ImagePage.highQuality] false content. [masked] picks the twin valid inside a
+     * for [ImagePage.Images.highQuality] false content. [masked] picks the twin valid inside a
      * stencil-attached pass; pass `false` only when the pass has no stencil attachment.
      */
     internal fun renderFast(
@@ -773,53 +770,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         linear: Boolean = true,
         masked: Boolean = true
     ) = renderImageTiled(pass, image, dst, x, y, scale, variantFor(linear, masked))
-
-    /**
-     * Draw a page into [pass], one bilinear tap per pixel. [linear]/[masked] pick the same 4
-     * pipelines as the image-level [renderFast]. Background handling is derived from the pair
-     * rather than its own parameter: masked+linear skips it (that caller already drew it via
-     * [renderBackground]), masked-only folds it into the masked draw, unmasked always draws a
-     * plain one alongside.
-     */
-    internal fun renderPage(
-        pass: GPURenderPassEncoder,
-        page: ImagePage,
-        dst: GPUTexture,
-        x: Float,
-        y: Float,
-        scale: Float,
-        linear: Boolean = true,
-        masked: Boolean = true
-    ) {
-        val variant = variantFor(linear, masked)
-        forEachPlacedImage(page, dst, x, y, scale) { image, rect, placeX, placeY, placeScale ->
-            if (!linear || !masked) {
-                drawImageBackground(pass, page, image, rect, scale, maskedBackground = masked)
-            }
-            for (tile in image.prepareTilesForRender(dst, placeX, placeY, placeScale)) {
-                drawTile(pass, dst, tile, variant)
-            }
-        }
-    }
-
-    /**
-     * Draw just a page's per-image background colour, skipping the image itself - for
-     * ImageViewerState's masked path, which draws this first (so it stays underneath
-     * [TileRenderer.draw] and [renderPage]), or as the whole draw once [TileRenderer]
-     * already covers the image itself. The background's alpha depends on live pan/scale, so it's
-     * drawn every frame regardless of tile coverage. Uses the stencil-pass-compatible rect
-     * pipeline - see [drawMaskedRect] - since it always runs inside that pass.
-     */
-    internal fun renderBackground(
-        pass: GPURenderPassEncoder,
-        page: ImagePage,
-        dst: GPUTexture,
-        x: Float,
-        y: Float,
-        scale: Float
-    ) = forEachPlacedImage(page, dst, x, y, scale) { image, rect, _, _, _ ->
-        drawImageBackground(pass, page, image, rect, scale, maskedBackground = true)
-    }
 
     private fun renderImage(
         pass: GPURenderPassEncoder,
@@ -834,7 +784,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         draw(pass, image, dst, res, variant)
     }
 
-    /** As [renderImage], for [renderFast]/[renderPage] - draws every tile separately. */
+    /** As [renderImage], for [renderFast]/[ImagePage.Images.renderPage] - draws every tile separately. */
     private fun renderImageTiled(
         pass: GPURenderPassEncoder,
         image: Image,
@@ -846,114 +796,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     ) {
         for (tile in image.prepareTilesForRender(dst, x, y, scale)) {
             drawTile(pass, dst, tile, variant)
-        }
-    }
-
-    /**
-     * Draws [image]'s fading background rect, for [renderPage]'s `drawBackground` branch. Alpha
-     * fades with distance from home/min scale or the page's pan bounds, so it only shows near the
-     * edges of the zoom/pan range where the image itself doesn't fill the viewport.
-     */
-    private fun drawImageBackground(
-        pass: GPURenderPassEncoder,
-        page: ImagePage,
-        image: Image,
-        rect: FloatArray,
-        scale: Float,
-        maskedBackground: Boolean,
-    ) {
-        val parent = page.parent
-        val minScale = page.minScale
-        val homeScale = page.homeScale
-        val currentScale = page.scale * scale
-
-        val fadeDistancePixels = 200f
-        val imageSize = (page.width.coerceAtLeast(page.height)).toFloat()
-
-        fun proximity(anchorScale: Float): Float {
-            if (anchorScale <= 0f) return 0f
-            val deltaPixels = abs(imageSize * (currentScale - anchorScale))
-            return (1f - deltaPixels / fadeDistancePixels).coerceIn(0f, 1f)
-        }
-
-        fun boundProximity(value: Float, lo: Float, hi: Float, pixelsPerUnit: Float): Float {
-            val overflow = when {
-                value < lo -> lo - value
-                value > hi -> value - hi
-                else -> return 1f
-            }
-            return (1f - overflow * pixelsPerUnit / fadeDistancePixels).coerceIn(0f, 1f)
-        }
-
-        fun boundsProximityAt(anchorScale: Float): Float {
-            if (parent == null || anchorScale <= 0f) return 0f
-            val minX = page.minX(anchorScale)
-            val maxX = page.maxX(anchorScale)
-            val minY = page.minY(anchorScale)
-            val maxY = page.maxY(anchorScale)
-            val pixelsPerUnitX = parent.width.toFloat() * anchorScale
-            val pixelsPerUnitY = parent.height.toFloat() * anchorScale
-            return min(
-                boundProximity(page.x, minX, maxX, pixelsPerUnitX),
-                boundProximity(page.y, minY, maxY, pixelsPerUnitY)
-            )
-        }
-
-        val bgAlpha = if (parent != null) {
-            if (currentScale > minScale) {
-                boundsProximityAt(currentScale)
-            } else {
-                val homeProximity = min(proximity(homeScale), boundsProximityAt(homeScale))
-                val minProximity = min(proximity(minScale), boundsProximityAt(minScale))
-                max(homeProximity, minProximity)
-            }
-        } else {
-            1f
-        }
-
-        val origA = (image.backgroundColor ushr 24) and 0xFF
-        val a = (origA * bgAlpha).toInt()
-        if (a <= 0) return
-
-        val x1 = if (image.position == Image.Position.SINGLE) 0f else rect[0]
-        val x2 = if (image.position == Image.Position.SINGLE) 1f else rect[2]
-        val origR = (image.backgroundColor shr 16) and 0xFF
-        val origG = (image.backgroundColor shr 8) and 0xFF
-        val origB = image.backgroundColor and 0xFF
-        val r = (origR * bgAlpha).toInt()
-        val g = (origG * bgAlpha).toInt()
-        val b = (origB * bgAlpha).toInt()
-        val bgColor = (a shl 24) or (r shl 16) or (g shl 8) or b
-        if (maskedBackground) {
-            drawMaskedRect(pass, x1, 0f, x2, 1f, bgColor)
-        } else {
-            Draw.rect(pass, x1, 0f, x2, 1f, bgColor)
-        }
-    }
-
-    /** Walks [page]'s image(s), placing each one for [action] to draw against. */
-    private inline fun forEachPlacedImage(
-        page: ImagePage,
-        dst: GPUTexture,
-        x: Float,
-        y: Float,
-        scale: Float,
-        action: (image: Image, rect: FloatArray, placeX: Float, placeY: Float, placeScale: Float) -> Unit
-    ) {
-        // A snapshot is captured on the main thread and drawn later, so the page may have been
-        // evicted in between. Its images' buffers are already destroyed, and touching one throws.
-        if (page.destroyed || page.images.all { it == null }) return
-
-        val renderImages = if (page.images.size == 1) listOf(page.image) else page.images
-        renderImages.forEach { image ->
-            image ?: return@forEach
-            if (image.mipmaps.isEmpty()) return@forEach
-            val offsetX = image.spreadOffsetX / dst.width
-            val placeX = page.x + x + offsetX
-            val placeY = page.y + y
-            val placeScale = page.scale * scale
-            val rect = image.placement(dst, placeX, placeY, placeScale)
-            action(image, rect, placeX, placeY, placeScale)
         }
     }
 
@@ -999,7 +841,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
      * Draw one tile from [Image.prepareTilesForRender], into its own persistent uniform buffer
      * rather than the shared scratch one [draw] uses - see [Mipmap.TileRect]'s doc for why.
      */
-    private fun drawTile(
+    internal fun drawTile(
         pass: GPURenderPassEncoder, dst: GPUTexture, tile: Image.TileForDraw, variant: Variant
     ) {
         val byteBuffer = byteBufferLocal.get()

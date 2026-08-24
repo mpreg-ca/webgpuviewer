@@ -186,7 +186,7 @@ class Image private constructor(
      * Where this image's full extent lands in [dst], as normalised (x1, y1, x2, y2) surface
      * coordinates - the same placement [prepareForRender] resolves to, but without going through
      * a mip level or [Mipmap.getQuad]. For callers that only want geometry (a background rect,
-     * [ca.mpreg.webgpuviewer.transition.Transition.pageRect]) with no reason to touch mip/tile
+     * [ca.mpreg.webgpuviewer.viewer.ImagePage.Images.pageRect]) with no reason to touch mip/tile
      * selection.
      */
     fun placement(dst: GPUTexture, x: Float, y: Float, scale: Float): FloatArray {

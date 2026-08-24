@@ -19,7 +19,6 @@ import ca.mpreg.webgpuviewer.draw.Draw
 import ca.mpreg.webgpuviewer.draw.rect
 import ca.mpreg.webgpuviewer.renderer.TileRenderer
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.getCachedTexture
-import ca.mpreg.webgpuviewer.transition.Transition.Companion.pageRect
 import ca.mpreg.webgpuviewer.viewer.ImagePage
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -31,7 +30,7 @@ import java.nio.ByteOrder
  * texture. [getCachedTexture] keys on the page's own transform, so the flat render happens once per
  * transition while only the rotation is per-frame.
  *
- * A hemisphere maps the page's rect within the cache - see [pageRect] - so it stays page-shaped
+ * A hemisphere maps the page's rect within the cache - see [ImagePage.pageRect] - so it stays page-shaped
  * rather than taking the surface's proportions.
  */
 object TransitionSphere : Transition() {
@@ -196,8 +195,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
         // Draw single background rect that transitions between colors
         val t = if (frac > 0f) frac else -frac
-        val bg1 = page1.images.firstOrNull()?.backgroundColor ?: 0xFF000000.toInt()
-        val bg2 = page2.images.firstOrNull()?.backgroundColor ?: 0xFF000000.toInt()
+        val bg1 = page1.firstImageBackgroundColor() ?: 0xFF000000.toInt()
+        val bg2 = page2.firstImageBackgroundColor() ?: 0xFF000000.toInt()
         Draw.rect(encoder, dst, 0f, 0f, 1f, 1f, blendBackgroundColor(bg1, bg2, t))
 
         if (frac > 0f) {
@@ -218,7 +217,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         isSecond: Float,
     ) {
         if (cachedView == null) return
-        val rect = pageRect(page, dst) ?: return
+        val rect = page.pageRect(dst) ?: return
 
         val byteBuffer = byteBufferLocal.get()
         byteBuffer.clear()

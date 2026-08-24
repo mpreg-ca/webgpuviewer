@@ -36,7 +36,7 @@ class MainActivity : AppCompatActivity() {
                 dec.decodeNext()
             }.let {
                 withContext(WebGpuRenderer.dispatcher) {
-                    ImagePage(Image(it.image, it.width, it.height)).apply {
+                    ImagePage.Images(Image(it.image, it.width, it.height)).apply {
                         parent = binding.composeView2.state
                         x = homeX
                         y = homeY
@@ -51,7 +51,7 @@ class MainActivity : AppCompatActivity() {
                 dec.decodeNext()
             }.let {
                 withContext(WebGpuRenderer.dispatcher) {
-                    ImagePage(Image(it.image, it.width, it.height)).apply {
+                    ImagePage.Images(Image(it.image, it.width, it.height)).apply {
                         parent = binding.composeView2.state
                         x = homeX
                         y = homeY
@@ -65,7 +65,7 @@ class MainActivity : AppCompatActivity() {
                 dec.decodeNext()
             }.let {
                 withContext(WebGpuRenderer.dispatcher) {
-                    ImagePage(Image(it.image, it.width, it.height)).apply {
+                    ImagePage.Images(Image(it.image, it.width, it.height)).apply {
                         parent = binding.composeView2.state
                         x = homeX
                         y = homeY
@@ -79,7 +79,7 @@ class MainActivity : AppCompatActivity() {
                 dec.decodeNext()
             }.let {
                 withContext(WebGpuRenderer.dispatcher) {
-                    ImagePage(Image(it.image, it.width, it.height)).apply {
+                    ImagePage.Images(Image(it.image, it.width, it.height)).apply {
                         parent = binding.composeView2.state
                         x = homeX
                         y = homeY

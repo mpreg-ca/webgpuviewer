@@ -20,7 +20,6 @@ import androidx.webgpu.GPURenderPassEncoder
 import androidx.webgpu.GPUTexture
 import androidx.webgpu.LoadOp
 import androidx.webgpu.StoreOp
-import ca.mpreg.webgpuviewer.renderer.RenderPage
 import ca.mpreg.webgpuviewer.renderer.TileRenderer
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer.Companion.dispatcher
@@ -270,59 +269,25 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
     ) {
         val s = snapshot as RenderSnapshot
         tiles.newFrame()
+        val page = s.currentPage
+
         if (s.adjacentPage != null && s.offset != 0f) {
             s.transition.render(
-                s.currentPage,
-                s.adjacentPage,
-                encoder,
-                texture,
-                s.offset,
-                s.firstPos,
-                s.currentPos,
-                tiles
+                page, s.adjacentPage, encoder, texture, s.offset, s.firstPos, s.currentPos, tiles
             )
-        } else if (s.currentPage.isAnimated) {
-            // Animated pages (never highQuality) always want the fast path, unlike an ordinary
-            // non-highQuality page's plain one - and never worth the tile cache, so this skips
-            // tiles.draw()/isFullyCovered rather than falling into the !highQuality branch below.
-            renderPass(encoder, texture) { pass ->
-                RenderPage.renderBackground(pass, s.currentPage, texture, 0f, 0f, 1f)
-                RenderPage.renderPage(pass, s.currentPage, texture, 0f, 0f, 1f)
-            }
-        } else {
-            // Computed once and reused below - isFullyCoveredCore already treats a false
-            // highQuality as "not covered", so the plain-sampler branch just ends up unused.
-            val covered = tiles.isFullyCovered(s.currentPage, texture, 0f, 0f, 1f)
+            return
+        }
 
-            renderPass(encoder, texture) { pass ->
-                // Content not worth the tile cache's sharpness or the fast path's linear-light
-                // correctness (see ImagePage.highQuality) skips both entirely - just the plain
-                // sampler, every frame.
-                if (!s.currentPage.highQuality) {
-                    RenderPage.renderPage(pass, s.currentPage, texture, 0f, 0f, 1f, linear = false)
-                    return@renderPass
-                }
-                // Background always drawn live first (its fades are position-dependent, never
-                // from a stale tile) so it stays underneath everything else. Tiles draw next,
-                // marking every pixel they cover in the stencil buffer tiles.draw() writes to;
-                // renderPage then only shades what's left uncovered instead of the whole
-                // viewport, since tiles.draw() already produced the right pixel wherever it drew.
-                RenderPage.renderBackground(pass, s.currentPage, texture, 0f, 0f, 1f)
-                tiles.draw(pass, s.currentPage, texture, 0f, 0f, 1f)
-                if (!covered) {
-                    RenderPage.renderPage(pass, s.currentPage, texture, 0f, 0f, 1f)
-                }
-            }
+        val covered = page.drawLive(encoder, texture, tiles)
 
-            // Opportunistic: once the current page's tiles settle, prewarm the next page's too,
-            // so a transition into it starts already mostly sharp (Transition.getCachedTexture
-            // seeds itself and layers tiles in live, so this no longer needs to be complete
-            // first). Gated on atHome since the cache is keyed by (x, y, scale).
-            if (s.currentPage.highQuality && s.currentPage.atHome && covered) {
-                val next = s.nextPage
-                if (next != null && next.highQuality && !next.isAnimated && next.atHome) {
-                    tiles.prewarm(next, texture)
-                }
+        // Opportunistic: once the current page's tiles settle, prewarm the next page's too,
+        // so a transition into it starts already mostly sharp (Transition.getCachedTexture
+        // seeds itself and layers tiles in live, so this no longer needs to be complete
+        // first). Gated on atHome since the cache is keyed by (x, y, scale).
+        if (covered && page is ImagePage.Images && page.atHome) {
+            val next = s.nextPage as? ImagePage.Images
+            if (next != null && next.highQuality && !next.isAnimated && next.atHome) {
+                tiles.prewarm(next, texture)
             }
         }
     }

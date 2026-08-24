@@ -20,7 +20,6 @@ import ca.mpreg.webgpuviewer.draw.Draw
 import ca.mpreg.webgpuviewer.draw.rect
 import ca.mpreg.webgpuviewer.renderer.TileRenderer
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.getCachedTexture
-import ca.mpreg.webgpuviewer.transition.Transition.Companion.pageRect
 import ca.mpreg.webgpuviewer.viewer.ImagePage
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -36,7 +35,7 @@ import kotlin.math.atan2
  *
  * The cache is already at display resolution, so the fold resamples it with a plain sampler. The
  * fold works in page-relative coordinates and reflects across the page's rect within the cache -
- * see [pageRect] - so a page narrower or shorter than the surface folds as itself, not as a
+ * see [ImagePage.pageRect] - so a page narrower or shorter than the surface folds as itself, not as a
  * screen-sized sheet.
  */
 object TransitionFlipLeft : Transition() {
@@ -188,8 +187,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
         // Draw single background rect that transitions between colors
         val t = if (frac > 0f) frac else -frac
-        val bg1 = page1.images.firstOrNull()?.backgroundColor ?: 0xFF000000.toInt()
-        val bg2 = page2.images.firstOrNull()?.backgroundColor ?: 0xFF000000.toInt()
+        val bg1 = page1.firstImageBackgroundColor() ?: 0xFF000000.toInt()
+        val bg2 = page2.firstImageBackgroundColor() ?: 0xFF000000.toInt()
         Draw.rect(encoder, dst, 0f, 0f, 1f, 1f, blendBackgroundColor(bg1, bg2, t))
 
         if (frac > 0f) {
@@ -210,7 +209,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         foldAngle: Float,
     ) {
         if (cachedView == null) return
-        val rect = pageRect(page, dst) ?: return
+        val rect = page.pageRect(dst) ?: return
 
         val byteBuffer = byteBufferLocal.get()
         byteBuffer.clear()

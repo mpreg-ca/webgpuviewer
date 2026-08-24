@@ -202,8 +202,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // blend: 0 = fully page1, 1 = fully page2
         val blend = if (frac > 0f) frac else -frac
 
-        val bg1 = page1.images.firstOrNull()?.backgroundColor ?: 0xFF000000.toInt()
-        val bg2 = page2.images.firstOrNull()?.backgroundColor ?: 0xFF000000.toInt()
+        val bg1 = page1.firstImageBackgroundColor() ?: 0xFF000000.toInt()
+        val bg2 = page2.firstImageBackgroundColor() ?: 0xFF000000.toInt()
 
         blendCached(encoder, dst, cached1, cached2, bg1, bg2, blend)
     }
