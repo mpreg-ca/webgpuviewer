@@ -201,11 +201,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // Second half: fade white to next
         if (t < 0.5f) {
             // Fade page1 to white (t goes 0 -> 0.5, fadeToWhite goes 0 -> 1)
-            val bg1 = page1.firstImageBackgroundColor() ?: 0
+            val bg1 = page1.backgroundColor ?: 0
             fadeWhiteCached(encoder, dst, cached1, bg1, t * 2f)
         } else {
             // Fade white to page2 (t goes 0.5 -> 1, fadeToWhite goes 1 -> 0)
-            val bg2 = page2.firstImageBackgroundColor() ?: 0
+            val bg2 = page2.backgroundColor ?: 0
             fadeWhiteCached(encoder, dst, cached2, bg2, (1f - t) * 2f)
         }
     }

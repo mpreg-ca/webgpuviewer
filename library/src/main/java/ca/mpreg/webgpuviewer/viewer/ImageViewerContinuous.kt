@@ -14,6 +14,7 @@ import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
@@ -50,6 +51,10 @@ fun ImageViewerContinuous(
     val density = LocalDensity.current
     val flingX = remember { Animatable(0f) }
     val decay = remember(density) { splineBasedDecay<Float>(density) }
+
+    LaunchedEffect(density) {
+        state.density = density
+    }
 
     val minScale = 1f
     val doubleTapScale = minScale * 2f

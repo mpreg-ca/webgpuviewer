@@ -314,9 +314,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         val rightW = matrix[3] + matrix[15]
         val leftX = (-matrix[0] + matrix[12]) / leftW
         val rightX = (matrix[0] + matrix[12]) / rightW
-        val bg = page.firstImageBackgroundColor()
-        if (bg != null) {
-            Draw.rect(encoder, dst, (leftX + 1f) / 2f, 0f, (rightX + 1f) / 2f, 1f, bg)
+        page.backgroundColor?.let {
+            Draw.rect(encoder, dst, (leftX + 1f) / 2f, 0f, (rightX + 1f) / 2f, 1f, it)
         }
 
         val byteBuffer = byteBufferLocal.get()

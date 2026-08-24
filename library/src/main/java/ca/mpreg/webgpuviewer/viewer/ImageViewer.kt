@@ -64,6 +64,10 @@ fun ImageViewer(
         }
     }
 
+    LaunchedEffect(density) {
+        state.density = density
+    }
+
     LaunchedEffect(state.avoidCutout, cutoutPx) {
         state.cutoutTopPx = if (state.avoidCutout) cutoutPx else 0f
     }

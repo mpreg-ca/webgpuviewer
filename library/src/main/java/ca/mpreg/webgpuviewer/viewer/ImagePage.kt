@@ -1,11 +1,15 @@
 package ca.mpreg.webgpuviewer.viewer
 
+import android.content.Context
 import android.graphics.Bitmap
 import android.util.Log
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.spring
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.util.fastCoerceIn
 import androidx.webgpu.GPUColor
 import androidx.webgpu.GPUCommandEncoder
@@ -17,9 +21,12 @@ import androidx.webgpu.GPUTexture
 import androidx.webgpu.LoadOp
 import androidx.webgpu.StoreOp
 import ca.mpreg.webgpuviewer.draw.Draw
+import ca.mpreg.webgpuviewer.draw.Font
+import ca.mpreg.webgpuviewer.draw.TextAlign
 import ca.mpreg.webgpuviewer.draw.circle
 import ca.mpreg.webgpuviewer.draw.clear
 import ca.mpreg.webgpuviewer.draw.rect
+import ca.mpreg.webgpuviewer.draw.text
 import ca.mpreg.webgpuviewer.orZero
 import ca.mpreg.webgpuviewer.renderer.Image
 import ca.mpreg.webgpuviewer.renderer.RenderPage
@@ -65,88 +72,207 @@ open class ImagePage {
      * Opens one pass per [render] call (no stencil attachment - unlike [Images], nothing here
      * needs [ca.mpreg.webgpuviewer.renderer.TileRenderer]'s masking), shared by every [rect]/
      * [circle] call inside it rather than each opening its own.
+     *
+     * [renderWith] clears that pass's destination first - right whenever this page owns the whole
+     * thing (a rotated screen buffer, or a [ca.mpreg.webgpuviewer.transition.Transition]'s
+     * per-page cache slot). [renderLoaded] is the one exception:
+     * [ca.mpreg.webgpuviewer.viewer.ImageViewerContinuousState] draws several pages into one
+     * shared screen texture, so a Render page's destination there is that whole shared texture,
+     * not a page-sized one of its own - clearing it would blank every other visible page too.
+     *
+     * Override [backgroundColor] to fill a background before [render] runs: when
+     * [renderWith] owns the whole destination, that fill is just its clear color, so it covers
+     * the full screen (letterboxing beyond this page's own footprint, same as a transition
+     * blending toward it); [renderLoaded] instead fills just [fillPage]'s scoped rect, since it
+     * can't clear the shared texture. Leave it null to paint nothing and rely entirely on [render].
      */
     open class Render(override val width: Int, override val height: Int) : ImagePage() {
 
-        /** Draws this page's content into [pass]. */
+        // Always has drawable content via render(), unlike Dummy - needed so
+        // Transition.getCachedTexture doesn't skip this page as if it were undecoded.
+        override val isDecoded: Boolean get() = true
+
+        // Unlike the base ImagePage default (fixed "home" position, right for Dummy - it has
+        // nothing pan-worthy anyway), a Render page's own render() gets its *live* pan/zoom
+        // transform - the same x/y/scale gestures already drive on any ImagePage - so e.g. a
+        // custom Render page's own drawn content can track a drag/pinch the same way an Images
+        // page's would, rather than being stuck rendering at (0, 0, 1) forever.
+        override fun drawLive(
+            encoder: GPUCommandEncoder, dst: GPUTexture, tiles: TileRenderer
+        ): Boolean {
+            renderWith(encoder, x, y, scale, dst)
+            return false
+        }
+
+        override fun renderCacheSeed(
+            encoder: GPUCommandEncoder, tex: GPUTexture, tiles: TileRenderer
+        ) {
+            renderWith(encoder, x, y, scale, tex)
+        }
+
+        // render() treats dst as entirely its own canvas (see the class doc) - so unlike Images,
+        // whose real content only ever occupies part of dst, this page's rect within a flat
+        // render of it IS the whole thing, just panned/zoomed by its own live x/y/scale the same
+        // way renderWith/renderCacheSeed already thread through. Without this, TransitionFlipLeft/
+        // TransitionFlipRight/TransitionSphere - which all bail out on a null pageRect rather than
+        // treating it as screen-shaped - would just never draw a Render page at all.
+        override fun pageRect(dst: GPUTexture): FloatArray = floatArrayOf(
+            0.5f + scale * (x - 0.5f),
+            0.5f + scale * (y - 0.5f),
+            0.5f + scale * (x + 0.5f),
+            0.5f + scale * (y + 0.5f),
+        )
+
+        // Set by renderWith right before calling render(), and only valid for the duration of
+        // that call - rect/circle/text read it instead of taking a pass parameter, since there's
+        // only ever one pass open per render() call (see the class doc).
+        private lateinit var pass: GPURenderPassEncoder
+
+        /** Draws this page's content. Use [rect]/[circle]/[text] to draw into the open pass. */
         open fun render(
-            pass: GPURenderPassEncoder,
+            dst: GPUTexture,
             x: Float,
             y: Float,
             scale: Float,
-            dst: GPUTexture
         ) {
         }
 
         protected fun rect(
-            pass: GPURenderPassEncoder,
-            x1: Float,
-            y1: Float,
-            x2: Float,
-            y2: Float,
-            color: Int
-        ) =
-            Draw.rect(pass, x1, y1, x2, y2, color)
+            x1: Float, y1: Float, x2: Float, y2: Float, color: Int
+        ) = Draw.rect(pass, x1, y1, x2, y2, color)
+
+        /**
+         * Fills this page's own [width] x [height] footprint with [color] - unlike [rect]'s raw
+         * [dst]-relative `[0,1]` coordinates (which always cover the *entire* [dst], full stop),
+         * this is sized and positioned from this page's own declared [width]/[height] plus the
+         * same [x]/[y]/[scale] [render] itself received, rather than assuming this page fills the
+         * whole of [dst] the way [renderWith]'s full-[dst] clear does. Matters once [dst] is
+         * shared with other pages ([ca.mpreg.webgpuviewer.viewer.ImageViewerContinuousState])
+         * instead of being this page's own - filling all of `[0,1]` there would blank every other
+         * visible page too, and even a same-sized fill would come out the wrong aspect ratio
+         * whenever [dst] (the real screen) isn't [width]x[height]'s own aspect.
+         */
+        protected fun fillPage(dst: GPUTexture, x: Float, y: Float, scale: Float, color: Int) {
+            val halfWidthFrac = scale * width / (2f * dst.width)
+            val halfHeightFrac = scale * height / (2f * dst.height)
+            val cx = 0.5f + scale * x
+            val cy = 0.5f + scale * y
+            rect(
+                cx - halfWidthFrac,
+                cy - halfHeightFrac,
+                cx + halfWidthFrac,
+                cy + halfHeightFrac,
+                color
+            )
+        }
 
         protected fun circle(
-            pass: GPURenderPassEncoder,
-            cx: Float,
-            cy: Float,
-            radius: Float,
-            color: Int
-        ) =
-            Draw.circle(pass, cx, cy, radius, color)
+            cx: Float, cy: Float, radius: Float, color: Int
+        ) = Draw.circle(pass, cx, cy, radius, color)
+
+        protected fun text(
+            dst: GPUTexture,
+            font: Font,
+            text: String,
+            x: Float,
+            y: Float,
+            size: Float,
+            color: Int,
+            align: TextAlign = TextAlign.Left,
+            maxWidth: Float = Float.POSITIVE_INFINITY,
+        ) = Draw.text(pass, dst, font, text, x, y, size, color, align, maxWidth)
+
+        protected fun text(
+            dst: GPUTexture,
+            context: Context,
+            fontFamily: FontFamily,
+            text: String,
+            x: Float,
+            y: Float,
+            size: Float,
+            color: Int,
+            weight: FontWeight = FontWeight.Normal,
+            style: FontStyle = FontStyle.Normal,
+            align: TextAlign = TextAlign.Left,
+            maxWidth: Float = Float.POSITIVE_INFINITY,
+        ) = Draw.text(
+            pass, dst, context, fontFamily, text, x, y, size, color, weight, style, align, maxWidth
+        )
 
         final override fun renderWith(
             encoder: GPUCommandEncoder, x: Float, y: Float, scale: Float, dst: GPUTexture
         ) {
             // Clears and draws in the same pass, rather than a separate clear pass first - see
             // ImagePage.renderWith's default for why that's still needed for a page (like Dummy)
-            // that doesn't override this at all.
-            val pass = encoder.beginRenderPass(
+            // that doesn't override this at all. [dst] is this call's own - a rotated screen
+            // buffer or a Transition's per-page cache slot - so nothing else on screen depends on
+            // whatever was already there.
+            openPassAndRender(encoder, x, y, scale, dst, clear = true)
+        }
+
+        /**
+         * As [renderWith], but loads [dst] instead of clearing it -
+         * [ca.mpreg.webgpuviewer.viewer.ImageViewerContinuousState] uses this instead, since there
+         * [dst] is one screen texture shared by several visible pages at once, and clearing it
+         * would blank every other one. [render] is responsible for painting over every pixel of
+         * its own footprint here - see [Progress] painting a full background rect before its
+         * circle - since anything it doesn't touch keeps whatever [dst] already had (a decoded
+         * neighbour's pixels, or simply undefined content the first time a fresh texture is used
+         * - [ImageViewerContinuousState] clears once up front to guard against that).
+         */
+        internal fun renderLoaded(
+            encoder: GPUCommandEncoder, x: Float, y: Float, scale: Float, dst: GPUTexture
+        ) {
+            openPassAndRender(encoder, x, y, scale, dst, clear = false)
+        }
+
+        private fun argbToGPUColor(color: Int): GPUColor {
+            val r = ((color shr 16) and 0xFF) / 255.0
+            val g = ((color shr 8) and 0xFF) / 255.0
+            val b = (color and 0xFF) / 255.0
+            val a = ((color ushr 24) and 0xFF) / 255.0
+            return GPUColor(r, g, b, a)
+        }
+
+        // Background fill driven by backgroundColor() (null by default; override it to
+        // opt in - see Progress/an app's own transition placeholder) instead of a dedicated
+        // property, since that's the exact same hook every Transition already reads for this
+        // page's letterbox colour - one override covers both without the two ever disagreeing.
+        private fun openPassAndRender(
+            encoder: GPUCommandEncoder,
+            x: Float,
+            y: Float,
+            scale: Float,
+            dst: GPUTexture,
+            clear: Boolean
+        ) {
+            val clearValue =
+                backgroundColor?.let { argbToGPUColor(it) } ?: GPUColor(0.0, 0.0, 0.0, 0.0)
+
+            val openedPass = encoder.beginRenderPass(
                 GPURenderPassDescriptor(
                     colorAttachments = arrayOf(
                         GPURenderPassColorAttachment(
                             view = dst.createView(),
-                            loadOp = LoadOp.Clear,
+                            loadOp = if (clear) LoadOp.Clear else LoadOp.Load,
                             storeOp = StoreOp.Store,
-                            clearValue = GPUColor(0.0, 0.0, 0.0, 0.0)
+                            clearValue = clearValue
                         )
                     )
                 )
             )
+            pass = openedPass
             try {
-                render(pass, x, y, scale, dst)
+                // clear=true already painted the whole dst this colour via clearValue above - a
+                // page-scoped fillPage on top would be redundant. clear=false (the shared-texture
+                // continuous-mode pass) has no clear to fall back on, so paint the footprint here.
+                if (!clear) {
+                    backgroundColor?.let { fillPage(dst, x, y, scale, it) }
+                }
+                render(dst, x, y, scale)
             } finally {
-                pass.end()
+                openedPass.end()
             }
-        }
-    }
-
-    /**
-     * [Render] page that fills itself with [backgroundColor] and draws a [foregroundColor] circle
-     * centred on screen, growing from nothing to half the page's width as [progress] goes 0 to 1.
-     */
-    open class Progress(width: Int, height: Int) : Render(width, height) {
-        var progress: Float = 0f
-        var foregroundColor: Int = 0xFFFFFFFF.toInt()
-        var backgroundColor: Int = 0x00000000
-
-        override fun render(
-            pass: GPURenderPassEncoder,
-            x: Float,
-            y: Float,
-            scale: Float,
-            dst: GPUTexture
-        ) {
-            rect(pass, 0f, 0f, 1f, 1f, backgroundColor)
-
-            val diameter = dst.width * 0.5f * scale * progress.fastCoerceIn(0f, 1f)
-            if (diameter <= 0f) return
-
-            val cx = dst.width * (0.5f + scale * x)
-            val cy = dst.height * (0.5f + scale * y)
-            circle(pass, cx, cy, diameter / 2f, foregroundColor)
         }
     }
 
@@ -316,28 +442,24 @@ open class ImagePage {
 
         /** Opens a `LoadOp.Clear` pass on [dst], with a stencil attachment for [TileRenderer]'s masking. */
         private fun beginLivePass(
-            encoder: GPUCommandEncoder,
-            dst: GPUTexture,
-            tiles: TileRenderer
-        ) =
-            encoder.beginRenderPass(
-                GPURenderPassDescriptor(
-                    colorAttachments = arrayOf(
-                        GPURenderPassColorAttachment(
-                            view = dst.createView(),
-                            loadOp = LoadOp.Clear,
-                            storeOp = StoreOp.Store,
-                            clearValue = GPUColor(0.0, 0.0, 0.0, 0.0)
-                        )
-                    ),
-                    depthStencilAttachment = GPURenderPassDepthStencilAttachment(
-                        view = tiles.stencilViewFor(dst),
-                        stencilLoadOp = LoadOp.Clear,
-                        stencilStoreOp = StoreOp.Discard,
-                        stencilClearValue = 0,
+            encoder: GPUCommandEncoder, dst: GPUTexture, tiles: TileRenderer
+        ) = encoder.beginRenderPass(
+            GPURenderPassDescriptor(
+                colorAttachments = arrayOf(
+                    GPURenderPassColorAttachment(
+                        view = dst.createView(),
+                        loadOp = LoadOp.Clear,
+                        storeOp = StoreOp.Store,
+                        clearValue = GPUColor(0.0, 0.0, 0.0, 0.0)
                     )
+                ), depthStencilAttachment = GPURenderPassDepthStencilAttachment(
+                    view = tiles.stencilViewFor(dst),
+                    stencilLoadOp = LoadOp.Clear,
+                    stencilStoreOp = StoreOp.Discard,
+                    stencilClearValue = 0,
                 )
             )
+        )
 
         /** Opens a `LoadOp.Clear` pass on [tex], no stencil attachment - a transition's cache is never masked. */
         private fun beginCachePass(encoder: GPUCommandEncoder, tex: GPUTexture) =
@@ -363,9 +485,7 @@ open class ImagePage {
          * masking) rather than sharing one from the caller - see [Render] for why that split exists.
          */
         override fun drawLive(
-            encoder: GPUCommandEncoder,
-            dst: GPUTexture,
-            tiles: TileRenderer
+            encoder: GPUCommandEncoder, dst: GPUTexture, tiles: TileRenderer
         ): Boolean {
             if (isAnimated) {
                 val pass = beginLivePass(encoder, dst, tiles)
@@ -405,9 +525,7 @@ open class ImagePage {
          * cache is never stencil-masked either way).
          */
         override fun renderCacheSeed(
-            encoder: GPUCommandEncoder,
-            tex: GPUTexture,
-            tiles: TileRenderer
+            encoder: GPUCommandEncoder, tex: GPUTexture, tiles: TileRenderer
         ) {
             if (isAnimated) {
                 val pass = beginCachePass(encoder, tex)
@@ -471,7 +589,7 @@ open class ImagePage {
             return image.placement(dst, x, y, scale)
         }
 
-        override fun firstImageBackgroundColor(): Int? = images.firstOrNull()?.backgroundColor
+        override val backgroundColor: Int? = images.firstOrNull()?.backgroundColor
 
         override fun drawBackgroundColumns(
             pass: GPURenderPassEncoder, dst: GPUTexture, offsetX: Float, offsetY: Float
@@ -485,12 +603,7 @@ open class ImagePage {
                 val x1 = if (img.position == Image.Position.SINGLE) 0f else placedRect[0]
                 val x2 = if (img.position == Image.Position.SINGLE) 1f else placedRect[2]
                 Draw.rect(
-                    pass,
-                    offsetX + x1,
-                    offsetY,
-                    offsetX + x2,
-                    offsetY + 1f,
-                    img.backgroundColor
+                    pass, offsetX + x1, offsetY, offsetX + x2, offsetY + 1f, img.backgroundColor
                 )
             }
         }
@@ -739,11 +852,7 @@ open class ImagePage {
      * pass instead of paying for a separate one.
      */
     open fun renderWith(
-        encoder: GPUCommandEncoder,
-        x: Float,
-        y: Float,
-        scale: Float,
-        dst: GPUTexture
+        encoder: GPUCommandEncoder, x: Float, y: Float, scale: Float, dst: GPUTexture
     ) {
         Draw.clear(encoder, dst, 0)
     }
@@ -758,9 +867,7 @@ open class ImagePage {
      * it's safe to prewarm the next page - always false here, since only [Images] has a tile cache.
      */
     internal open fun drawLive(
-        encoder: GPUCommandEncoder,
-        dst: GPUTexture,
-        tiles: TileRenderer
+        encoder: GPUCommandEncoder, dst: GPUTexture, tiles: TileRenderer
     ): Boolean {
         renderWith(encoder, 0f, 0f, 1f, dst)
         return false
@@ -772,9 +879,7 @@ open class ImagePage {
      * Just [renderWith] by default; [Images] overrides this the same way it overrides [drawLive].
      */
     internal open fun renderCacheSeed(
-        encoder: GPUCommandEncoder,
-        tex: GPUTexture,
-        tiles: TileRenderer
+        encoder: GPUCommandEncoder, tex: GPUTexture, tiles: TileRenderer
     ) {
         renderWith(encoder, 0f, 0f, 1f, tex)
     }
@@ -810,11 +915,13 @@ open class ImagePage {
     open fun pageRect(dst: GPUTexture): FloatArray? = null
 
     /**
-     * The color a transition should blend/fade toward for this page as a whole, read from its
-     * first image's own [ca.mpreg.webgpuviewer.renderer.Image.backgroundColor] - null for a
-     * non-[Images] page, which has no image to read one from.
+     * The color a transition should blend/fade toward for this page as a whole - [Images] reads
+     * it from its first image's own [ca.mpreg.webgpuviewer.renderer.Image.backgroundColor];
+     * [Render] also uses it (when overridden non-null) as its own background fill, both during a
+     * transition and for its regular [Render.renderWith]/[Render.renderLoaded] draws - see
+     * [Render]'s class doc. Null (nothing to fill/blend toward) by default.
      */
-    open fun firstImageBackgroundColor(): Int? = null
+    open val backgroundColor: Int? = null
 
     /**
      * Draws this page's per-image background colour as separate columns at [offsetX]/[offsetY]
@@ -859,10 +966,6 @@ open class ImagePage {
     @Volatile
     var isScaleAnimating: Boolean = false
 
-    var homeScaleOverride: Float? = null
-    var homeXOverride: Float? = null
-    var homeYOverride: Float? = null
-
     var parent: ImageViewerState? = null
         set(value) {
             val wasNull = field == null
@@ -895,9 +998,21 @@ open class ImagePage {
     protected open fun halfWidthScale(halfWidth: Float, contentHeight: Float): Float =
         minOf(halfWidth / width, contentHeight / height).coerceAtLeast(0.01f)
 
-    val homeScale: Float
+    val atHome: Boolean
         get() {
-            homeScaleOverride?.let { return it.coerceAtLeast(0.01f) }
+            val eps = 0.0001f
+            return abs(x - homeX) < eps && abs(y - homeY) < eps && atHomeScale
+        }
+
+    val atHomeScale: Boolean
+        get() {
+            val eps = 0.0001f
+            return abs(scale - homeScale) < eps
+        }
+
+    var homeScale: Float = -1f
+        get() {
+            if (field > 0) return field
 
             if (contentWidth <= 0f || contentHeight <= 0f) return 0.01f
 
@@ -912,32 +1027,21 @@ open class ImagePage {
             return minOf(contentWidth / w, contentHeight / h).coerceAtLeast(0.01f)
         }
 
-    // Coerced since homeXOverride/homeYOverride are externally settable.
-    val homeX: Float
+    var homeX: Float = 0f
         get() {
+            if (field != 0f) return field
             val scale = homeScale
-            return (homeXOverride ?: maxX(scale)).fastCoerceIn(minX(scale), maxX(scale))
+            return maxX(scale).fastCoerceIn(minX(scale), maxX(scale))
         }
 
-    val homeY: Float
+    var homeY: Float = 0f
         get() {
+            if (field != 0f) return field
             val scale = homeScale
-            return (homeYOverride ?: maxY(scale)).fastCoerceIn(minY(scale), maxY(scale))
+            return maxY(scale).fastCoerceIn(minY(scale), maxY(scale))
         }
 
-    val atHome: Boolean
-        get() {
-            val eps = 0.0001f
-            return abs(x - homeX) < eps && abs(y - homeY) < eps && atHomeScale
-        }
-
-    val atHomeScale: Boolean
-        get() {
-            val eps = 0.0001f
-            return abs(scale - homeScale) < eps
-        }
-
-    var minScale = -1f
+    var minScale = 0f
         get() {
             if (field > 0) return field
             if (contentWidth <= 0f || contentHeight <= 0f) return 0.01f
@@ -951,10 +1055,11 @@ open class ImagePage {
             return minOf(contentWidth / width, contentHeight / height).coerceAtLeast(0.01f)
         }
 
-    var maxScale = -1f
+    var maxScale = 0f
         get() = if (field > 0) field else max(doubleTapScale * 2, 2f)
 
-    val doubleTapScale: Float get() = max(minScale, homeScale) * 2
+    var doubleTapScale: Float = 0f
+        get() = if (field != 0f) field else max(minScale, homeScale) * 2
 
     // BOUNDS:
     // cutout ignore:
@@ -1031,11 +1136,7 @@ open class ImagePage {
         val trimmed = scale >= homeScale
         val (top, bottom) = yEdges(trimmed) ?: (0 to height)
         val (floor, natMax) = rawBounds(
-            height,
-            top.toFloat(),
-            bottom.toFloat(),
-            parent.height,
-            scale
+            height, top.toFloat(), bottom.toFloat(), parent.height, scale
         )
         val slack = floor > natMax
         val center = (floor + natMax) / 2f

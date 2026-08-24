@@ -9,6 +9,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.util.fastCoerceAtLeast
 import androidx.compose.ui.util.fastCoerceAtMost
 import androidx.webgpu.GPUColor
@@ -45,6 +46,8 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
     val height get() = renderer.height
 
     var dpi = Resources.getSystem().displayMetrics.densityDpi / 100f
+    var density: Density =
+        Density(density = Resources.getSystem().displayMetrics.density, fontScale = 1f)
 
     var scope: CoroutineScope? = null
 

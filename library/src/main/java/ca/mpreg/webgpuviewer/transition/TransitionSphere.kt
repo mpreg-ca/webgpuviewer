@@ -195,8 +195,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
         // Draw single background rect that transitions between colors
         val t = if (frac > 0f) frac else -frac
-        val bg1 = page1.firstImageBackgroundColor() ?: 0xFF000000.toInt()
-        val bg2 = page2.firstImageBackgroundColor() ?: 0xFF000000.toInt()
+        val bg1 = page1.backgroundColor ?: 0xFF000000.toInt()
+        val bg2 = page2.backgroundColor ?: 0xFF000000.toInt()
         Draw.rect(encoder, dst, 0f, 0f, 1f, 1f, blendBackgroundColor(bg1, bg2, t))
 
         if (frac > 0f) {
