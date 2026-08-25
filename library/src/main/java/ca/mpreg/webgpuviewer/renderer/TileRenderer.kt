@@ -105,7 +105,7 @@ internal fun solveImagePlacement(
  * unfiltered. Each frame draws the fast path, then blits whatever filtered tiles already exist
  * on top, while a background worker fills in the rest a few at a time.
  *
- * One grid per whole [ImagePage.Images], not per image, so a spread's seam bakes into whichever tile
+ * One grid per whole [ImagePage.ImageSingle], not per image, so a spread's seam bakes into whichever tile
  * straddles it rather than meeting two independently-snapped layers.
  *
  * The same grid serves both viewers. The paged viewer has one page on screen at a time and
@@ -211,11 +211,9 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         }
     }
 
-    /** One grid per whole [ImagePage.Images] - both images of a spread share it, seam baked in. */
+    /** One grid per whole [ImagePage.ImageSingle] - both images of a spread share it, seam baked in. */
     private class PageTiles(
-        var scale: Float,
-        val page: ImagePage.Images,
-        val frameUniform: GPUBuffer
+        var scale: Float, val page: ImagePage.ImageSingle, val frameUniform: GPUBuffer
     ) {
         val tiles = HashMap<Long, Tile>()
         val pending = HashSet<Long>()
@@ -268,7 +266,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
 
     // Access-ordered so getOrPut's read-then-maybe-write always moves the touched page to the
     // end (most recently drawn), whether or not it was already present - see RETAIN_MARGIN.
-    private val pages = LinkedHashMap<ImagePage.Images, PageTiles>(16, 0.75f, true)
+    private val pages = LinkedHashMap<ImagePage.ImageSingle, PageTiles>(16, 0.75f, true)
 
     private fun key(tx: Int, ty: Int) = (tx.toLong() shl 32) or (ty.toLong() and 0xFFFFFFFFL)
 
@@ -443,26 +441,23 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     /**
      * Left/right screen-pixel extent of [page] from its own anchor (x=0), in [pageScale] units.
      *
-     * Not symmetric halves of [ImagePage.width]: a LEFT/RIGHT image extends outward from the
-     * anchor by its *own* width, so the anchor sits at the spread's seam, not the centre of its
-     * combined footprint - they can differ, e.g. a cover with no partner. No LEFT/RIGHT image at
-     * all is the ordinary centred case, so its extent stays symmetric.
+     * Not symmetric halves of [ImagePage.width] for an [ImagePage.ImageSpread]: each side extends
+     * outward by its *own* width, so the anchor sits at the seam rather than the centre of the
+     * combined footprint - they differ whenever the sides do, e.g. a cover with no partner. A
+     * plain [ImagePage.ImageSingle] has no seam, so its extent stays symmetric.
      */
-    private fun pageHorizontalExtent(page: ImagePage.Images, pageScale: Float): Pair<Float, Float> {
-        val leftWidth = page.images.firstOrNull { it?.position == Image.Position.LEFT }?.width
-        val rightWidth = page.images.firstOrNull { it?.position == Image.Position.RIGHT }?.width
-        if (leftWidth == null && rightWidth == null) {
-            val half = pageScale * page.width / 2f
-            return half to half
-        }
-        return pageScale * (leftWidth ?: 0) to pageScale * (rightWidth ?: 0)
+    private fun pageHorizontalExtent(
+        page: ImagePage.ImageSingle, pageScale: Float
+    ): Pair<Float, Float> {
+        val (leftWidth, rightWidth) = page.horizontalExtent()
+        return pageScale * leftWidth to pageScale * rightWidth
     }
 
     /** [pageScale]/[anchorX]/[anchorY] a paged overload resolves its (x, y, scale) placement to. */
     private class PagedAnchor(val pageScale: Float, val anchorX: Float, val anchorY: Float)
 
     private fun pagedAnchor(
-        page: ImagePage.Images, dst: GPUTexture, x: Float, y: Float, scale: Float
+        page: ImagePage.ImageSingle, dst: GPUTexture, x: Float, y: Float, scale: Float
     ): PagedAnchor {
         // Pin the grid to the animation's target while actually scale-animating home, so
         // drawCore wipes it once instead of every interpolated frame. Gated on isScaleAnimating,
@@ -502,7 +497,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     )
 
     private fun gridPlacement(
-        page: ImagePage.Images,
+        page: ImagePage.ImageSingle,
         dst: GPUTexture,
         anchorX: Float,
         anchorY: Float,
@@ -536,8 +531,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
      * question - see [tileVisible].
      */
     private inline fun forEachWantedGridTile(
-        gp: GridPlacement,
-        action: (txi: Int, tyi: Int) -> Unit
+        gp: GridPlacement, action: (txi: Int, tyi: Int) -> Unit
     ) {
         val ts = TILE_SIZE.toFloat()
         val tx0 = floor(gp.wantL / ts).toInt()
@@ -569,7 +563,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     )
 
     private fun continuousAnchor(
-        page: ImagePage.Images,
+        page: ImagePage.ImageSingle,
         dst: GPUTexture,
         cameraDocY: Float,
         docTop: Float,
@@ -594,7 +588,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
      * [page]-relative (x, y).
      */
     fun isFullyCovered(
-        page: ImagePage.Images, dst: GPUTexture, x: Float, y: Float, scale: Float
+        page: ImagePage.ImageSingle, dst: GPUTexture, x: Float, y: Float, scale: Float
     ): Boolean {
         val a = pagedAnchor(page, dst, x, y, scale)
         return isFullyCoveredCore(
@@ -609,7 +603,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
      * pixels at zoom 1).
      */
     fun isFullyCovered(
-        page: ImagePage.Images,
+        page: ImagePage.ImageSingle,
         dst: GPUTexture,
         cameraDocY: Float,
         docTop: Float,
@@ -632,7 +626,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
      * call may race ahead of [draw] invalidating a grid whose page just shifted.
      */
     private fun isFullyCoveredCore(
-        page: ImagePage.Images,
+        page: ImagePage.ImageSingle,
         dst: GPUTexture,
         anchorX: Float,
         anchorY: Float,
@@ -641,7 +635,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         suppressGeneration: Boolean
     ): Boolean {
         if (page.destroyed || !page.highQuality || page.isAnimated || suppressGeneration) return false
-        if (page.images.isEmpty() || page.images.all { it == null || it.mipmaps.isEmpty() }) return false
+        if (!page.hasUploadedImage) return false
 
         val st = pages[page] ?: return false
         if (st.scale != pageScale || st.centerYOffset != centerYOffset || !st.stable) return false
@@ -667,9 +661,9 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
      * when something new lands, instead of re-deriving a "done yet" boolean that has to agree
      * with [drawCore] (see [forEachWantedGridTile]'s doc). Null if the page isn't drawable.
      */
-    fun availableTileKeys(page: ImagePage.Images, dst: GPUTexture): Set<Long>? {
+    fun availableTileKeys(page: ImagePage.ImageSingle, dst: GPUTexture): Set<Long>? {
         if (page.destroyed || !page.highQuality || page.isAnimated) return null
-        if (page.images.isEmpty() || page.images.all { it == null || it.mipmaps.isEmpty() }) return null
+        if (!page.hasUploadedImage) return null
 
         val st = pages[page] ?: return null
         val a = pagedAnchor(page, dst, 0f, 0f, 1f)
@@ -696,9 +690,9 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
      * Doesn't run [draw]'s retain-window trim either; that catches this grid once the page it
      * displaced becomes current and calls [draw] again.
      */
-    fun prewarm(page: ImagePage.Images, dst: GPUTexture) {
+    fun prewarm(page: ImagePage.ImageSingle, dst: GPUTexture) {
         if (page.destroyed || !page.highQuality || page.isAnimated) return
-        if (page.images.isEmpty() || page.images.all { it == null || it.mipmaps.isEmpty() }) return
+        if (!page.hasUploadedImage) return
 
         val a = pagedAnchor(page, dst, 0f, 0f, 1f)
         val st = pages.getOrPut(page) {
@@ -768,11 +762,11 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
      *
      * [ImagePage.Render] pages are drawn by their own override and animated pages swap images per frame -
      * neither worth the cache's sharpness, so both stay on the fast/plain path instead via
-     * [ImagePage.Images.highQuality] being false.
+     * [ImagePage.ImageSingle.highQuality] being false.
      */
     fun draw(
         pass: GPURenderPassEncoder,
-        page: ImagePage.Images,
+        page: ImagePage.ImageSingle,
         dst: GPUTexture,
         x: Float,
         y: Float,
@@ -807,7 +801,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
      */
     fun draw(
         pass: GPURenderPassEncoder,
-        page: ImagePage.Images,
+        page: ImagePage.ImageSingle,
         dst: GPUTexture,
         cameraDocY: Float,
         docTop: Float,
@@ -839,7 +833,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
      */
     private fun drawCore(
         pass: GPURenderPassEncoder,
-        page: ImagePage.Images,
+        page: ImagePage.ImageSingle,
         dst: GPUTexture,
         anchorX: Float,
         anchorY: Float,
@@ -850,7 +844,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         useStencilMask: Boolean = false
     ) {
         if (page.destroyed || !page.highQuality || page.isAnimated) return
-        if (page.images.isEmpty() || page.images.all { it == null || it.mipmaps.isEmpty() }) return
+        if (!page.hasUploadedImage) return
 
         val st = pages.getOrPut(page) {
             PageTiles(
@@ -1087,14 +1081,14 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     ) {
         val ts = TILE_SIZE.toFloat()
         val s = st.scale
-        st.page.images.forEach { image ->
-            image ?: return@forEach
-            if (image.mipmaps.isEmpty()) return@forEach
-            // In raw (unscaled) pixels since solveImagePlacement scales by s itself.
-            val targetX = -tx * ts + s * (image.spreadOffsetX + image.x)
-            val targetY = st.centerYOffset - ty * ts + s * image.y
-            val (x, y) = solveImagePlacement(targetX, targetY, s, image, ts, ts)
-            RenderPage.render(pass, image, texture, x, y, s)
+        st.page.forEachImage { image, srcOffsetX ->
+            if (image.mipmaps.isNotEmpty()) {
+                // In raw (unscaled) pixels since solveImagePlacement scales by s itself.
+                val targetX = -tx * ts + s * (srcOffsetX + image.x)
+                val targetY = st.centerYOffset - ty * ts + s * image.y
+                val (x, y) = solveImagePlacement(targetX, targetY, s, image, ts, ts)
+                RenderPage.render(pass, image, texture, x, y, s)
+            }
         }
     }
 
@@ -1103,7 +1097,8 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
      * relative labels that get reassigned to a different actual page on every turn, so this is
      * what lets a log reader tell whether two log lines are really about the same page.
      */
-    private fun pageId(page: ImagePage.Images) = Integer.toHexString(System.identityHashCode(page))
+    private fun pageId(page: ImagePage.ImageSingle) =
+        Integer.toHexString(System.identityHashCode(page))
 
     /**
      * Shared setup for [renderFullyTiled]/[blitAvailableTiles]: draws whatever's cached into
@@ -1111,10 +1106,10 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
      * grid's state - or null if [page] has no drawable images.
      */
     private fun drawGridForFullPage(
-        pass: GPURenderPassEncoder, page: ImagePage.Images, dst: GPUTexture
+        pass: GPURenderPassEncoder, page: ImagePage.ImageSingle, dst: GPUTexture
     ): PageTiles? {
         if (page.destroyed || !page.highQuality || page.isAnimated) return null
-        if (page.images.isEmpty() || page.images.all { it == null || it.mipmaps.isEmpty() }) return null
+        if (!page.hasUploadedImage) return null
 
         val a = pagedAnchor(page, dst, 0f, 0f, 1f)
         drawCore(
@@ -1163,9 +1158,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
      * drawing nothing, if the page has no drawable images.
      */
     fun renderFullyTiled(
-        pass: GPURenderPassEncoder,
-        page: ImagePage.Images,
-        dst: GPUTexture
+        pass: GPURenderPassEncoder, page: ImagePage.ImageSingle, dst: GPUTexture
     ): Boolean {
         val st = drawGridForFullPage(pass, page, dst) ?: return false
         if (st.pending.isEmpty()) return true
@@ -1192,11 +1185,8 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
      * drawable images.
      */
     fun blitAvailableTiles(
-        pass: GPURenderPassEncoder,
-        page: ImagePage.Images,
-        dst: GPUTexture
-    ): Boolean =
-        drawGridForFullPage(pass, page, dst) != null
+        pass: GPURenderPassEncoder, page: ImagePage.ImageSingle, dst: GPUTexture
+    ): Boolean = drawGridForFullPage(pass, page, dst) != null
 
     /**
      * Render one [TILE_SIZE] tile at ([tx], [ty]) into [st] via [render], then store it. The GPU

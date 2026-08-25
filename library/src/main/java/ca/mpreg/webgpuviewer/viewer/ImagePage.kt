@@ -1,7 +1,6 @@
 package ca.mpreg.webgpuviewer.viewer
 
 import android.content.Context
-import android.graphics.Bitmap
 import android.util.Log
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animate
@@ -38,7 +37,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.yield
-import java.nio.ByteBuffer
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -48,9 +46,9 @@ import kotlin.time.Duration.Companion.milliseconds
  * A page in the viewer, with shared transform (x, y, scale), pan/zoom-to-fit bounds, and
  * animation.
  *
- * [Images] is the ordinary case - one or two decoded [Image]s. [Dummy] is a placeholder with
- * known dimensions but no content. [Render]/[Progress] draw their own content via [renderWith]
- * instead of blitting an image.
+ * [ImageSingle] is the ordinary single-page case; [ImageSpread] composes two [ImageSingle] pages
+ * side by side for a dual-page spread. [Dummy] is a placeholder with known dimensions but no content.
+ * [Render]/[Progress] draw their own content via [renderWith] instead of blitting an image.
  *
  * Handles:
  * - Transform state (x, y, scale) and home position calculations
@@ -63,13 +61,14 @@ open class ImagePage {
     class Dummy(override val width: Int, override val height: Int) : ImagePage()
 
     /**
-     * ImagePage whose content is supplied by an app-overridden [render] instead of an [Image] - for
-     * rendering progress indicators or other app-drawn content with its own shader. Called
-     * instead of blitting a texture wherever this page would otherwise be drawn into the regular
-     * view or a [ca.mpreg.webgpuviewer.transition.Transition]'s cache texture - unlike [Images],
-     * it has no [Images.highQuality] to opt into either path, so it always draws this way.
+     * ImagePage whose content is supplied by an app-overridden [render] instead of a decoded
+     * image - for rendering progress indicators or other app-drawn content with its own shader.
+     * Called instead of blitting a texture wherever this page would otherwise be drawn into the
+     * regular view or a [ca.mpreg.webgpuviewer.transition.Transition]'s cache texture - unlike
+     * [ImageSingle], it has no [ImageSingle.highQuality] to opt into either path, so it always
+     * draws this way.
      *
-     * Opens one pass per [render] call (no stencil attachment - unlike [Images], nothing here
+     * Opens one pass per [render] call (no stencil attachment - unlike [ImageSingle], nothing here
      * needs [ca.mpreg.webgpuviewer.renderer.TileRenderer]'s masking), shared by every [rect]/
      * [circle] call inside it rather than each opening its own.
      *
@@ -95,8 +94,8 @@ open class ImagePage {
         // Unlike the base ImagePage default (fixed "home" position, right for Dummy - it has
         // nothing pan-worthy anyway), a Render page's own render() gets its *live* pan/zoom
         // transform - the same x/y/scale gestures already drive on any ImagePage - so e.g. a
-        // custom Render page's own drawn content can track a drag/pinch the same way an Images
-        // page's would, rather than being stuck rendering at (0, 0, 1) forever.
+        // custom Render page's own drawn content can track a drag/pinch the same way an
+        // ImageSingle page's would, rather than being stuck rendering at (0, 0, 1) forever.
         override fun drawLive(
             encoder: GPUCommandEncoder, dst: GPUTexture, tiles: TileRenderer
         ): Boolean {
@@ -110,7 +109,7 @@ open class ImagePage {
             renderWith(encoder, x, y, scale, tex)
         }
 
-        // render() treats dst as entirely its own canvas (see the class doc) - so unlike Images,
+        // render() treats dst as entirely its own canvas (see the class doc) - so unlike ImageSingle,
         // whose real content only ever occupies part of dst, this page's rect within a flat
         // render of it IS the whole thing, just panned/zoomed by its own live x/y/scale the same
         // way renderWith/renderCacheSeed already thread through. Without this, TransitionFlipLeft/
@@ -129,17 +128,27 @@ open class ImagePage {
         private lateinit var pass: GPURenderPassEncoder
 
         /** Draws this page's content. Use [rect]/[circle]/[text] to draw into the open pass. */
-        open fun render(
-            dst: GPUTexture,
-            x: Float,
-            y: Float,
-            scale: Float,
-        ) {
+        open fun render(dst: GPUTexture, x: Float, y: Float, scale: Float) {}
+
+        @Volatile
+        private var _renderVersion: Int = 0
+
+        /** Bumped by [invalidate], so a page turn sees the drawn content change. */
+        override val frameVersion: Int
+            get() = _renderVersion
+
+        /**
+         * As [ImagePage.invalidate], bumping [frameVersion] so a page turn in flight re-seeds its
+         * cache slot too - content that moves on its own (a progress ring, a countdown) would
+         * otherwise freeze for the length of the turn.
+         */
+        override fun invalidate() {
+            _renderVersion++
+            super.invalidate()
         }
 
-        protected fun rect(
-            x1: Float, y1: Float, x2: Float, y2: Float, color: Int
-        ) = Draw.rect(pass, x1, y1, x2, y2, color)
+        protected fun rect(x1: Float, y1: Float, x2: Float, y2: Float, color: Int) =
+            Draw.rect(pass, x1, y1, x2, y2, color)
 
         /**
          * Fills this page's own [width] x [height] footprint with [color] - unlike [rect]'s raw
@@ -166,9 +175,8 @@ open class ImagePage {
             )
         }
 
-        protected fun circle(
-            cx: Float, cy: Float, radius: Float, color: Int
-        ) = Draw.circle(pass, cx, cy, radius, color)
+        protected fun circle(cx: Float, cy: Float, radius: Float, color: Int) =
+            Draw.circle(pass, cx, cy, radius, color)
 
         protected fun text(
             dst: GPUTexture,
@@ -277,109 +285,58 @@ open class ImagePage {
     }
 
     /**
-     * A page backed by one or two decoded images.
-     *
-     * For single page: images = [image]
-     * For dual page spread: images = [leftImage, rightImage]
+     * A page backed by a single decoded image, read straight off [currentImage]. [ImageSpread]
+     * extends this to compose two side by side, overriding each member that needs both; pass
+     * setup, tile cache and background fade math are shared as-is.
      */
-    class Images(val images: List<Image?>) : ImagePage() {
+    open class ImageSingle(val image: Image?) : ImagePage() {
 
-        constructor(image: Image?) : this(listOf(image))
-        constructor(left: Image?, right: Image?) : this(listOf(left, right))
-
-        companion object {
-            suspend operator fun invoke(
-                pixels: ByteBuffer, width: Int, height: Int, createMipMaps: Boolean = true
-            ): Images {
-                return Images(Image(pixels, width, height, createMipMaps))
-            }
-
-            suspend operator fun invoke(bitmap: Bitmap, createMipMaps: Boolean = true): Images {
-                val buf = ByteBuffer.allocateDirect(bitmap.byteCount)
-                bitmap.copyPixelsToBuffer(buf)
-                return Images(buf, bitmap.width, bitmap.height, createMipMaps)
-            }
+        /** Animated from the start - no separate [startAnimationLoop] call needed. */
+        constructor(frames: List<Pair<Image, Int>>) : this(frames.firstOrNull()?.first) {
+            startAnimationLoop(frames)
         }
 
-        override val isDecoded: Boolean
-            get() = images.any { it != null }
-
-        /** If true, this page owns its images and will clean them up. If false, images are borrowed. */
-        var ownsImages: Boolean = true
+        /** If true, this page owns its image and will clean it up. If false, it's borrowed - see
+         *  [ImageSpread], which composes existing pages without taking ownership of their images. */
+        var ownsImage: Boolean = true
 
         /**
          * When false, this page skips [ca.mpreg.webgpuviewer.renderer.TileRenderer]'s tile cache
          * entirely and its fast path renders through [renderPage] with `linear = false` instead of
          * the default `linear = true` - for content not worth either path's extra correctness or
-         * sharpness, such as an app-drawn transition/error bitmap.
+         * sharpness, such as an app-drawn transition/error bitmap. A `var`, not a `val`, so
+         * [ImageSpread] can override it to fan a set-through to both sides instead of just holding
+         * its own copy.
          */
-        var highQuality: Boolean = true
+        open var highQuality: Boolean = true
 
-        /** Total width (sum of image widths) */
         override val width: Int
-            get() = images.filterNotNull().sumOf { it.width }
-
-        /** Total height (max of image heights) */
+            get() = image?.width ?: 0
         override val height: Int
-            get() = images.filterNotNull().maxOfOrNull { it.height } ?: 0
+            get() = image?.height ?: 0
 
-        /**
-         * Visible width after trim. For dual pages, inner edges are ignored.
-         */
         override val trimWidth: Int
-            get() {
-                if (images.size == 2) {
-                    val left = images[0]
-                    val right = images[1]
-                    // Left: from left trim to full width (ignore right trim)
-                    val leftW = left?.let { it.width - (it.trim?.left ?: 0) } ?: 0
-                    // Right: from 0 to right trim (ignore left trim)
-                    val rightW = right?.let { it.trim?.right ?: it.width } ?: 0
-                    return leftW + rightW
-                }
-                return images.sumOf { it?.trim?.width() ?: it?.width ?: 0 }
-            }
-
-        /** Visible height after trim (max of trim heights) */
+            get() = image?.let { it.trim?.width() ?: it.width } ?: 0
         override val trimHeight: Int
-            get() = images.maxOfOrNull { it?.trim?.height() ?: it?.height ?: 0 } ?: 0
-
-        /** True if this page uses half-screen layout (dual page or single LEFT/RIGHT) */
-        override val isHalfWidth: Boolean
-            get() = images.size == 2 || images.firstOrNull()?.position.let {
-                it == Image.Position.LEFT || it == Image.Position.RIGHT
-            }
+            get() = image?.let { it.trim?.height() ?: it.height } ?: 0
 
         override fun xEdges(trimmed: Boolean): Pair<Float, Float> {
-            if (isHalfWidth || !trimmed) return 0f to width.toFloat()
-            val trim = images.firstOrNull()?.trim ?: return 0f to width.toFloat()
+            if (!trimmed) return 0f to width.toFloat()
+            val trim = image?.trim ?: return 0f to width.toFloat()
             return trim.left.toFloat() to trim.right.toFloat()
         }
 
         override fun yEdges(trimmed: Boolean): Pair<Int, Int>? {
-            if (isHalfWidth || !trimmed || images.all { it?.trim == null }) return null
-            val trimTop =
-                images.mapNotNull { img -> img?.let { it.trim?.top ?: 0 } }.minOrNull() ?: 0
-            val trimBottom =
-                images.mapNotNull { it?.trim?.bottom ?: it?.height }.maxOrNull() ?: height
-            return trimTop to trimBottom
+            if (!trimmed) return null
+            val trim = image?.trim ?: return null
+            return trim.top to trim.bottom
         }
-
-        /**
-         * Each image independently fit to its own half, since a dual spread's two images can
-         * differ in size - unlike [width]/[height]'s combined span, which [ImagePage]'s default (for a
-         * single non-spread image) uses instead.
-         */
-        override fun halfWidthScale(halfWidth: Float, contentHeight: Float): Float =
-            images.filterNotNull().minOfOrNull { img ->
-                minOf(halfWidth / img.width, contentHeight / img.height)
-            }?.coerceAtLeast(0.01f) ?: 0.01f
 
         private var animationLoop: Job? = null
         private var frames: List<Pair<Image, Int>>? = null
         private var currentFrameImage: Image? = null
 
-        /** True while an animation frame loop owns [image]. The tile cache skips animated pages. */
+        /** True while an animation frame loop owns [currentImage]. The tile cache skips animated pages. */
         override val isAnimated: Boolean
             get() = frames != null
 
@@ -391,10 +348,43 @@ open class ImagePage {
             get() = _frameVersion
 
         /** Current image for rendering (may change during animation) */
-        val image: Image?
-            get() = currentFrameImage ?: images.firstOrNull()
+        open val currentImage: Image?
+            get() = currentFrameImage ?: image
 
-        fun startAnimationLoop(frames: List<Pair<Image, Int>>, invalidate: () -> Unit) {
+        /**
+         * Runs [action] for each image drawn right now, with its pixel offset from the page
+         * anchor - [currentImage] at 0 here, both sides for an [ImageSpread]. For callers that
+         * place images with their own math ([ca.mpreg.webgpuviewer.renderer.TileRenderer],
+         * [ImageViewerContinuousState]) instead of [renderPage].
+         */
+        internal open fun forEachImage(action: (image: Image, offsetX: Float) -> Unit) {
+            currentImage?.let { action(it, 0f) }
+        }
+
+        /** True once at least one of this page's images has been uploaded and can be drawn. */
+        internal open val hasUploadedImage: Boolean
+            get() = currentImage?.mipmaps?.isNotEmpty() == true
+
+        override val isDecoded: Boolean
+            get() = currentImage != null
+
+        /**
+         * Left/right extent from this page's own anchor, in raw pixels at scale 1 - symmetric
+         * halves of [width] by default; [ImageSpread] overrides for its asymmetric seam-based
+         * shape.
+         */
+        internal open fun horizontalExtent(): Pair<Float, Float> {
+            val half = width / 2f
+            return half to half
+        }
+
+        /** As [ImagePage.invalidate], over the same [frameVersion] the animation loop drives. */
+        override fun invalidate() {
+            _frameVersion++
+            super.invalidate()
+        }
+
+        fun startAnimationLoop(frames: List<Pair<Image, Int>>) {
             animationLoop?.cancel()
             this.frames = frames
             currentFrameImage = frames.firstOrNull()?.first
@@ -404,13 +394,14 @@ open class ImagePage {
             animationLoop = loopScope.launch {
                 var frameIndex = 0
                 while (true) {
-                    this@Images.frames?.getOrNull(frameIndex)?.let { (img, duration) ->
+                    this@ImageSingle.frames?.getOrNull(frameIndex)?.let { (img, duration) ->
                         currentFrameImage = img
-                        _frameVersion++
+                        // Keeps running off screen - frames stay in step with their durations,
+                        // and invalidate() asks for a redraw only while there is one to ask for.
                         invalidate()
                         delay(duration.coerceAtLeast(0).milliseconds)
                     } ?: break
-                    frameIndex = (frameIndex + 1) % (this@Images.frames?.size ?: 1)
+                    frameIndex = (frameIndex + 1) % (this@ImageSingle.frames?.size ?: 1)
                 }
             }
         }
@@ -584,28 +575,21 @@ open class ImagePage {
         }
 
         override fun pageRect(dst: GPUTexture): FloatArray? {
-            val image = images.firstOrNull() ?: return null
+            val image = currentImage ?: return null
             if (image.mipmaps.isEmpty()) return null
             return image.placement(dst, x, y, scale)
         }
 
-        override val backgroundColor: Int? = images.firstOrNull()?.backgroundColor
+        override val backgroundColor: Int?
+            get() = currentImage?.backgroundColor
 
         override fun drawBackgroundColumns(
             pass: GPURenderPassEncoder, dst: GPUTexture, offsetX: Float, offsetY: Float
         ) {
-            val renderImages = if (images.size == 1) listOf(image) else images
-            renderImages.forEach { img ->
-                img ?: return@forEach
-                if (img.mipmaps.isEmpty()) return@forEach
-                val imgOffsetX = img.spreadOffsetX / dst.width
-                val placedRect = img.placement(dst, x + imgOffsetX, y, scale)
-                val x1 = if (img.position == Image.Position.SINGLE) 0f else placedRect[0]
-                val x2 = if (img.position == Image.Position.SINGLE) 1f else placedRect[2]
-                Draw.rect(
-                    pass, offsetX + x1, offsetY, offsetX + x2, offsetY + 1f, img.backgroundColor
-                )
-            }
+            val image = currentImage ?: return
+            if (image.mipmaps.isEmpty()) return
+            // One image, so its column is the whole width - see [backgroundSpansFullWidth].
+            Draw.rect(pass, offsetX, offsetY, offsetX + 1f, offsetY + 1f, image.backgroundColor)
         }
 
         /**
@@ -694,8 +678,8 @@ open class ImagePage {
                 val pixelsPerUnitX = parent.width.toFloat() * anchorScale
                 val pixelsPerUnitY = parent.height.toFloat() * anchorScale
                 return min(
-                    boundProximity(this@Images.x, minX, maxX, pixelsPerUnitX),
-                    boundProximity(this@Images.y, minY, maxY, pixelsPerUnitY)
+                    boundProximity(this@ImageSingle.x, minX, maxX, pixelsPerUnitX),
+                    boundProximity(this@ImageSingle.y, minY, maxY, pixelsPerUnitY)
                 )
             }
 
@@ -715,8 +699,8 @@ open class ImagePage {
             val a = (origA * bgAlpha).toInt()
             if (a <= 0) return
 
-            val x1 = if (image.position == Image.Position.SINGLE) 0f else rect[0]
-            val x2 = if (image.position == Image.Position.SINGLE) 1f else rect[2]
+            val x1 = if (backgroundSpansFullWidth) 0f else rect[0]
+            val x2 = if (backgroundSpansFullWidth) 1f else rect[2]
             val origR = (image.backgroundColor shr 16) and 0xFF
             val origG = (image.backgroundColor shr 8) and 0xFF
             val origB = image.backgroundColor and 0xFF
@@ -731,28 +715,34 @@ open class ImagePage {
             }
         }
 
-        /** Walks this page's image(s), placing each one for [action] to draw against. */
-        private inline fun forEachPlacedImage(
+        /**
+         * True when the background colour paints the whole viewport rather than just the image's
+         * rect - always so with one image, which has no neighbouring column to bleed into.
+         * [ImageSpread] narrows it when it has two.
+         */
+        internal open val backgroundSpansFullWidth: Boolean
+            get() = true
+
+        /** Walks this page's image(s) via [forEachImage], placing each for [action] to draw against. */
+        private fun forEachPlacedImage(
             dst: GPUTexture,
             x: Float,
             y: Float,
             scale: Float,
             action: (image: Image, rect: FloatArray, placeX: Float, placeY: Float, placeScale: Float) -> Unit
         ) {
-            // A snapshot is captured on the main thread and drawn later, so the page may have been
-            // evicted in between. Its images' buffers are already destroyed, and touching one throws.
-            if (destroyed || images.all { it == null }) return
+            // The snapshot is captured on the main thread and drawn later, so the page may have
+            // been evicted since - its images' buffers are gone, and touching one throws.
+            if (destroyed) return
 
-            val renderImages = if (images.size == 1) listOf(image) else images
-            renderImages.forEach { img ->
-                img ?: return@forEach
-                if (img.mipmaps.isEmpty()) return@forEach
-                val offsetX = img.spreadOffsetX / dst.width
-                val placeX = this.x + x + offsetX
-                val placeY = this.y + y
-                val placeScale = this.scale * scale
-                val rect = img.placement(dst, placeX, placeY, placeScale)
-                action(img, rect, placeX, placeY, placeScale)
+            forEachImage { img, srcOffsetX ->
+                if (img.mipmaps.isNotEmpty()) {
+                    val placeX = this.x + x + srcOffsetX / dst.width
+                    val placeY = this.y + y
+                    val placeScale = this.scale * scale
+                    val rect = img.placement(dst, placeX, placeY, placeScale)
+                    action(img, rect, placeX, placeY, placeScale)
+                }
             }
         }
 
@@ -764,8 +754,8 @@ open class ImagePage {
             animationLoop?.cancel()
             animationLoop = null
 
-            // Only clean images if we own them
-            if (!ownsImages) {
+            // Only clean the image if we own it
+            if (!ownsImage) {
                 frames = null
                 currentFrameImage = null
                 return
@@ -775,8 +765,8 @@ open class ImagePage {
             frames = null
             currentFrameImage = null
 
-            // Frames include all images; otherwise clean individual images
-            val imagesToClean = framesToClean?.map { it.first } ?: images.filterNotNull()
+            // Frames include the image; otherwise clean it directly
+            val imagesToClean = framesToClean?.map { it.first } ?: listOfNotNull(image)
 
             if (imagesToClean.isNotEmpty()) {
                 cleanupScope.launch {
@@ -800,6 +790,252 @@ open class ImagePage {
         }
     }
 
+    /**
+     * Two pages drawn side by side, sharing one pan/zoom transform and one
+     * [ca.mpreg.webgpuviewer.renderer.TileRenderer] grid, so the seam bakes into whichever tile
+     * straddles it instead of meeting two independently-snapped layers. Either side may be null,
+     * e.g. a cover with no partner.
+     *
+     * Composes existing pages rather than owning decoded images: drawing and animation delegate to
+     * whichever side is live via [ImageSingle.currentImage]/[isAnimated], so either can be an
+     * animated GIF independently. Never cleans up [left]/[right] - whoever built them owns that.
+     *
+     * A side may also be a [Render] page. It has no image to place, so it sits out [forEachImage]
+     * and the tile grid and is drawn into its half afterwards - see [drawRenderSides]. Everything
+     * that measures a side reads the page, not a decoded image, so it lays out like an image one.
+     */
+    class ImageSpread(val left: ImagePage?, val right: ImagePage?) : ImageSingle(null) {
+
+        /** Either side as an [ImageSingle] - null for a [Render] side, which has no image. */
+        private val leftSingle: ImageSingle?
+            get() = left as? ImageSingle
+        private val rightSingle: ImageSingle?
+            get() = right as? ImageSingle
+
+        /** Runs [action] for each present side, with its pixel offset from the seam. */
+        private inline fun forEachSide(action: (side: ImagePage, offsetX: Float) -> Unit) {
+            left?.let { action(it, -0.5f * it.width) }
+            right?.let { action(it, 0.5f * it.width) }
+        }
+
+        override var highQuality: Boolean
+            get() = (leftSingle?.highQuality ?: true) && (rightSingle?.highQuality ?: true)
+            set(value) {
+                leftSingle?.highQuality = value
+                rightSingle?.highQuality = value
+            }
+
+        override val isAnimated: Boolean
+            get() = left?.isAnimated == true || right?.isAnimated == true
+
+        override val frameVersion: Int
+            get() = (left?.frameVersion ?: 0) + (right?.frameVersion ?: 0)
+
+        /** No image of its own - [left]/[right] hold them, and [forEachImage] walks both. */
+        override val currentImage: Image?
+            get() = null
+
+        /**
+         * Each side sits half its own width out from the seam (the page anchor). A [Render] side
+         * has no image to place and paints itself instead - see [drawRenderSides].
+         */
+        override fun forEachImage(action: (image: Image, offsetX: Float) -> Unit) {
+            leftSingle?.currentImage?.let { action(it, -0.5f * it.width) }
+            rightSingle?.currentImage?.let { action(it, 0.5f * it.width) }
+        }
+
+        override val hasUploadedImage: Boolean
+            get() = leftSingle?.hasUploadedImage == true || rightSingle?.hasUploadedImage == true
+
+        override val isDecoded: Boolean
+            get() = left?.isDecoded == true || right?.isDecoded == true
+
+        /** Two columns meeting at the seam, so neither may paint over the other half. */
+        override val backgroundSpansFullWidth: Boolean
+            get() = left == null || right == null
+
+        /** As [ImageSingle.drawLive], then each [Render] side on top - see [drawRenderSides]. */
+        override fun drawLive(
+            encoder: GPUCommandEncoder, dst: GPUTexture, tiles: TileRenderer
+        ): Boolean {
+            val covered = super.drawLive(encoder, dst, tiles)
+            drawRenderSides(encoder, dst)
+            return covered
+        }
+
+        override fun renderCacheSeed(
+            encoder: GPUCommandEncoder, tex: GPUTexture, tiles: TileRenderer
+        ) {
+            super.renderCacheSeed(encoder, tex, tiles)
+            drawRenderSides(encoder, tex)
+        }
+
+        /** [frameVersion] is the sides' sum, so this page's own has nothing to bump. */
+        override fun invalidate() {
+            left?.invalidate()
+            right?.invalidate()
+            if (isOnScreen) onInvalidate?.invoke()
+        }
+
+        override fun covers(other: ImagePage): Boolean =
+            this === other || left === other || right === other
+
+        override fun attach(
+            parent: ImageViewerState, scope: CoroutineScope?, onInvalidate: () -> Unit
+        ) {
+            super.attach(parent, scope, onInvalidate)
+            left?.attach(parent, scope, onInvalidate)
+            right?.attach(parent, scope, onInvalidate)
+        }
+
+        /** True when either side paints itself rather than blitting a decoded image. */
+        private val hasRenderSide: Boolean
+            get() = left is Render || right is Render
+
+        /**
+         * A [Render] side repaints every frame, so [ImageSingle]'s incremental tile blit would
+         * leave it stale for the whole transition. Reseed the slot outright instead.
+         */
+        override fun renderIntoCache(
+            encoder: GPUCommandEncoder,
+            tex: GPUTexture,
+            tiles: TileRenderer,
+            identityMatches: Boolean
+        ) = super.renderIntoCache(encoder, tex, tiles, identityMatches && !hasRenderSide)
+
+        /**
+         * Draws each [Render] side into its own half of [dst], after the image sides.
+         *
+         * Needs a pass of its own ([Render.renderLoaded] opens one), since a pass cannot nest
+         * inside the one the image sides just drew through. It loads rather than clears: [dst]
+         * already holds the other side by now.
+         *
+         * Placed with the spread transform shifted by that side's seam offset, as [forEachImage]
+         * places an image side, so [Render.render]/[Render.fillPage] land in the right half
+         * instead of treating [dst] as a page of their own.
+         */
+        private fun drawRenderSides(encoder: GPUCommandEncoder, dst: GPUTexture) {
+            // As forEachPlacedImage: the page can have been evicted since the snapshot was taken.
+            if (destroyed) return
+            forEachSide { side, offsetX ->
+                if (side is Render) {
+                    side.renderLoaded(encoder, x + offsetX / dst.width, y, scale, dst)
+                }
+            }
+        }
+
+        override fun pageRect(dst: GPUTexture): FloatArray? {
+            forEachSide { side, offsetX ->
+                val image = (side as? ImageSingle)?.currentImage
+                if (image != null && image.mipmaps.isNotEmpty()) {
+                    return image.placement(dst, x + offsetX / dst.width, y, scale)
+                }
+            }
+            return null
+        }
+
+        override val backgroundColor: Int?
+            get() = left?.backgroundColor ?: right?.backgroundColor
+
+        override fun drawBackgroundColumns(
+            pass: GPURenderPassEncoder, dst: GPUTexture, offsetX: Float, offsetY: Float
+        ) = forEachSide { side, srcOffsetX ->
+            val color = side.backgroundColor
+            if (color != null) {
+                val (x1, x2) = sideColumn(side, srcOffsetX, dst)
+                Draw.rect(pass, offsetX + x1, offsetY, offsetX + x2, offsetY + 1f, color)
+            }
+        }
+
+        /**
+         * [side]'s left/right edges within [dst], normalised - the whole width when it is the
+         * only side. An image side goes through [Image.placement] so its own [Image.x] counts; a
+         * [Render] side has no such offset and gets the same formula without it.
+         */
+        private fun sideColumn(
+            side: ImagePage, srcOffsetX: Float, dst: GPUTexture
+        ): Pair<Float, Float> {
+            if (backgroundSpansFullWidth) return 0f to 1f
+            val placeX = x + srcOffsetX / dst.width
+            (side as? ImageSingle)?.currentImage?.let { image ->
+                val rect = image.placement(dst, placeX, y, scale)
+                return rect[0] to rect[2]
+            }
+            val center = 0.5f + scale * (placeX + WebGpuRenderer.offsetX)
+            val half = scale * 0.5f * side.width / dst.width
+            return center - half to center + half
+        }
+
+        override fun horizontalExtent(): Pair<Float, Float> =
+            (left?.width ?: 0).toFloat() to (right?.width ?: 0).toFloat()
+
+        /** Total width (sum of both sides' widths) */
+        override val width: Int
+            get() = (left?.width ?: 0) + (right?.width ?: 0)
+
+        /** Total height (max of both sides' heights) */
+        override val height: Int
+            get() = max(left?.height ?: 0, right?.height ?: 0)
+
+        /**
+         * Visible width after trim. Inner edges are ignored - a seam is never trimmed - and a
+         * [Render] side has no trim at all, so it contributes its full width.
+         */
+        override val trimWidth: Int
+            get() {
+                val leftW =
+                    leftSingle?.image?.let { it.width - (it.trim?.left ?: 0) } ?: left?.width ?: 0
+                val rightW =
+                    rightSingle?.image?.let { it.trim?.right ?: it.width } ?: right?.width ?: 0
+                return leftW + rightW
+            }
+
+        /** Visible height after trim (max of trim heights) */
+        override val trimHeight: Int
+            get() = max(left?.trimHeight ?: 0, right?.trimHeight ?: 0)
+
+        override val isHalfWidth: Boolean
+            get() = true
+
+        /**
+         * The sides hang off the seam - the anchor, at [width]/2 - by their own widths, so the
+         * span runs [width]/2 - left width to [width]/2 + right width. That equals `0..width`
+         * only when both sides are present and equally wide; otherwise it sits off-centre by the
+         * difference. Reporting `0..width` regardless let a zoomed-in lone side pan half a page
+         * past its own end, and cut off half a page early on the other.
+         *
+         * Trim plays no part: a seam is never trimmed, and [trimWidth] folds the outer edges in.
+         */
+        override fun xEdges(trimmed: Boolean): Pair<Float, Float> {
+            val (leftWidth, rightWidth) = horizontalExtent()
+            val anchor = width / 2f
+            return anchor - leftWidth to anchor + rightWidth
+        }
+
+        /** Rests with the seam on the viewport centre - see [ImagePage.restingX]. */
+        override fun restingX(scale: Float): Float = 0f
+
+        override fun yEdges(trimmed: Boolean): Pair<Int, Int>? {
+            if (!trimmed) return null
+            val images = listOfNotNull(leftSingle?.image, rightSingle?.image)
+            if (images.all { it.trim == null }) return null
+            val trimTop = images.mapNotNull { it.trim?.top ?: 0 }.minOrNull() ?: 0
+            val trimBottom =
+                images.mapNotNull { it.trim?.bottom ?: it.height }.maxOrNull() ?: height
+            return trimTop to trimBottom
+        }
+
+        /**
+         * Each side fit to its own half independently, since the two can differ in size - unlike
+         * [ImagePage]'s default, which fits [width]/[height]'s combined span.
+         */
+        override fun halfWidthScale(halfWidth: Float, contentHeight: Float): Float =
+            listOfNotNull(left, right).filter { it.width > 0 && it.height > 0 }
+                .minOfOrNull { side ->
+                    minOf(halfWidth / side.width, contentHeight / side.height)
+                }?.coerceAtLeast(0.01f) ?: 0.01f
+    }
+
     companion object {
         /**
          * Shared scope for fire-and-forget GPU cleanup work.
@@ -809,8 +1045,7 @@ open class ImagePage {
     }
 
     /** True once page content has been decoded/is otherwise ready to draw. */
-    open val isDecoded: Boolean
-        get() = false
+    open val isDecoded: Boolean get() = false
 
     /**
      * True once [cleanup] has run and the page's resources are gone or going.
@@ -826,7 +1061,10 @@ open class ImagePage {
     /** True while an animation frame loop owns the current frame. Only ever true for [Images]. */
     open val isAnimated: Boolean get() = false
 
-    /** Incremented each time an animated page's frame changes. Only ever nonzero for [Images]. */
+    /**
+     * Incremented each time this page's drawn content changes - an animated [Images] frame, or a
+     * [Render] page's [Render.invalidate]. Read by a transition to spot a stale cache slot.
+     */
     open val frameVersion: Int get() = 0
 
     var scale: Float = 1f
@@ -991,6 +1229,35 @@ open class ImagePage {
     var scope: CoroutineScope? = null
     var onInvalidate: (() -> Unit)? = null
 
+    /** True while the viewer is drawing this page, itself or as a side of a spread. */
+    val isOnScreen: Boolean
+        get() = parent?.isOnScreen(this) == true
+
+    /** True when drawing this page draws [other] - itself, or a side [ImageSpread] overrides in. */
+    internal open fun covers(other: ImagePage): Boolean = this === other
+
+    /**
+     * Adopts this page into [parent]'s viewer. [ImageSpread] passes it on to its sides, which the
+     * viewer never fetches itself but which still need a scope to animate in and a way back to
+     * the screen.
+     */
+    internal open fun attach(
+        parent: ImageViewerState, scope: CoroutineScope?, onInvalidate: () -> Unit
+    ) {
+        if (this.parent !== parent) this.parent = parent
+        if (this.scope !== scope) this.scope = scope
+        if (this.onInvalidate !== onInvalidate) this.onInvalidate = onInvalidate
+    }
+
+    /**
+     * Redraws this page, if it is on screen to redraw. [Render] and [Images] also bump
+     * [frameVersion] either way, so a page turn re-seeds the cached copy it is sampling rather
+     * than showing the content as it was when the turn began.
+     */
+    open fun invalidate() {
+        if (isOnScreen) onInvalidate?.invoke()
+    }
+
     private val contentWidth: Float
         get() = parent?.width?.toFloat() ?: 0f
 
@@ -1093,22 +1360,7 @@ open class ImagePage {
     //  if content is fully visible: center in cut viewport
 
     /**
-     * Natural pan range at [scale] (no cutout nudge): [nearEdge]/[farEdge] bound where they'd
-     * land exactly on the viewport's near/far edge. Collapses to center when content fits.
-     */
-    private fun edgeRange(
-        size: Int, nearEdge: Float, farEdge: Float, parentSize: Int, scale: Float
-    ): Pair<Float, Float> {
-        val (minV, maxV) = rawBounds(size, nearEdge, farEdge, parentSize, scale)
-        if (minV > maxV) {
-            val center = (minV + maxV) / 2f
-            return center to center
-        }
-        return minV to maxV
-    }
-
-    /**
-     * As [edgeRange] but never collapsed (min > max when there's slack). [nudgedYBounds] needs
+     * As [xBounds] but never collapsed (min > max when there's slack). [nudgedYBounds] needs
      * the true floor - the collapsed center sits below it, letting panning reveal past it.
      */
     private fun rawBounds(
@@ -1119,11 +1371,30 @@ open class ImagePage {
         return minV to maxV
     }
 
-    /** [minX]/[maxX] together, computing [homeScale] and [edgeRange] only once per call. */
+    /** [minX]/[maxX] together, computing [homeScale] and [rawBounds] only once per call. */
     private fun xBounds(scale: Float): Pair<Float, Float> {
         val parent = parent ?: return 0f to 0f
         val (left, right) = xEdges(scale >= homeScale)
-        return edgeRange(width, left, right, parent.width, scale)
+        val (minV, maxV) = rawBounds(width, left, right, parent.width, scale)
+        if (minV > maxV) {
+            val rest = restingX(scale)
+            return rest to rest
+        }
+        return minV to maxV
+    }
+
+    /**
+     * Where the page rests horizontally once its content fits the viewport - the middle of
+     * [xEdges]'s span, so the content sits centred.
+     *
+     * [ImageSpread] overrides it to rest on the seam instead. That is what keeps a lone left/right
+     * side in its own half; centring the span - what the midpoint gives once one side is missing -
+     * would pull it to the middle, indistinguishable from a page with no partner.
+     */
+    protected open fun restingX(scale: Float): Float {
+        val parent = parent ?: return 0f
+        val (near, far) = xEdges(scale >= homeScale)
+        return (0.5f * width - 0.5f * (near + far)) / parent.width
     }
 
     fun minX(scale: Float): Float = xBounds(scale).first
@@ -1131,7 +1402,7 @@ open class ImagePage {
     fun maxX(scale: Float): Float = xBounds(scale).second
 
     /**
-     * "Ignore": [edgeRange]'s plain collapse-when-it-fits.
+     * "Ignore": [xBounds]'s plain collapse-when-it-fits.
      *
      * "Avoid"/"shift": near/top bound pushed further by the *full* [ImageViewerState.cutoutTopPx]
      * so the cut viewport (real viewport minus the cutout) can pan over all the content - unless

@@ -1032,7 +1032,8 @@ private fun drawGlyphInstances(
     vertexBytes.rewind()
     val vertexBuffer = device.createBuffer(
         GPUBufferDescriptor(
-            size = vertexBytes.capacity().toLong(), usage = BufferUsage.Vertex or BufferUsage.CopyDst
+            size = vertexBytes.capacity().toLong(),
+            usage = BufferUsage.Vertex or BufferUsage.CopyDst
         )
     )
     device.queue.writeBuffer(vertexBuffer, 0, vertexBytes)

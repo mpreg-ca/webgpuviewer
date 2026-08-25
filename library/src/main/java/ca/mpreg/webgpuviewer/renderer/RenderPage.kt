@@ -41,7 +41,7 @@ import java.nio.ByteOrder
 /**
  * Draws a single image into a render pass. Every path that draws a page's live content comes
  * through here: the continuous viewer and the paged viewer when no page turn is in flight.
- * [ImagePage.Images.renderPage]/[ImagePage.Images.renderBackground] are the page-level
+ * [ImagePage.ImageSingle.renderPage]/[ImagePage.ImageSingle.renderBackground] are the page-level
  * counterparts, sharing [variantFor]/[drawTile]/[drawMaskedRect] with this object.
  *
  * Three shaders, picked per call:
@@ -51,11 +51,11 @@ import java.nio.ByteOrder
  *  - [renderFast] - one bilinear tap per pixel, also linear-light via a cheap gamma-2.2
  *    approximation (so a [TileRenderer] tile popping in over it never shows a brightness seam,
  *    close enough that the curve mismatch isn't visible) unless called with `linear = false`,
- *    which skips the sRGB<->linear round trip for [ImagePage.Images.highQuality] false content where
+ *    which skips the sRGB<->linear round trip for [ImagePage.ImageSingle.highQuality] false content where
  *    that correctness isn't worth the cost. Draws every tile the viewport overlaps separately,
  *    so the viewport can be any size or position without a window falling short.
  *
- * A cached transition's own snapshot seeds with [ImagePage.Images.renderPage] (`masked = false`),
+ * A cached transition's own snapshot seeds with [ImagePage.ImageSingle.renderPage] (`masked = false`),
  * then layers in [TileRenderer]'s tiles as they land - see [Transition.getCachedTexture].
  */
 object RenderPage {
@@ -150,7 +150,7 @@ object RenderPage {
      * valid to use inside ImageViewerState/Continuous's stencil-attached pass - the shared
      * [ca.mpreg.webgpuviewer.draw.Draw.rect] pipeline has none, and every other place it's used
      * (transitions, etc.) has no stencil attachment at all, so it can't just gain one here.
-     * [ImagePage.Images.renderPage]'s background rect is the only thing that needs this twin.
+     * [ImagePage.ImageSingle.renderPage]'s background rect is the only thing that needs this twin.
      */
     private const val MASKED_RECT_SHADER = """
 struct Params {
@@ -379,7 +379,7 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 """
 
     /**
-     * Uniforms, single-texture binding and vertex stage shared by [renderFast]/[ImagePage.Images.renderPage]'s
+     * Uniforms, single-texture binding and vertex stage shared by [renderFast]/[ImagePage.ImageSingle.renderPage]'s
      * per-tile draws - no [tile_size]/[tiles_width]/[tiles_height] bookkeeping, since a draw
      * through here is always exactly one tile.
      */
@@ -746,7 +746,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         pass: GPURenderPassEncoder, image: Image, dst: GPUTexture, x: Float, y: Float, scale: Float
     ) = renderImage(pass, image, dst, x, y, scale, filteredVariant)
 
-    /** Picks one of the 4 tile pipelines - shared by [renderFast] and [ImagePage.Images.renderPage]. */
+    /** Picks one of the 4 tile pipelines - shared by [renderFast] and [ImagePage.ImageSingle.renderPage]. */
     internal fun variantFor(linear: Boolean, masked: Boolean): Variant = when {
         linear && masked -> samplerVariant
         linear -> samplerVariantUnmasked
@@ -757,7 +757,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     /**
      * Draw an image into [pass], one bilinear tap per pixel. [linear] picks [samplerVariant]'s
      * linear-light gamma correction over [plainVariant]'s straight sRGB sampling - pass `false`
-     * for [ImagePage.Images.highQuality] false content. [masked] picks the twin valid inside a
+     * for [ImagePage.ImageSingle.highQuality] false content. [masked] picks the twin valid inside a
      * stencil-attached pass; pass `false` only when the pass has no stencil attachment.
      */
     internal fun renderFast(
@@ -784,7 +784,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         draw(pass, image, dst, res, variant)
     }
 
-    /** As [renderImage], for [renderFast]/[ImagePage.Images.renderPage] - draws every tile separately. */
+    /** As [renderImage], for [renderFast]/[ImagePage.ImageSingle.renderPage] - draws every tile separately. */
     private fun renderImageTiled(
         pass: GPURenderPassEncoder,
         image: Image,

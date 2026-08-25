@@ -21,36 +21,18 @@ const val BUFFER_SIZE = 96L
 class Image private constructor(
     val width: Int,
     val height: Int,
-    var x: Float = 0f,
-    var y: Float = 0f,
-    var backgroundColor: Int = 0xFF000000.toInt()
 ) {
+
+    var x: Float = 0f
+
+    var y: Float = 0f
+
+    var backgroundColor: Int = 0xFF000000.toInt()
 
     /**
      * Trim bounds detected from image content, or null if not trimmed.
      */
     var trim: Rect? = null
-
-    /**
-     * Position of this image in a spread.
-     */
-    enum class Position {
-        LEFT, RIGHT, SINGLE
-    }
-
-    var position: Position = Position.SINGLE
-
-    /**
-     * Pixel shift of a LEFT/RIGHT spread image from its page's anchor (0 for SINGLE) - the seam
-     * sits at the anchor, so each side extends outward by half its own width. Callers scale this
-     * into their own coordinate space rather than recomputing the formula.
-     */
-    val spreadOffsetX: Float
-        get() = when (position) {
-            Position.LEFT -> -0.5f * width
-            Position.RIGHT -> 0.5f * width
-            Position.SINGLE -> 0f
-        }
 
     companion object {
         suspend operator fun invoke(
@@ -186,7 +168,7 @@ class Image private constructor(
      * Where this image's full extent lands in [dst], as normalised (x1, y1, x2, y2) surface
      * coordinates - the same placement [prepareForRender] resolves to, but without going through
      * a mip level or [Mipmap.getQuad]. For callers that only want geometry (a background rect,
-     * [ca.mpreg.webgpuviewer.viewer.ImagePage.Images.pageRect]) with no reason to touch mip/tile
+     * [ca.mpreg.webgpuviewer.viewer.ImagePage.ImageSingle.pageRect]) with no reason to touch mip/tile
      * selection.
      */
     fun placement(dst: GPUTexture, x: Float, y: Float, scale: Float): FloatArray {

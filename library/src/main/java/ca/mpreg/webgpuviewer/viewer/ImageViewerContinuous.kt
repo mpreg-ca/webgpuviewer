@@ -70,13 +70,20 @@ fun ImageViewerContinuous(
 
                 awaitEachGesture {
                     val firstDown = awaitFirstDown(pass = PointerEventPass.Initial)
-                    val isScaleAnimating = state.isScaleAnimating
-                    val wasFlinging = state.isFlinging
                     state.animationJob?.cancel()
                     view.parent?.requestDisallowInterceptTouchEvent(true)
 
+                    // A touch on moving content only stops it - see ImageViewer.kt's copy of
+                    // this guard for what that suppresses and why the flags are cleared here.
+                    val stoppedMotion = state.isScaleAnimating || state.isFlinging
+                    if (stoppedMotion) {
+                        state.isScaleAnimating = false
+                        state.isFlinging = false
+                        state.invalidate()
+                    }
+
                     var longPressed = false
-                    val longPressJob = scope.launch {
+                    val longPressJob = if (stoppedMotion) null else scope.launch {
                         delay(viewConfiguration.longPressTimeoutMillis.milliseconds)
                         longPressed = true
                         state.onLongTap?.invoke(
@@ -88,12 +95,13 @@ fun ImageViewerContinuous(
                     }
 
                     if (waitForCleanUp(firstDown.id, doubleTapTimeout, touchSlop) != null) {
-                        longPressJob.cancel()
-                        // Tap - wait for possible double tap
-                        val secondDown = waitForDown(doubleTapTimeout)
+                        longPressJob?.cancel()
+                        // Tap - wait for a possible double tap, unless this touch only stopped
+                        // motion, leaving the next one free to start one of its own.
+                        val secondDown = if (stoppedMotion) null else waitForDown(doubleTapTimeout)
                         if (secondDown == null) {
                             // Single tap
-                            if (!isScaleAnimating && !wasFlinging) {
+                            if (!stoppedMotion) {
                                 state.onTap?.invoke(
                                     Offset(
                                         firstDown.position.x / state.width,
@@ -292,7 +300,7 @@ fun ImageViewerContinuous(
 
                                     if (event.changes.size > 1 && event.changes.all { it.pressed }) {
                                         if (single) {
-                                            longPressJob.cancel()
+                                            longPressJob?.cancel()
                                             velocityTracker.resetTracking()
                                         }
                                         single = false
@@ -305,7 +313,7 @@ fun ImageViewerContinuous(
                                     state.isScaleAnimating = zoom != 1f
 
                                     if (pan != Offset.Zero || zoom != 1f) {
-                                        longPressJob.cancel()
+                                        longPressJob?.cancel()
 
                                         if (zoom != 1f) {
                                             velocityTracker.resetTracking()
@@ -352,15 +360,14 @@ fun ImageViewerContinuous(
                                 // rather than left as the last iteration's own instantaneous zoom
                                 // left it, which could already be false during a quiet panning tail.
                                 willFlingZoom =
-                                    !longPressed && !single && abs(zoomVelocity) > 0.5f &&
-                                            state.scale > minScale && state.scale < maxScale
+                                    !longPressed && !single && abs(zoomVelocity) > 0.5f && state.scale > minScale && state.scale < maxScale
                                 if (willFlingZoom) state.isScaleAnimating = true
                             } while (!canceled && event.changes.any { it.pressed })
                         } finally {
                             if (!willFlingZoom) state.isScaleAnimating = false
                         }
 
-                        longPressJob.cancel()
+                        longPressJob?.cancel()
                         if (longPressed) return@awaitEachGesture
 
                         if (willFlingZoom) {
@@ -375,11 +382,9 @@ fun ImageViewerContinuous(
                                     Animatable(0f).animateDecay(
                                         zoomVelocity, exponentialDecay(frictionMultiplier = 0.5f)
                                     ) {
-                                        val newScale =
-                                            (startScale * exp(value)).fastCoerceIn(
-                                                minScale,
-                                                maxScale
-                                            )
+                                        val newScale = (startScale * exp(value)).fastCoerceIn(
+                                            minScale, maxScale
+                                        )
                                         val diff = 1f / newScale - 1f / startScale
                                         val maxOffsetX = max(0f, (newScale - 1f) / (2f * newScale))
                                         state.scale = newScale
@@ -423,11 +428,9 @@ fun ImageViewerContinuous(
                                     val startOffsetX = state.offsetX
                                     val targetMaxOffsetX =
                                         max(0f, (maxScale - 1f) / (2f * maxScale))
-                                    val targetOffsetX =
-                                        startOffsetX.fastCoerceIn(
-                                            -targetMaxOffsetX,
-                                            targetMaxOffsetX
-                                        )
+                                    val targetOffsetX = startOffsetX.fastCoerceIn(
+                                        -targetMaxOffsetX, targetMaxOffsetX
+                                    )
                                     animate(
                                         0f, 1f, animationSpec = spring(
                                             stiffness = Spring.StiffnessMediumLow,
@@ -460,13 +463,25 @@ fun ImageViewerContinuous(
                                             last = value
                                             val maxOffsetX =
                                                 max(0f, (state.scale - 1f) / (2f * state.scale))
+                                            val prevOffsetX = state.offsetX
+                                            val prevScrollY = state.scrollY
                                             state.offsetX =
                                                 (state.offsetX + dirX * delta / state.width / state.scale).fastCoerceIn(
                                                     -maxOffsetX, maxOffsetX
                                                 )
                                             state.scrollBy(-dirY * delta / state.scale)
                                             state.invalidate()
+                                            // Pinned on both axes: the decay would run on
+                                            // without moving anything, swallowing the next tap
+                                            // as "mid-fling". It never reverses, so one such
+                                            // frame settles it - but only one that asked for a
+                                            // move, the first frame being the initial value.
+                                            if (delta != 0f && state.offsetX == prevOffsetX && state.scrollY == prevScrollY) {
+                                                throw FlingStalled()
+                                            }
                                         }
+                                    } catch (_: FlingStalled) {
+                                        // Nothing left to glide.
                                     } finally {
                                         // A final invalidate so generation resumes promptly rather
                                         // than waiting on whatever gesture happens to invalidate next.

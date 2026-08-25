@@ -35,6 +35,7 @@ import ca.mpreg.webgpuviewer.NormalMotionDurationScale
 import ca.mpreg.webgpuviewer.orZero
 import ca.mpreg.webgpuviewer.waitForCleanUp
 import ca.mpreg.webgpuviewer.waitForDown
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.abs
@@ -90,18 +91,26 @@ fun ImageViewer(
                     val wasScrolling = state.pageOffset != 0f
                     val pageTurnJob = state.animationJob
                     val page = state.getPage(0) ?: return@awaitEachGesture
-                    val isScaleAnimating = page.isScaleAnimating
-                    val wasFlinging = page.isFlinging
                     page.animationJob?.cancel()
 
                     view.parent?.requestDisallowInterceptTouchEvent(true)
+
+                    // A touch on a moving page only stops it: no long press, tap or double tap,
+                    // but still a drag or pinch, so a fling can be caught and panned in one
+                    // motion. Cleared here, not in the cancelled job's finally - that runs a
+                    // dispatch later, late enough to swallow the next touch too.
+                    val stoppedMotion = page.isScaleAnimating || page.isFlinging
+                    if (stoppedMotion) {
+                        page.isScaleAnimating = false
+                        page.isFlinging = false
+                    }
 
                     var longPressed = false
 
                     val edgeThreshold = 50f
                     val nearEdge =
                         firstDown.position.x < edgeThreshold || firstDown.position.x > state.width - edgeThreshold
-                    val longPressJob = if (!nearEdge) {
+                    val longPressJob = if (!nearEdge && !stoppedMotion) {
                         scope.launch {
                             delay(viewConfiguration.longPressTimeoutMillis.milliseconds)
                             longPressed = true
@@ -116,7 +125,9 @@ fun ImageViewer(
 
                     if (waitForCleanUp(firstDown.id, doubleTapTimeout, touchSlop) != null) {
                         longPressJob?.cancel()
-                        val secondDown = waitForDown(doubleTapTimeout)
+                        // A stop still settles below, but skips the double tap window, leaving
+                        // the next touch free to start one of its own.
+                        val secondDown = if (stoppedMotion) null else waitForDown(doubleTapTimeout)
                         if (secondDown == null) {
                             pageTurnJob?.cancel()
                             if (state.pageOffset != 0f) {
@@ -133,7 +144,7 @@ fun ImageViewer(
                                 }
                             }
                             page.animateTo(Offset(0.5f, 0.5f))
-                            if (!isScaleAnimating && !wasFlinging) {
+                            if (!stoppedMotion) {
                                 state.onTap?.invoke(
                                     Offset(
                                         firstDown.position.x / state.width,
@@ -153,13 +164,11 @@ fun ImageViewer(
                                 val zoomPage = state.getPage(0) ?: return@launch
                                 if (zoomPage.atHomeScale) {
                                     zoomPage.animateTo(
-                                        Offset(tapX, tapY),
-                                        targetScale = zoomPage.doubleTapScale
+                                        Offset(tapX, tapY), targetScale = zoomPage.doubleTapScale
                                     )
                                 } else {
                                     zoomPage.animateTo(
-                                        Offset(tapX, tapY),
-                                        targetScale = zoomPage.homeScale
+                                        Offset(tapX, tapY), targetScale = zoomPage.homeScale
                                     )
                                 }
                             }
@@ -217,8 +226,8 @@ fun ImageViewer(
                                 val dragVelocity = velocityTracker.calculateVelocity()
                                 // Decided before the finally below, so isScaleAnimating has no gap
                                 // between this drag ending and its fling starting.
-                                willFlingZoom = abs(dragVelocity.y) > 200 &&
-                                        page.scale > page.homeScale && page.scale < page.maxScale
+                                willFlingZoom =
+                                    abs(dragVelocity.y) > 200 && page.scale > page.homeScale && page.scale < page.maxScale
                             } finally {
                                 if (!willFlingZoom) page.isScaleAnimating = false
                             }
@@ -229,8 +238,7 @@ fun ImageViewer(
                                 page.animationJob = scope.launch(NormalMotionDurationScale) {
                                     try {
                                         Animatable(0f).animateDecay(
-                                            velocity.y,
-                                            exponentialDecay()
+                                            velocity.y, exponentialDecay()
                                         ) {
                                             val px = secondDown.position.x / state.width - 0.5f
                                             val py = secondDown.position.y / state.height - 0.5f
@@ -468,17 +476,31 @@ fun ImageViewer(
                                         fling.snapTo(Offset.Zero)
                                         var lastOffset = Offset.Zero
                                         fling.animateDecay(
-                                            Offset(velocity.x, velocity.y), exponentialDecay()
+                                            Offset(velocity.x, velocity.y),
+                                            exponentialDecay<Offset>()
                                         ) {
                                             val delta = value - lastOffset
                                             lastOffset = value
                                             val dx = (delta.x / state.width) / page.scale
                                             val dy = (delta.y / state.height) / page.scale
-                                            page.setPos(
-                                                (page.x + dx).fastCoerceIn(minX, maxX).orZero(),
+                                            val prevX = page.x
+                                            val prevY = page.y
+                                            val newX =
+                                                (page.x + dx).fastCoerceIn(minX, maxX).orZero()
+                                            val newY =
                                                 (page.y + dy).fastCoerceIn(minY, maxY).orZero()
-                                            )
+                                            page.setPos(newX, newY)
+                                            // Pinned on both axes: the decay would run on
+                                            // without moving anything, swallowing the next tap
+                                            // as "mid-fling". It never reverses, so one such
+                                            // frame settles it - but only one that asked for a
+                                            // move, the first frame being the initial value.
+                                            if ((dx != 0f || dy != 0f) && newX == prevX && newY == prevY) {
+                                                throw FlingStalled()
+                                            }
                                         }
+                                    } catch (_: FlingStalled) {
+                                        // Nothing left to glide.
                                     } finally {
                                         page.isFlinging = false
                                     }
@@ -502,3 +524,10 @@ fun ImageViewer(
         }
     }
 }
+
+/**
+ * Ends a fling from inside a frame, once its position is pinned on every axis - an [Animatable]
+ * block has no non-suspending way to stop one. Caught where it is thrown; a
+ * [CancellationException] only so an escape ends the fling coroutine quietly.
+ */
+internal class FlingStalled : CancellationException("fling has nothing left to move")

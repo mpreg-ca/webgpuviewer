@@ -154,12 +154,19 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
      * [onPageChange] are what decide what a step actually means.
      */
     fun getPage(index: Int): ImagePage? {
-        return fetchPage?.invoke(index)?.also { page ->
-            if (page.parent !== this) page.parent = this
-            if (page.scope !== this.scope) page.scope = this.scope
-            if (page.onInvalidate !== invalidateCallback) page.onInvalidate = invalidateCallback
-        }
+        return fetchPage?.invoke(index)?.also { it.attach(this, scope, invalidateCallback) }
     }
+
+    /**
+     * The pages the last [captureRenderState] drew with, which is what [ImagePage.isOnScreen]
+     * answers from - a page can then decide for itself whether a redraw is worth asking for.
+     * Read off the last frame rather than re-fetched, since anything that changes which pages
+     * are on screen draws a frame of its own.
+     */
+    @Volatile
+    protected var onScreenPages: List<ImagePage> = emptyList()
+
+    internal fun isOnScreen(page: ImagePage): Boolean = onScreenPages.any { it.covers(page) }
 
     @Synchronized
     fun init(scope: CoroutineScope, surface: Surface, width: Int, height: Int) {
@@ -211,6 +218,7 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
         // Only used to pre-warm the transition cache while at rest (see renderSnapshot), so
         // there's no need to look it up while a turn is already in progress.
         val nextPage = if (offset == 0f) getPage(1) else null
+        onScreenPages = listOfNotNull(currentPage, adjacentPage)
         return RenderSnapshot(
             currentPage, adjacentPage, nextPage, offset, transition, firstPos, currentPos
         )
@@ -287,8 +295,8 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
         // so a transition into it starts already mostly sharp (Transition.getCachedTexture
         // seeds itself and layers tiles in live, so this no longer needs to be complete
         // first). Gated on atHome since the cache is keyed by (x, y, scale).
-        if (covered && page is ImagePage.Images && page.atHome) {
-            val next = s.nextPage as? ImagePage.Images
+        if (covered && page is ImagePage.ImageSingle && page.atHome) {
+            val next = s.nextPage as? ImagePage.ImageSingle
             if (next != null && next.highQuality && !next.isAnimated && next.atHome) {
                 tiles.prewarm(next, texture)
             }
