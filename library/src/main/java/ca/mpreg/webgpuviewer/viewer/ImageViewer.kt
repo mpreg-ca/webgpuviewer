@@ -32,6 +32,7 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.util.fastCoerceIn
 import androidx.compose.ui.util.fastForEach
 import ca.mpreg.webgpuviewer.NormalMotionDurationScale
+import ca.mpreg.webgpuviewer.RequestMaxRefreshRate
 import ca.mpreg.webgpuviewer.orZero
 import ca.mpreg.webgpuviewer.waitForCleanUp
 import ca.mpreg.webgpuviewer.waitForDown
@@ -72,6 +73,8 @@ fun ImageViewer(
     LaunchedEffect(state.avoidCutout, cutoutPx) {
         state.cutoutTopPx = if (state.avoidCutout) cutoutPx else 0f
     }
+
+    RequestMaxRefreshRate()
 
     // AndroidExternalSurface places the SurfaceView on a window layer behind the activity's
     // window (AndroidExternalSurfaceZOrder.Behind) and relies on the HWUI hole-punch for

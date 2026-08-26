@@ -29,6 +29,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.util.fastCoerceIn
 import ca.mpreg.webgpuviewer.NormalMotionDurationScale
+import ca.mpreg.webgpuviewer.RequestMaxRefreshRate
 import ca.mpreg.webgpuviewer.waitForCleanUp
 import ca.mpreg.webgpuviewer.waitForDown
 import kotlinx.coroutines.delay
@@ -59,6 +60,8 @@ fun ImageViewerContinuous(
     val minScale = 1f
     val doubleTapScale = minScale * 2f
     val maxScale = max(doubleTapScale * 2f, 4f)
+
+    RequestMaxRefreshRate()
 
     // See ImageViewer.kt: AndroidEmbeddedExternalSurface over AndroidExternalSurface.
     AndroidEmbeddedExternalSurface(
