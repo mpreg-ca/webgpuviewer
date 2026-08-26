@@ -19,6 +19,7 @@ import androidx.webgpu.GPURenderPassEncoder
 import androidx.webgpu.GPUTexture
 import androidx.webgpu.LoadOp
 import androidx.webgpu.StoreOp
+import ca.mpreg.webgpuviewer.closeTo
 import ca.mpreg.webgpuviewer.draw.Draw
 import ca.mpreg.webgpuviewer.draw.Font
 import ca.mpreg.webgpuviewer.draw.TextAlign
@@ -1029,10 +1030,10 @@ open class ImagePage {
          * Each side fit to its own half independently, since the two can differ in size - unlike
          * [ImagePage]'s default, which fits [width]/[height]'s combined span.
          */
-        override fun halfWidthScale(halfWidth: Float, contentHeight: Float): Float =
+        override fun halfWidthScale(halfWidth: Float, parentHeight: Float): Float =
             listOfNotNull(left, right).filter { it.width > 0 && it.height > 0 }
                 .minOfOrNull { side ->
-                    minOf(halfWidth / side.width, contentHeight / side.height)
+                    minOf(halfWidth / side.width, parentHeight / side.height)
                 }?.coerceAtLeast(0.01f) ?: 0.01f
     }
 
@@ -1258,50 +1259,41 @@ open class ImagePage {
         if (isOnScreen) onInvalidate?.invoke()
     }
 
-    private val contentWidth: Float
+    private val parentWidth: Float
         get() = parent?.width?.toFloat() ?: 0f
 
-    private val contentHeight: Float
-        get() {
-            val parent = parent ?: return 0f
-            return if (parent.avoidCutout && parent.cutoutTopPx > 0f) parent.height - parent.cutoutTopPx else parent.height.toFloat()
-        }
+    private val parentHeight: Float
+        get() = parent?.viewportHeight ?: 0f
 
     /**
      * [isHalfWidth]'s fit scale: each side of a spread can be a differently sized image, so
      * [Images] overrides this to fit each one independently rather than [width]/[height]'s
      * combined span - the default here is only ever exercised by a non-spread page.
      */
-    protected open fun halfWidthScale(halfWidth: Float, contentHeight: Float): Float =
-        minOf(halfWidth / width, contentHeight / height).coerceAtLeast(0.01f)
+    protected open fun halfWidthScale(halfWidth: Float, parentHeight: Float): Float =
+        minOf(halfWidth / width, parentHeight / height).coerceAtLeast(0.01f)
 
     val atHome: Boolean
-        get() {
-            val eps = 0.0001f
-            return abs(x - homeX) < eps && abs(y - homeY) < eps && atHomeScale
-        }
+        get() = x.closeTo(homeX) && y.closeTo(homeY) && atHomeScale
 
     val atHomeScale: Boolean
-        get() {
-            val eps = 0.0001f
-            return abs(scale - homeScale) < eps
-        }
+        get() = scale.closeTo(homeScale)
 
     var homeScale: Float = -1f
         get() {
             if (field > 0) return field
 
-            if (contentWidth <= 0f || contentHeight <= 0f) return 0.01f
+            if (parentWidth <= 0f || parentHeight <= 0f) return 0.01f
 
             if (isHalfWidth) {
                 // Half-width layout: each image fits in half screen, no trim
-                return halfWidthScale(contentWidth / 2f, contentHeight)
+                return halfWidthScale(parentWidth / 2f, parentHeight)
             }
 
             // Single SINGLE page: fit trim to full screen
             val w = trimWidth.toFloat().takeIf { it > 0f } ?: return 0.01f
             val h = trimHeight.toFloat().takeIf { it > 0f } ?: return 0.01f
-            return minOf(contentWidth / w, contentHeight / h).coerceAtLeast(0.01f)
+            return minOf(parentWidth / w, parentHeight / h).coerceAtLeast(0.01f)
         }
 
     var homeX: Float = 0f
@@ -1321,15 +1313,15 @@ open class ImagePage {
     var minScale = 0f
         get() {
             if (field > 0) return field
-            if (contentWidth <= 0f || contentHeight <= 0f) return 0.01f
+            if (parentWidth <= 0f || parentHeight <= 0f) return 0.01f
 
             if (isHalfWidth) {
                 // Half-width layout: each image fits in half screen
-                return halfWidthScale(contentWidth / 2f, contentHeight)
+                return halfWidthScale(parentWidth / 2f, parentHeight)
             }
 
             // Single SINGLE page
-            return minOf(contentWidth / width, contentHeight / height).coerceAtLeast(0.01f)
+            return minOf(parentWidth / width, parentHeight / height).coerceAtLeast(0.01f)
         }
 
     var maxScale = 0f

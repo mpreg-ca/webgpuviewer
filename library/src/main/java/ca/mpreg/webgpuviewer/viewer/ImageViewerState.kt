@@ -40,26 +40,22 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
 
     internal val tiles = TileRenderer { invalidate() }
 
+    var scope: CoroutineScope? = null
+
     var animationJob: Job? = null
 
     val width get() = renderer.width
     val height get() = renderer.height
 
+    /** Top padding in pixels to avoid display cutout. Set automatically by ImageViewer when avoidCutout is true. */
+    var cutoutTopPx: Float = 0f
+
+    val viewportHeight: Float
+        get() = height - if (avoidCutout) cutoutTopPx else 0f
+
     var dpi = Resources.getSystem().displayMetrics.densityDpi / 100f
     var density: Density =
         Density(density = Resources.getSystem().displayMetrics.density, fontScale = 1f)
-
-    var scope: CoroutineScope? = null
-
-    /** Top padding in pixels to avoid display cutout. Set automatically by ImageViewer when avoidCutout is true. */
-    var cutoutTopPx: Float = 0f
-        set(value) {
-            if (field != value) {
-                field = value
-                // Move current page to new home position when cutout changes
-                getPage(0)?.home()
-            }
-        }
 
     /** When true, images will be positioned/scaled to avoid the display cutout. */
     var avoidCutout: Boolean by mutableStateOf(false)

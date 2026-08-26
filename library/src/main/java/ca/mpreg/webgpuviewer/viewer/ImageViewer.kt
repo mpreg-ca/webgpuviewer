@@ -463,7 +463,11 @@ fun ImageViewer(
                             val maxY = page.maxY(page.scale)
 
                             val velocity = velocityTracker.calculateVelocity()
-                            if ((page.scale >= page.homeScale) && (page.scale <= page.maxScale) && (lastEventTime - lastMoveTime) < 100 && (abs(
+                            // Bounded by minScale/maxScale, the pair a release settles back
+                            // into (see animateTo): a pinch past either springs back, so there is
+                            // no fling to start - but zoomed out below homeScale is a resting
+                            // place like any other, and pans there like any other.
+                            if ((page.scale >= page.minScale) && (page.scale <= page.maxScale) && (lastEventTime - lastMoveTime) < 100 && (abs(
                                     velocity.x
                                 ) > 400 || abs(velocity.y) > 400) && (page.x.fastCoerceIn(
                                     minX, maxX

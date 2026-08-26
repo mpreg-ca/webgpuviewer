@@ -8,6 +8,7 @@ import androidx.compose.ui.input.pointer.PointerEvent
 import androidx.compose.ui.input.pointer.PointerEventTimeoutCancellationException
 import androidx.compose.ui.input.pointer.PointerId
 import androidx.compose.ui.input.pointer.changedToUp
+import kotlin.math.abs
 
 internal object NormalMotionDurationScale : MotionDurationScale {
     override val scaleFactor: Float = 1f
@@ -58,3 +59,5 @@ suspend fun AwaitPointerEventScope.waitForDown(timeout: Long) = try {
 }
 
 fun Float.orZero(): Float = if (this.isNaN()) 0f else this
+
+fun Float.closeTo(x: Float, eps: Float = 0.0001f): Boolean = abs(this - x) < eps
