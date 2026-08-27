@@ -15,7 +15,7 @@ import kotlinx.coroutines.launch
 
 class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
     companion object {
-        private const val MAX_VISIBLE_PAGES = 2
+        private const val MAX_VISIBLE_PAGES = 4
     }
 
     var scale = 1f
@@ -122,10 +122,33 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
                 scrollY -= pageHeight
             }
 
-            if (getPage(1) == null) {
-                val page = getPage(0) ?: return
-                scrollY = scrollY.coerceAtMost(getPageHeight(page))
-            }
+            maxScrollY()?.let { scrollY = scrollY.coerceAtMost(it) }
+        }
+    }
+
+    /**
+     * Furthest [scrollY] may go: the last page's bottom stops at the viewport's, never above it.
+     * Null when the document doesn't end within the pages this mode draws, so nothing to clamp.
+     */
+    private fun maxScrollY(): Float? {
+        val viewportHeight = height / scale
+        var bottom = 0f
+        for (i in 0..MAX_VISIBLE_PAGES) {
+            val page = getPage(i) ?: return (bottom - viewportHeight).coerceAtLeast(0f)
+            val pageHeight = getPageHeight(page)
+            if (pageHeight <= 0f) break
+            bottom += pageHeight
+            // Enough content below to fill the viewport, whatever follows it.
+            if (bottom - viewportHeight > scrollY) break
+        }
+        return null
+    }
+
+    /** Move to the top of the page [getPage] now answers 0 with, after the app jumps pages. */
+    fun resetScroll() {
+        synchronized(scrollLock) {
+            scrollY = 0f
+            currentPageHeight = getPage(0)?.let { getPageHeight(it) }
         }
     }
 
@@ -163,10 +186,11 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
 
         val y0 = getPage(0)?.let { page ->
             val pageHeight = getPageHeight(page)
-            if (currentPageHeight != pageHeight && scrollY > 0) {
-                currentPageHeight?.let { h -> scrollY -= pageHeight - h }
-                currentPageHeight = pageHeight
-            }
+            // A decode correcting a placeholder's height holds the same fraction of the page: at
+            // its top nothing moves, near its bottom the pages below stay put. Shifting by the
+            // whole difference instead drove scrollY negative, stepping back a page.
+            currentPageHeight?.let { h -> if (h > 0f) scrollY *= pageHeight / h }
+            currentPageHeight = pageHeight
             -scrollY
         } ?: 0f
 
