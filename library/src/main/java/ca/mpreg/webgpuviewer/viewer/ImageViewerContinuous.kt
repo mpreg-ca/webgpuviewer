@@ -35,9 +35,7 @@ import ca.mpreg.webgpuviewer.waitForDown
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.abs
-import kotlin.math.exp
 import kotlin.math.hypot
-import kotlin.math.ln
 import kotlin.math.max
 import kotlin.math.pow
 import kotlin.time.Duration.Companion.milliseconds
@@ -99,9 +97,10 @@ fun ImageViewerContinuous(
 
                     if (waitForCleanUp(firstDown.id, doubleTapTimeout, touchSlop) != null) {
                         longPressJob?.cancel()
-                        // Tap - wait for a possible double tap, unless this touch only stopped
-                        // motion, leaving the next one free to start one of its own.
-                        val secondDown = if (stoppedMotion) null else waitForDown(doubleTapTimeout)
+                        // Tap - wait for a possible double tap. A touch that only stopped motion
+                        // waits too: it fires no single tap below, but it can still be the first
+                        // half of a double tap zoom or a double tap drag.
+                        val secondDown = waitForDown(doubleTapTimeout)
                         if (secondDown == null) {
                             // Single tap
                             if (!stoppedMotion) {
@@ -229,7 +228,7 @@ fun ImageViewerContinuous(
                                 state.animationJob = scope.launch(NormalMotionDurationScale) {
                                     try {
                                         Animatable(0f).animateDecay(
-                                            velocity.y, exponentialDecay(frictionMultiplier = 0.5f)
+                                            velocity.y, exponentialDecay()
                                         ) {
                                             val newScale =
                                                 (originalScale * 10f.pow(2 * (totalDeltaY + value) / state.height)).fastCoerceIn(
@@ -289,15 +288,14 @@ fun ImageViewerContinuous(
                         velocityTracker.addPointerInputChange(firstDown)
 
                         var single = true
-                        var lastZoomTime = firstDown.uptimeMillis
-                        var zoomVelocity = 0f
-                        var lastCentroid = Offset(0.5f, 0.5f)
+                        var lastMoveTime = firstDown.uptimeMillis
+                        var lastEventTime = firstDown.uptimeMillis
 
-                        var willFlingZoom = false
+                        var canceled = false
                         try {
                             do {
                                 val event = awaitPointerEvent()
-                                val canceled = event.changes.any { it.isConsumed }
+                                canceled = event.changes.any { it.isConsumed }
                                 if (!canceled) {
                                     val change = event.changes[0]
 
@@ -313,7 +311,14 @@ fun ImageViewerContinuous(
 
                                     val pan = event.calculatePan()
                                     val zoom = event.calculateZoom()
-                                    state.isScaleAnimating = zoom != 1f
+                                    // While two fingers are down, not only on the events that
+                                    // actually change the zoom: a quiet moment mid-pinch is still
+                                    // a pinch, and tile generation should stay held off.
+                                    state.isScaleAnimating =
+                                        event.changes.size > 1 && event.changes.all { it.pressed }
+
+                                    lastEventTime = change.uptimeMillis
+                                    if (change.positionChanged()) lastMoveTime = change.uptimeMillis
 
                                     if (pan != Offset.Zero || zoom != 1f) {
                                         longPressJob?.cancel()
@@ -322,25 +327,13 @@ fun ImageViewerContinuous(
                                             velocityTracker.resetTracking()
                                             val centroid =
                                                 event.calculateCentroid(useCurrent = true)
-                                            lastCentroid = Offset(
-                                                centroid.x / state.width, centroid.y / state.height
-                                            )
                                             val newScale = state.scale * zoom
                                             val diff = 1f / newScale - 1f / state.scale
-                                            val cx = lastCentroid.x - 0.5f
-                                            val cy = lastCentroid.y - 0.5f
+                                            val cx = centroid.x / state.width - 0.5f
+                                            val cy = centroid.y / state.height - 0.5f
                                             state.offsetX += cx * diff
                                             state.scrollBy(-cy * diff * state.height)
                                             state.scale = newScale
-
-                                            // Track zoom velocity in log-scale space
-                                            val now = change.uptimeMillis
-                                            val dt = (now - lastZoomTime).coerceAtLeast(1L)
-                                            val logZoom = ln(zoom) / (dt / 1000f)
-                                            zoomVelocity = zoomVelocity * 0.5f + logZoom * 0.5f
-                                            lastZoomTime = now
-                                        } else {
-                                            zoomVelocity *= 0.8f
                                         }
 
                                         if (single) {
@@ -358,50 +351,15 @@ fun ImageViewerContinuous(
                                         event.changes.forEach { if (it.positionChanged()) it.consume() }
                                     }
                                 }
-                                // Decided before the finally below, so isScaleAnimating has no gap
-                                // between this pinch ending and its fling starting. Forced true
-                                // rather than left as the last iteration's own instantaneous zoom
-                                // left it, which could already be false during a quiet panning tail.
-                                willFlingZoom =
-                                    !longPressed && !single && abs(zoomVelocity) > 0.5f && state.scale > minScale && state.scale < maxScale
-                                if (willFlingZoom) state.isScaleAnimating = true
                             } while (!canceled && event.changes.any { it.pressed })
                         } finally {
-                            if (!willFlingZoom) state.isScaleAnimating = false
+                            state.isScaleAnimating = false
                         }
 
                         longPressJob?.cancel()
-                        if (longPressed) return@awaitEachGesture
+                        if (longPressed || canceled) return@awaitEachGesture
 
-                        if (willFlingZoom) {
-                            // Fling zoom
-                            val cx = lastCentroid.x - 0.5f
-                            val cy = lastCentroid.y - 0.5f
-                            val startScale = state.scale
-                            val startOffsetX = state.offsetX
-                            val startScrollY = state.scrollY
-                            state.animationJob = scope.launch(NormalMotionDurationScale) {
-                                try {
-                                    Animatable(0f).animateDecay(
-                                        zoomVelocity, exponentialDecay(frictionMultiplier = 0.5f)
-                                    ) {
-                                        val newScale = (startScale * exp(value)).fastCoerceIn(
-                                            minScale, maxScale
-                                        )
-                                        val diff = 1f / newScale - 1f / startScale
-                                        val maxOffsetX = max(0f, (newScale - 1f) / (2f * newScale))
-                                        state.scale = newScale
-                                        state.offsetX = (startOffsetX + cx * diff).fastCoerceIn(
-                                            -maxOffsetX, maxOffsetX
-                                        )
-                                        state.scrollY = startScrollY - cy * diff * state.height
-                                        state.invalidate()
-                                    }
-                                } finally {
-                                    state.isScaleAnimating = false
-                                }
-                            }
-                        } else if (state.scale < minScale) {
+                        if (state.scale < minScale) {
                             // Snap scale back up
                             state.animationJob = scope.launch {
                                 state.isScaleAnimating = true
@@ -452,7 +410,10 @@ fun ImageViewerContinuous(
                         } else {
                             // Scale in bounds: fling pan or snap offsetX
                             val velocity = velocityTracker.calculateVelocity()
-                            if (abs(velocity.y) > 400 || abs(velocity.x) > 400) {
+                            // Held still before lifting: no fling, however fast it got there.
+                            if ((lastEventTime - lastMoveTime) < 100 &&
+                                (abs(velocity.y) > 400 || abs(velocity.x) > 400)
+                            ) {
                                 state.animationJob = scope.launch(NormalMotionDurationScale) {
                                     state.isFlinging = true
                                     try {

@@ -98,10 +98,10 @@ fun ImageViewer(
 
                     view.parent?.requestDisallowInterceptTouchEvent(true)
 
-                    // A touch on a moving page only stops it: no long press, tap or double tap,
-                    // but still a drag or pinch, so a fling can be caught and panned in one
-                    // motion. Cleared here, not in the cancelled job's finally - that runs a
-                    // dispatch later, late enough to swallow the next touch too.
+                    // A touch on a moving page only stops it: no long press and no tap, though
+                    // still a double tap, a drag or a pinch, so a fling can be caught and carried
+                    // on in one motion. Cleared here, not in the cancelled job's finally - that
+                    // runs a dispatch later, late enough to swallow the next touch too.
                     val stoppedMotion = page.isScaleAnimating || page.isFlinging
                     if (stoppedMotion) {
                         page.isScaleAnimating = false
@@ -128,9 +128,10 @@ fun ImageViewer(
 
                     if (waitForCleanUp(firstDown.id, doubleTapTimeout, touchSlop) != null) {
                         longPressJob?.cancel()
-                        // A stop still settles below, but skips the double tap window, leaving
-                        // the next touch free to start one of its own.
-                        val secondDown = if (stoppedMotion) null else waitForDown(doubleTapTimeout)
+                        // A stop still settles below and fires no tap, but it waits out the
+                        // double tap window like any other: the touch that caught a fling can
+                        // still be the first half of a double tap zoom or a double tap drag.
+                        val secondDown = waitForDown(doubleTapTimeout)
                         if (secondDown == null) {
                             pageTurnJob?.cancel()
                             if (state.pageOffset != 0f) {
