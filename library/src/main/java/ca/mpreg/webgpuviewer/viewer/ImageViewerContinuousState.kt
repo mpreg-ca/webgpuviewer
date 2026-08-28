@@ -45,8 +45,8 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
     var scrollY = 0f
 
     /**
-     * Visual-only slide of the current page, animated to 0 by [animateSlideIn]. Kept out of
-     * [scrollY], which would walk into the page before it and report a page change of its own.
+     * Visual-only slide, animated to 0 by [animateSlideIn]. Kept out of [scrollY], which would
+     * walk into the page before it and report a page change of its own.
      */
     private var slideOffset = 0f
 
@@ -214,8 +214,7 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
         val y0 = getPage(0)?.let { page ->
             val pageHeight = getPageHeight(page)
             // A decode correcting a placeholder's height holds the same fraction of the page: at
-            // its top nothing moves, near its bottom the pages below stay put. Shifting by the
-            // whole difference instead drove scrollY negative, stepping back a page.
+            // its top nothing moves, near its bottom the pages below stay put.
             currentPageHeight?.let { h -> if (h > 0f) scrollY *= pageHeight / h }
             currentPageHeight = pageHeight
             -scrollY + slideOffset
@@ -327,12 +326,9 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
 
                     val pageScale = dstW / page.width
 
-                    // Tiles draw first, marking every pixel they cover in the stencil buffer
-                    // tiles.draw() writes to; the sampler shader below then only shades what's
-                    // left uncovered - skipped entirely once tiles alone cover this page, which
-                    // the draw reports from the grid walk it already does. Animated pages never
-                    // get tiles (they swap images every frame), so the call is skipped outright
-                    // rather than letting it no-op every frame.
+                    // Tiles first, marking the stencil; the sampler below shades only what is
+                    // left, and nothing at all once the draw reports full coverage. Animated
+                    // pages never get tiles, so they skip the call outright.
                     val covered = !page.isAnimated && tiles.draw(
                         pass,
                         page,

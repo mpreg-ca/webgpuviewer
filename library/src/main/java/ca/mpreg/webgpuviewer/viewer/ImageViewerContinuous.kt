@@ -97,9 +97,8 @@ fun ImageViewerContinuous(
 
                     if (waitForCleanUp(firstDown.id, doubleTapTimeout, touchSlop) != null) {
                         longPressJob?.cancel()
-                        // Tap - wait for a possible double tap. A touch that only stopped motion
-                        // waits too: it fires no single tap below, but it can still be the first
-                        // half of a double tap zoom or a double tap drag.
+                        // Tap - wait for a double tap. A touch that only stopped motion waits
+                        // too: no single tap below, but it can still be the first of a pair.
                         val secondDown = waitForDown(doubleTapTimeout)
                         if (secondDown == null) {
                             // Single tap
@@ -311,9 +310,8 @@ fun ImageViewerContinuous(
 
                                     val pan = event.calculatePan()
                                     val zoom = event.calculateZoom()
-                                    // While two fingers are down, not only on the events that
-                                    // actually change the zoom: a quiet moment mid-pinch is still
-                                    // a pinch, and tile generation should stay held off.
+                                    // Whenever two fingers are down: a quiet moment mid-pinch is
+                                    // still a pinch, and generation stays held off.
                                     state.isScaleAnimating =
                                         event.changes.size > 1 && event.changes.all { it.pressed }
 
