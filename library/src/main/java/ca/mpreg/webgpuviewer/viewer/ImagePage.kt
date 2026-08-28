@@ -1,10 +1,12 @@
 package ca.mpreg.webgpuviewer.viewer
 
 import android.content.Context
+import android.os.SystemClock
 import android.util.Log
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
@@ -504,6 +506,7 @@ open class ImagePage {
                 if (!covered) {
                     renderPage(pass, dst, 0f, 0f, 1f)
                 }
+                if (fade < 1f) fadeRect(dst)?.let { drawFade(pass, it[0], it[1], it[2], it[3]) }
                 return covered
             } finally {
                 pass.end()
@@ -522,6 +525,9 @@ open class ImagePage {
                 val pass = beginCachePass(encoder, tex)
                 try {
                     renderPage(pass, tex, 0f, 0f, 1f, masked = false)
+                    if (fade < 1f) {
+                        fadeRect(tex)?.let { drawFade(pass, it[0], it[1], it[2], it[3], false) }
+                    }
                 } finally {
                     pass.end()
                 }
@@ -537,6 +543,11 @@ open class ImagePage {
             try {
                 renderPage(pass, tex, 0f, 0f, 1f, masked = false)
                 tiles.blitAvailableTiles(pass, this, tex)
+                // A fade re-seeds the cache every frame (frameVersion), which is what lets a
+                // page fade in mid-turn at all.
+                if (fade < 1f) {
+                    fadeRect(tex)?.let { drawFade(pass, it[0], it[1], it[2], it[3], false) }
+                }
             } finally {
                 pass.end()
             }
@@ -934,6 +945,22 @@ open class ImagePage {
             return null
         }
 
+        /** Both sides - [pageRect] answers with whichever it finds first, which would half-fade. */
+        override fun fadeRect(dst: GPUTexture): FloatArray? {
+            var union: FloatArray? = null
+            forEachSide { side, offsetX ->
+                val image = (side as? ImageSingle)?.currentImage
+                if (image != null && image.mipmaps.isNotEmpty()) {
+                    val r = image.placement(dst, x + offsetX / dst.width, y, scale)
+                    val u = union
+                    union = if (u == null) r else floatArrayOf(
+                        min(u[0], r[0]), min(u[1], r[1]), max(u[2], r[2]), max(u[3], r[3])
+                    )
+                }
+            }
+            return union
+        }
+
         override val backgroundColor: Int?
             get() = left?.backgroundColor ?: right?.backgroundColor
 
@@ -1042,6 +1069,9 @@ open class ImagePage {
          * Lives for the application lifetime; individual cleanups are tiny and non-cancellable anyway.
          */
         internal val cleanupScope = CoroutineScope(Dispatchers.Default)
+
+        /** Default [fadeIn] length. */
+        const val FADE_MILLIS = 200
     }
 
     /** True once page content has been decoded/is otherwise ready to draw. */
@@ -1229,6 +1259,88 @@ open class ImagePage {
     var scope: CoroutineScope? = null
     var onInvalidate: (() -> Unit)? = null
 
+    /** How far this page has faded in: 1 is shown, less leaves a [backgroundColor] veil. */
+    @Volatile
+    var fade: Float = 1f
+        private set
+
+    private var fadeJob: Job? = null
+
+    // Written by the thread that decoded the page, read by the draw that attaches it - a stale
+    // start of 0 would read as a fade that began at boot.
+    @Volatile
+    private var fadeMillis = FADE_MILLIS
+
+    @Volatile
+    private var fadeStartMillis = 0L
+
+    /** Waiting for a scope: a decode installs the page, the next frame attaches it. */
+    @Volatile
+    private var fadePending = false
+
+    /**
+     * Fade this page in instead of having it appear at once - for one swapped in behind a
+     * placeholder that was on screen. Needs a [backgroundColor] to fade from, and runs on the
+     * clock from here, so a fade nobody watches is over by the time it is reached.
+     */
+    @Synchronized
+    fun fadeIn(durationMillis: Int = FADE_MILLIS) {
+        if (destroyed || backgroundColor == null) return
+        fadeMillis = durationMillis
+        fadeStartMillis = SystemClock.uptimeMillis()
+        fade = 0f
+        fadePending = true
+        startFade()
+    }
+
+    /** Pick the fade up wherever the clock has got to, or skip it if that is already past. */
+    @Synchronized
+    private fun startFade() {
+        if (!fadePending) return
+        val scope = scope ?: return
+        fadePending = false
+        fadeJob?.cancel()
+
+        val elapsed = (SystemClock.uptimeMillis() - fadeStartMillis).toInt()
+        if (elapsed >= fadeMillis) {
+            fade = 1f
+            return
+        }
+        val from = elapsed.toFloat() / fadeMillis
+        fade = from
+
+        fadeJob = scope.launch {
+            // No finally: only another fadeIn cancels this, and it sets fade itself.
+            animate(from, 1f, animationSpec = tween(fadeMillis - elapsed)) { value, _ ->
+                fade = value
+                // invalidate(), not onInvalidate: its frameVersion bump re-seeds a transition's
+                // cached copy, which would otherwise hold the veil at whatever it was seeded with.
+                invalidate()
+            }
+        }
+    }
+
+    /** What [drawFade] veils - [pageRect], except a spread takes both sides (its own override). */
+    protected open fun fadeRect(dst: GPUTexture): FloatArray? = pageRect(dst)
+
+    /** Veil this page's rect, in fractions of the target, with what is left of the fade. */
+    internal fun drawFade(
+        pass: GPURenderPassEncoder,
+        x1: Float,
+        y1: Float,
+        x2: Float,
+        y2: Float,
+        masked: Boolean = true
+    ) {
+        if (fade >= 1f) return
+        val color = backgroundColor ?: return
+        val alpha = (((color ushr 24) and 0xFF) * (1f - fade)).toInt().coerceIn(0, 255)
+        val veil = (alpha shl 24) or (color and 0xFFFFFF)
+        // Only a live draw's pass has the stencil attachment drawMaskedRect's pipeline declares.
+        if (masked) RenderPage.drawMaskedRect(pass, x1, y1, x2, y2, veil)
+        else Draw.rect(pass, x1, y1, x2, y2, veil)
+    }
+
     /** True while the viewer is drawing this page, itself or as a side of a spread. */
     val isOnScreen: Boolean
         get() = parent?.isOnScreen(this) == true
@@ -1247,6 +1359,7 @@ open class ImagePage {
         if (this.parent !== parent) this.parent = parent
         if (this.scope !== scope) this.scope = scope
         if (this.onInvalidate !== onInvalidate) this.onInvalidate = onInvalidate
+        if (fadePending) startFade()
     }
 
     /**
@@ -1520,6 +1633,9 @@ open class ImagePage {
 
         animationJob?.cancel()
         animationJob = null
+        fadeJob?.cancel()
+        fadeJob = null
+        fadePending = false
     }
 
     /** Alias for cleanup() */

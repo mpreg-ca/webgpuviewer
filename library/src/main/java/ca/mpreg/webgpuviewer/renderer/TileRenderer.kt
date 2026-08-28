@@ -473,6 +473,18 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         ), preferredTileSize
     )
 
+    /**
+     * Release the grid longest without a draw, to get whole slabs back. Never one on screen: its
+     * slots may belong to a pass still being recorded.
+     */
+    private fun freeColdestGrid(keep: PageTiles) {
+        val victim = pages.values.firstOrNull {
+            it !== keep && it.tiles.isNotEmpty() && !it.page.isOnScreen
+        } ?: return
+        releaseTiles(victim)
+        victim.pending.clear()
+    }
+
     /** Hand [st]'s tiles back to the atlas - it keeps none of its own state about them. */
     private fun releaseTiles(st: PageTiles) {
         val pool = atlasOrNull
@@ -1609,8 +1621,14 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         evict()
 
         val pool = atlas
-        // Every slot held by a tile too fresh to evict - the worker comes back to this one.
-        val origin = pool.acquire(st.tileSize)
+        // Slabs belong to one size at a time, so a just-changed size can find them all spoken
+        // for while the budget says there is room - free a grid and try once more.
+        var origin = pool.acquire(st.tileSize)
+        if (origin < 0) {
+            freeColdestGrid(st)
+            origin = pool.acquire(st.tileSize)
+        }
+        // Still nothing - the worker comes back to this tile.
         if (origin < 0) return null
 
         val queries = timestampQuerySet

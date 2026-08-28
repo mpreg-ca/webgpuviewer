@@ -365,6 +365,19 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
                             }
                         }
                     }
+
+                    // After everything that draws the page, and over its own band only: pages
+                    // tile vertically, so veiling anything wider would fade its neighbours too.
+                    if (page.fade < 1f) {
+                        val top = anchorY + s.scale * vp.docTop
+                        page.drawFade(
+                            pass,
+                            (anchorX - s.scale * dstW / 2f) / dstW,
+                            top / dstH,
+                            (anchorX + s.scale * dstW / 2f) / dstW,
+                            (top + s.scale * vp.pageHeight) / dstH
+                        )
+                    }
                 }
             }
         } else {
