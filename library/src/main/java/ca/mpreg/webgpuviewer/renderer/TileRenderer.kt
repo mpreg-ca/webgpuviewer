@@ -233,6 +233,9 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         /** True once the scale has held for two consecutive frames; gates generation. */
         var stable = false
 
+        /** Wanted range the stale sweep last ran against - see [drawCore]'s sweep. */
+        var sweptRange: GridRange? = null
+
         /**
          * This page's exact, unrounded vertical offset from the grid's shared anchor - see
          * [draw]'s continuous overload. Always 0 for the paged overload.
@@ -453,8 +456,14 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         return pageScale * leftWidth to pageScale * rightWidth
     }
 
-    /** [pageScale]/[anchorX]/[anchorY] a paged overload resolves its (x, y, scale) placement to. */
-    private class PagedAnchor(val pageScale: Float, val anchorX: Float, val anchorY: Float)
+    /**
+     * [pageScale]/[anchorX]/[anchorY] a paged overload resolves its (x, y, scale) placement to.
+     * [pinned] when that placement is the home animation's target rather than where the page
+     * actually is this frame - tiles then can't stand in for a live draw of it.
+     */
+    private class PagedAnchor(
+        val pageScale: Float, val anchorX: Float, val anchorY: Float, val pinned: Boolean
+    )
 
     private fun pagedAnchor(
         page: ImagePage.ImageSingle, dst: GPUTexture, x: Float, y: Float, scale: Float
@@ -472,7 +481,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             dst.width / 2f + pageScale * ((effectivePageX + x + WebGpuRenderer.offsetX) * dst.width)
         val anchorY =
             dst.height / 2f + pageScale * ((effectivePageY + y + WebGpuRenderer.offsetY) * dst.height)
-        return PagedAnchor(pageScale, anchorX, anchorY)
+        return PagedAnchor(pageScale, anchorX, anchorY, goingHome)
     }
 
     /**
@@ -480,8 +489,8 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
      * the tile region the viewport (plus a one-tile margin) wants, clipped to the page's own
      * extent, and the snapped clip rect the shader clamps blits to.
      *
-     * One definition shared by [isFullyCoveredCore], [drawCore], and [prewarm] - each used to
-     * carry its own copy, which is how [prewarm] ended up silently missing a step the others had.
+     * One definition shared by [drawCore], [availableTileKeys] and [prewarm] - each used to carry
+     * its own copy, which is how [prewarm] ended up silently missing a step the others had.
      */
     private class GridPlacement(
         val snapX: Float,
@@ -524,22 +533,37 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         return GridPlacement(snapX, snapY, clipL, clipT, clipR, clipB, wantL, wantR, wantT, wantB)
     }
 
-    /**
-     * Every (tx, ty) [gp] wants, visible or not - the one definition [drawCore],
-     * [isFullyCoveredCore], and [availableTileKeys] all share, so they can't drift apart the way
-     * [gridPlacement]'s own doc describes [prewarm] once doing. Visibility is a separate per-tile
-     * question - see [tileVisible].
-     */
-    private inline fun forEachWantedGridTile(
-        gp: GridPlacement, action: (txi: Int, tyi: Int) -> Unit
-    ) {
+    /** The (tx, ty) index bounds of what [gp] wants, and what [drawCore] tests keys against. */
+    private class GridRange(val tx0: Int, val tx1: Int, val ty0: Int, val ty1: Int) {
+        fun holds(tileKey: Long): Boolean {
+            val tx = (tileKey shr 32).toInt()
+            val ty = tileKey.toInt()
+            return tx in tx0..tx1 && ty in ty0..ty1
+        }
+
+        fun same(other: GridRange) =
+            tx0 == other.tx0 && tx1 == other.tx1 && ty0 == other.ty0 && ty1 == other.ty1
+    }
+
+    private fun wantedTileRange(gp: GridPlacement): GridRange {
         val ts = TILE_SIZE.toFloat()
-        val tx0 = floor(gp.wantL / ts).toInt()
-        val tx1 = ceil(gp.wantR / ts).toInt() - 1
-        val ty0 = floor(gp.wantT / ts).toInt()
-        val ty1 = ceil(gp.wantB / ts).toInt() - 1
-        for (tyi in ty0..ty1) {
-            for (txi in tx0..tx1) {
+        return GridRange(
+            floor(gp.wantL / ts).toInt(),
+            ceil(gp.wantR / ts).toInt() - 1,
+            floor(gp.wantT / ts).toInt(),
+            ceil(gp.wantB / ts).toInt() - 1
+        )
+    }
+
+    /**
+     * Every (tx, ty) in [r], visible or not - the one definition [drawCore] and
+     * [availableTileKeys] share, so they can't drift apart the way [gridPlacement]'s own doc
+     * describes [prewarm] once doing. Visibility is a separate per-tile question - see
+     * [tileVisible].
+     */
+    private inline fun forEachTile(r: GridRange, action: (txi: Int, tyi: Int) -> Unit) {
+        for (tyi in r.ty0..r.ty1) {
+            for (txi in r.tx0..r.tx1) {
                 action(txi, tyi)
             }
         }
@@ -583,83 +607,10 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     }
 
     /**
-     * True if [page]'s grid already has full tile coverage, so the caller can skip
-     * [RenderPage.renderFast] entirely this frame - the paged viewer's placement, via its own
-     * [page]-relative (x, y).
-     */
-    fun isFullyCovered(
-        page: ImagePage.ImageSingle, dst: GPUTexture, x: Float, y: Float, scale: Float
-    ): Boolean {
-        val a = pagedAnchor(page, dst, x, y, scale)
-        return isFullyCoveredCore(
-            page, dst, a.anchorX, a.anchorY, 0f, a.pageScale, page.isScaleAnimating
-        )
-    }
-
-    /**
-     * True if [page]'s grid already has full tile coverage, so the caller can skip
-     * [RenderPage.renderFast] entirely this frame - the continuous viewer's placement, via
-     * [cameraDocY] (the camera's document position) and [docTop] (this page's own, both in screen
-     * pixels at zoom 1).
-     */
-    fun isFullyCovered(
-        page: ImagePage.ImageSingle,
-        dst: GPUTexture,
-        cameraDocY: Float,
-        docTop: Float,
-        viewerOffsetX: Float,
-        scale: Float,
-        suppressGeneration: Boolean
-    ): Boolean {
-        val a =
-            continuousAnchor(page, dst, cameraDocY, docTop, viewerOffsetX, scale) ?: return false
-        return isFullyCoveredCore(
-            page, dst, a.anchorX, a.anchorY, a.centerYOffset, a.pageScale, suppressGeneration
-        )
-    }
-
-    /**
-     * Shared read-only coverage check for both [isFullyCovered] overloads. [anchorX]/[anchorY]
-     * are the (unrounded) anchor either overload computed; [centerYOffset] is this page's own
-     * exact, unrounded vertical offset from that anchor - zero for the paged overload. Compared
-     * against [PageTiles.centerYOffset] (like [pageScale] against [PageTiles.scale]) since this
-     * call may race ahead of [draw] invalidating a grid whose page just shifted.
-     */
-    private fun isFullyCoveredCore(
-        page: ImagePage.ImageSingle,
-        dst: GPUTexture,
-        anchorX: Float,
-        anchorY: Float,
-        centerYOffset: Float,
-        pageScale: Float,
-        suppressGeneration: Boolean
-    ): Boolean {
-        if (page.destroyed || !page.highQuality || page.isAnimated || suppressGeneration) return false
-        if (!page.hasUploadedImage) return false
-
-        val st = pages[page] ?: return false
-        if (st.scale != pageScale || st.centerYOffset != centerYOffset || !st.stable) return false
-
-        val gp =
-            gridPlacement(page, dst, anchorX, anchorY, centerYOffset, pageScale) ?: return false
-        // Genuinely off-screen: the fast path would draw nothing either, so there is nothing for
-        // tiles to be "covering".
-        if (gp.wantL >= gp.wantR || gp.wantT >= gp.wantB) return true
-
-        var covered = true
-        forEachWantedGridTile(gp) { txi, tyi ->
-            if (covered && tileVisible(gp, dst, txi, tyi) && !st.tiles.containsKey(key(txi, tyi))) {
-                covered = false
-            }
-        }
-        return covered
-    }
-
-    /**
      * The set of (tx, ty) grid keys [page]'s tile cache currently has cached and visible within
      * [dst] - lets a caller like [Transition] track exactly what it's already blitted and detect
      * when something new lands, instead of re-deriving a "done yet" boolean that has to agree
-     * with [drawCore] (see [forEachWantedGridTile]'s doc). Null if the page isn't drawable.
+     * with [drawCore] (see [forEachTile]'s doc). Null if the page isn't drawable.
      */
     fun availableTileKeys(page: ImagePage.ImageSingle, dst: GPUTexture): Set<Long>? {
         if (page.destroyed || !page.highQuality || page.isAnimated) return null
@@ -671,7 +622,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         if (gp.wantL >= gp.wantR || gp.wantT >= gp.wantB) return emptySet()
 
         val keys = HashSet<Long>()
-        forEachWantedGridTile(gp) { txi, tyi ->
+        forEachTile(wantedTileRange(gp)) { txi, tyi ->
             if (tileVisible(gp, dst, txi, tyi)) {
                 val tkey = key(txi, tyi)
                 if (st.tiles.containsKey(tkey)) keys.add(tkey)
@@ -771,9 +722,9 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         x: Float,
         y: Float,
         scale: Float
-    ) {
+    ): Boolean {
         val a = pagedAnchor(page, dst, x, y, scale)
-        drawCore(
+        val covered = drawCore(
             pass,
             page,
             dst,
@@ -785,6 +736,9 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             applyRetainWindow = true,
             useStencilMask = true
         )
+        // Never "covered" off a pinned grid: it sits at the animation's target, so the live draw
+        // is the only thing showing the page where it is mid-animation.
+        return covered && !a.pinned
     }
 
     /**
@@ -808,9 +762,10 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         viewerOffsetX: Float,
         scale: Float,
         suppressGeneration: Boolean
-    ) {
-        val a = continuousAnchor(page, dst, cameraDocY, docTop, viewerOffsetX, scale) ?: return
-        drawCore(
+    ): Boolean {
+        val a =
+            continuousAnchor(page, dst, cameraDocY, docTop, viewerOffsetX, scale) ?: return false
+        return drawCore(
             pass,
             page,
             dst,
@@ -842,9 +797,9 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         suppressGeneration: Boolean,
         applyRetainWindow: Boolean,
         useStencilMask: Boolean = false
-    ) {
-        if (page.destroyed || !page.highQuality || page.isAnimated) return
-        if (!page.hasUploadedImage) return
+    ): Boolean {
+        if (page.destroyed || !page.highQuality || page.isAnimated) return false
+        if (!page.hasUploadedImage) return false
 
         val st = pages.getOrPut(page) {
             PageTiles(
@@ -875,6 +830,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             st.tiles.values.forEach { it.destroy() }
             st.tiles.clear()
             st.pending.clear()
+            st.sweptRange = null
             st.scale = pageScale
             st.stable = false
             invalidate()
@@ -890,11 +846,12 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         val gp = gridPlacement(page, dst, anchorX, anchorY, centerYOffset, pageScale)
         if (gp == null) {
             st.pending.clear()
-            return
+            return false
         }
+        // Off screen: nothing to draw, so nothing for tiles to be missing either.
         if (gp.wantL >= gp.wantR || gp.wantT >= gp.wantB) {
             st.pending.clear()
-            return
+            return true
         }
 
         val ts = TILE_SIZE.toFloat()
@@ -910,11 +867,12 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             st, dst, gp.snapX, gp.snapY, gp.clipL, gp.clipT, gp.clipR, gp.clipB
         )
 
+        val wanted = wantedTileRange(gp)
+
         var pipelineSet = false
-        val desired = HashSet<Long>()
-        forEachWantedGridTile(gp) { txi, tyi ->
+        var covered = true
+        forEachTile(wanted) { txi, tyi ->
             val tkey = key(txi, tyi)
-            desired.add(tkey)
             val tile = st.tiles[tkey]
             if (tile != null) {
                 tile.lastUsed = frame
@@ -931,26 +889,33 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
                     pass.setBindGroup(0, tile.bindGroup)
                     pass.draw(6)
                 }
-            } else if (st.stable) {
-                st.pending.add(tkey)
+            } else {
+                if (st.stable) st.pending.add(tkey)
+                if (covered && tileVisible(gp, dst, txi, tyi)) covered = false
             }
         }
-        st.pending.retainAll(desired)
 
-        // Drop tiles outside this frame's wanted range - without this, a continuous-mode page
+        // Drop what fell outside the wanted range - without this, a continuous-mode page
         // scrolling past keeps accumulating tiles that may never hit evict()'s global cap on
-        // their own. Same staleness guard evict() uses; in-place removal costs nothing when
-        // nothing is stale.
-        val staleIt = st.tiles.entries.iterator()
-        while (staleIt.hasNext()) {
-            val (k, t) = staleIt.next()
-            if (k !in desired && t.lastUsed < frame - 1) {
-                t.destroy()
-                staleIt.remove()
+        // their own. Only when the range actually moved: nothing can leave one that held still,
+        // and a scroll only crosses a tile boundary every TILE_SIZE pixels, so most frames skip
+        // both walks entirely. Same staleness guard evict() uses, so a tile the last frame or two
+        // drew survives to be swept by the next move instead.
+        if (st.sweptRange?.same(wanted) != true) {
+            st.sweptRange = wanted
+            st.pending.retainAll { wanted.holds(it) }
+            val staleIt = st.tiles.entries.iterator()
+            while (staleIt.hasNext()) {
+                val (k, t) = staleIt.next()
+                if (!wanted.holds(k) && t.lastUsed < frame - 1) {
+                    t.destroy()
+                    staleIt.remove()
+                }
             }
         }
 
         if (st.pending.isNotEmpty()) schedule()
+        return covered
     }
 
     /**

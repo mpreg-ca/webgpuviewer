@@ -499,9 +499,8 @@ open class ImagePage {
                 // marking every pixel they cover in the stencil buffer tiles.draw() writes to;
                 // renderPage then only shades what's left uncovered instead of the whole
                 // viewport, since tiles.draw() already produced the right pixel wherever it drew.
-                val covered = tiles.isFullyCovered(this, dst, 0f, 0f, 1f)
                 renderBackground(pass, dst, 0f, 0f, 1f)
-                tiles.draw(pass, this, dst, 0f, 0f, 1f)
+                val covered = tiles.draw(pass, this, dst, 0f, 0f, 1f)
                 if (!covered) {
                     renderPage(pass, dst, 0f, 0f, 1f)
                 }

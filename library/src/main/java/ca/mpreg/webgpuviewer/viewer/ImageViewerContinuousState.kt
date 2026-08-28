@@ -242,19 +242,19 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
         var yTop = y0
         var iBack = -1
         var docTopBack = anchorDocY
-        val backPages = mutableListOf<VisiblePage>()
         while (yTop > visTop && iBack >= -MAX_VISIBLE_PAGES) {
             val page = getPage(iBack) ?: break
             val pageHeight = getPageHeight(page)
             docTopBack -= pageHeight
             yTop -= pageHeight
+            // Walked upward, so each one goes in front of the last - top to bottom, as the
+            // forward walk below appends.
             if (page.isDecoded) {
-                backPages.add(VisiblePage(page, docTopBack, pageHeight))
+                pages.add(0, VisiblePage(page, docTopBack, pageHeight))
             }
             if (pageHeight <= 0f) break
             iBack--
         }
-        pages.addAll(backPages.asReversed())
 
         // Walk forward until the viewport (plus margin) is covered or MAX_VISIBLE_PAGES
         // is reached, whichever comes first - zoomed out far enough (or with short enough pages),
