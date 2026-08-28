@@ -82,6 +82,8 @@ class Mipmap(
 
                 Log.i("Renderer", "Create tile $c $r $tileWidth $tileHeight $x $y")
 
+                // Unyielded driver work - not on the back of the chunk just uploaded.
+                yield()
                 val texture = device.createTexture(
                     GPUTextureDescriptor(
                         size = GPUExtent3D(tileWidth, tileHeight),

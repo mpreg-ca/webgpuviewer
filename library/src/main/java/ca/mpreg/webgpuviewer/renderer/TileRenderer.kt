@@ -252,15 +252,45 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         device.createQuerySet(GPUQuerySetDescriptor(type = QueryType.Timestamp, count = 16))
     }
 
-    private fun createTimestampBuffers(): Pair<GPUBuffer, GPUBuffer> {
-        val resolve = device.createBuffer(
-            GPUBufferDescriptor(size = 16, usage = BufferUsage.QueryResolve or BufferUsage.CopySrc)
+    /** [resolve] takes the query set, [result] is mapped to read it. */
+    private class TimestampBuffers(val resolve: GPUBuffer, val result: GPUBuffer)
+
+    // Recycled: two creates and a destroy per tile was a real slice of a small-tile batch.
+    private val timestampPool = ArrayDeque<TimestampBuffers>()
+
+    private fun acquireTimestampBuffers(): TimestampBuffers =
+        timestampPool.removeLastOrNull() ?: TimestampBuffers(
+            device.createBuffer(
+                GPUBufferDescriptor(
+                    size = 16, usage = BufferUsage.QueryResolve or BufferUsage.CopySrc
+                )
+            ),
+            device.createBuffer(
+                GPUBufferDescriptor(size = 16, usage = BufferUsage.MapRead or BufferUsage.CopyDst)
+            )
         )
-        val result = device.createBuffer(
-            GPUBufferDescriptor(size = 16, usage = BufferUsage.MapRead or BufferUsage.CopyDst)
-        )
-        return resolve to result
+
+    private fun releaseTimestampBuffers(buffers: TimestampBuffers) {
+        // A batch never has more in flight than this.
+        if (timestampPool.size >= MAX_TILES_PER_BATCH) {
+            buffers.resolve.destroy()
+            buffers.result.destroy()
+        } else {
+            timestampPool.addLast(buffers)
+        }
     }
+
+    // What recording a tile costs on the render thread - encoder, pass, submit - which the pass
+    // timestamps don't span. Averaged like [tileCostNs]; 0 until the first tile lands.
+    private var tileOverheadNs = 0.0
+
+    private fun recordTileOverhead(sampleNs: Double) {
+        tileOverheadNs =
+            if (tileOverheadNs <= 0.0) sampleNs else tileOverheadNs * 0.8 + sampleNs * 0.2
+    }
+
+    /** A tile's whole cost to a batch: its timed pass plus [tileOverheadNs]. */
+    private fun totalTileCostNs(i: Int) = tileCostNs[i] + tileOverheadNs
 
     // Exponential moving average of one tile's GPU render-pass duration per entry of
     // [TILE_SIZES], in nanoseconds - 0 until that size's first measurement lands.
@@ -271,11 +301,12 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
 
     private fun currentTileCostNs() = tileCostNs.getOrElse(sizeIndex(preferredTileSize)) { 0.0 }
 
-    /** How many tiles [schedule] should generate before its next yield - see [tileCostNs]. */
+    /** How many tiles [schedule] should generate before its next yield - see [totalTileCostNs]. */
     private fun nextBatchSize(): Int {
         val cost = currentTileCostNs()
         if (cost <= 0.0) return TILES_PER_BATCH_FALLBACK
-        return (BATCH_TARGET_NS / cost).toInt().coerceIn(1, MAX_TILES_PER_BATCH)
+        return (BATCH_TARGET_NS / (cost + tileOverheadNs)).toInt()
+            .coerceIn(1, MAX_TILES_PER_BATCH)
     }
 
     /**
@@ -291,9 +322,12 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         reconsiderTileSize()
     }
 
-    /** A size's cost per pixel - what actually decides, since the pixels are the work. */
+    /**
+     * A size's cost per pixel - what decides, since the pixels are the work. Counts the per-tile
+     * overhead, which is size-independent and so does amortise better on a big tile.
+     */
     private fun costPerPixel(i: Int) =
-        tileCostNs[i] / (TILE_SIZES[i].toDouble() * TILE_SIZES[i])
+        totalTileCostNs(i) / (TILE_SIZES[i].toDouble() * TILE_SIZES[i])
 
     /**
      * Pick the size whose pixels are cheapest, among those with [TILE_SIZE_SAMPLES] readings and
@@ -305,7 +339,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         val current = sizeIndex(preferredTileSize)
         if (current < 0 || tileSamples[current] < TILE_SIZE_SAMPLES) return
 
-        if (tileCostNs[current] > BATCH_TARGET_NS && current > 0) {
+        if (totalTileCostNs(current) > BATCH_TARGET_NS && current > 0) {
             preferredTileSize = TILE_SIZES[current - 1]
             invalidate()
             return
@@ -315,7 +349,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         var bestCost = costPerPixel(current)
         for (i in TILE_SIZES.indices) {
             if (i == current || tileSamples[i] < TILE_SIZE_SAMPLES) continue
-            if (tileCostNs[i] > BATCH_TARGET_NS) continue
+            if (totalTileCostNs(i) > BATCH_TARGET_NS) continue
             val cost = costPerPixel(i)
             if (cost * TILE_SIZE_MARGIN < bestCost) {
                 best = i
@@ -1343,7 +1377,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         } ?: return null
 
         val pool = atlas
-        val (resolve, result) = createTimestampBuffers()
+        val timing = acquireTimestampBuffers()
         val encoder = device.createCommandEncoder()
         val pass = encoder.beginRenderPass(
             clearedColorPass(
@@ -1359,12 +1393,11 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             pass.end()
         }
 
-        encoder.resolveQuerySet(queries, 0, 2, resolve, 0)
-        encoder.copyBufferToBuffer(resolve, 0, result, 0, 16)
+        encoder.resolveQuerySet(queries, 0, 2, timing.resolve, 0)
+        encoder.copyBufferToBuffer(timing.resolve, 0, timing.result, 0, 16)
         device.queue.submit(arrayOf(encoder.finish()))
-        resolve.destroy()
 
-        return measurementScope.launch { measureTileGpuTime(result, tileSize) }
+        return measurementScope.launch { measureTileGpuTime(timing, tileSize) }
     }
 
     /**
@@ -1392,7 +1425,13 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
                     while (generated < batchSize) {
                         val req = nextRequest() ?: break
                         try {
-                            generate(req, this)?.let { measurements.add(it) }
+                            val started = System.nanoTime()
+                            generate(req, this)?.let {
+                                measurements.add(it)
+                                // Only a tile that really submitted - a no-op would drag the
+                                // average toward nothing.
+                                recordTileOverhead((System.nanoTime() - started).toDouble())
+                            }
                             generated++
                         } catch (e: CancellationException) {
                             throw e
@@ -1647,7 +1686,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             return null
         }
 
-        val (resolve, result) = createTimestampBuffers()
+        val timing = acquireTimestampBuffers()
         val encoder = device.createCommandEncoder()
         val pass = encoder.beginRenderPass(
             clearedColorPass(
@@ -1663,29 +1702,33 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         }
 
         pool.copyScratchInto(encoder, origin, st.tileSize)
-        encoder.resolveQuerySet(queries, 0, 2, resolve, 0)
-        encoder.copyBufferToBuffer(resolve, 0, result, 0, 16)
+        encoder.resolveQuerySet(queries, 0, 2, timing.resolve, 0)
+        encoder.copyBufferToBuffer(timing.resolve, 0, timing.result, 0, 16)
 
         device.queue.submit(arrayOf(encoder.finish()))
-        resolve.destroy()
         st.tiles[key] = Tile(origin).also { it.lastUsed = frame }
         st.instancesDirty = true
 
-        return measurementScope.launch { measureTileGpuTime(result, st.tileSize) }
+        return measurementScope.launch { measureTileGpuTime(timing, st.tileSize) }
     }
 
-    private suspend fun measureTileGpuTime(result: GPUBuffer, tileSize: Int) {
-        awaitPumped { result.mapAndAwait(MapMode.Read, 0, result.size) }
+    private suspend fun measureTileGpuTime(timing: TimestampBuffers, tileSize: Int) {
+        val result = timing.result
+        try {
+            awaitPumped { result.mapAndAwait(MapMode.Read, 0, result.size) }
+        } catch (e: Throwable) {
+            // Still in flight, possibly - not safe to hand back.
+            timing.resolve.destroy()
+            result.destroy()
+            throw e
+        }
         val timestamps = result.getConstMappedRange(0, 16)
         timestamps.order(ByteOrder.nativeOrder())
         val start = timestamps.getLong(0)
         val end = timestamps.getLong(8)
         result.unmap()
-        result.destroy()
-        if (end > start) {
-            val sampleNs = (end - start).toDouble()
-            recordTileCost(tileSize, sampleNs)
-        }
+        releaseTimestampBuffers(timing)
+        if (end > start) recordTileCost(tileSize, (end - start).toDouble())
     }
 
     private suspend fun awaitPumped(block: suspend () -> Unit) = coroutineScope {
@@ -1805,6 +1848,8 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             pages.clear()
             atlasOrNull?.destroy()
             atlasOrNull = null
+            timestampPool.forEach { it.resolve.destroy(); it.result.destroy() }
+            timestampPool.clear()
         }
     }
 }

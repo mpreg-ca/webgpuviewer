@@ -5,6 +5,7 @@ import android.view.Surface
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
+import androidx.compose.runtime.MonotonicFrameClock
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -27,13 +28,13 @@ import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer.Companion.dispatcher
 import ca.mpreg.webgpuviewer.transition.Transition
 import ca.mpreg.webgpuviewer.transition.TransitionBasic
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.channels.BufferOverflow
-import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicBoolean
 
 open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boolean = false) {
     val renderer = WebGpuRenderer()
@@ -180,20 +181,47 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
 
     var transition: Transition = if (isVertical) TransitionBasic.Vertical else TransitionBasic
 
-    var renderFlow = MutableSharedFlow<Int>(
-        replay = 1, extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST
-    )
+    // Anything changed since the last frame drawn - all [collect] needs, however many
+    // invalidates said so.
+    private val dirty = AtomicBoolean(true)
+
+    // Wakes [collect] when there is nothing to draw. Buffered, so a send can't be lost against
+    // [dirty]'s check.
+    private val renderWake = Channel<Unit>(Channel.CONFLATED)
 
     fun invalidate() {
-        renderFlow.tryEmit(0)
+        dirty.set(true)
+        renderWake.trySend(Unit)
     }
 
-    suspend fun collect() {
-        renderFlow.collectLatest {
+    /**
+     * Draw at most one frame per display frame, for as long as anything is [dirty].
+     *
+     * A frame loop, not a pass per invalidate: a fling step, a fade step, a decode and the tile
+     * worker all land in one frame, and drawing each presented the same content several times per
+     * vsync. [renderWake] carries no count, so a draw clearing [dirty] doesn't leave that frame's
+     * remaining invalidates to wait out a frame each - half rate, not coalescing.
+     *
+     * Nothing may be awaited between the frame wait and the capture, the draw included: this
+     * registers as an awaiter mid-draw to land in the next frame's batch, behind the animation,
+     * and registering after that batch has gone out costs a frame every frame.
+     */
+    suspend fun collect() = coroutineScope {
+        val frameClock = currentCoroutineContext()[MonotonicFrameClock]
+        var drawing: Job? = null
+        while (true) {
+            frameClock?.withFrameNanos { }
+            // Still drawing: leave [dirty] set for the next frame.
+            if (drawing?.isActive == true) continue
+            // Anything invalidating from here belongs to the next frame.
+            if (!dirty.getAndSet(false)) {
+                renderWake.receive()
+                continue
+            }
             // Capture render state on main thread before any thread switching
-            val snapshot = captureRenderState() ?: return@collectLatest
+            val snapshot = captureRenderState() ?: continue
             // Now render on GPU thread with captured state
-            withContext(dispatcher) {
+            drawing = launch(dispatcher) {
                 renderer.render { encoder, texture ->
                     renderSnapshot(encoder, texture, snapshot)
                 }
