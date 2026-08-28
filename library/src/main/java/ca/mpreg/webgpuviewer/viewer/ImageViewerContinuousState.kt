@@ -11,6 +11,7 @@ import ca.mpreg.webgpuviewer.renderer.RenderPage
 import ca.mpreg.webgpuviewer.renderer.TileRenderer.Companion.TILE_SIZE
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
 import ca.mpreg.webgpuviewer.renderer.solveImagePlacement
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
 class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
@@ -43,6 +44,12 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
 
     private val scrollLock = Any()
     var scrollY = 0f
+
+    /**
+     * Visual-only slide of the current page, animated to 0 by [animateSlideIn]. Kept out of
+     * [scrollY], which would walk into the page before it and report a page change of its own.
+     */
+    private var slideOffset = 0f
 
     /**
      * Layout height of [page] in screen pixels.
@@ -87,6 +94,7 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
     fun scrollBy(deltaPixels: Float) {
         synchronized(scrollLock) {
             getPage(0) ?: return
+            slideOffset = 0f
 
             scrollY += deltaPixels
 
@@ -146,9 +154,29 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
 
     /** Move to the top of the page [getPage] now answers 0 with, after the app jumps pages. */
     fun resetScroll() {
-        synchronized(scrollLock) {
-            scrollY = 0f
-            currentPageHeight = getPage(0)?.let { getPageHeight(it) }
+        synchronized(scrollLock) { scrollY = 0f }
+    }
+
+    /** Slide the current page into place after a jump - [direction] 1 when it came from below. */
+    fun animateSlideIn(direction: Int) {
+        animationJob?.cancel()
+        animationJob = scope?.launch {
+            try {
+                animate(
+                    direction * height / 2f, 0f, animationSpec = spring(
+                        stiffness = Spring.StiffnessMediumLow, visibilityThreshold = 0.5f
+                    )
+                ) { value, _ ->
+                    slideOffset = value
+                    invalidate()
+                }
+            } finally {
+                // Not if cancelled: this resumes after whatever replaced it set its own.
+                if (animationJob === coroutineContext[Job]) {
+                    slideOffset = 0f
+                    invalidate()
+                }
+            }
         }
     }
 
@@ -191,7 +219,7 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
             // whole difference instead drove scrollY negative, stepping back a page.
             currentPageHeight?.let { h -> if (h > 0f) scrollY *= pageHeight / h }
             currentPageHeight = pageHeight
-            -scrollY
+            -scrollY + slideOffset
         } ?: 0f
 
         // Document position at the viewport's centre - the point both the fast path and
@@ -280,8 +308,7 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
         // does that whenever there is one; if every visible page turns out to be a Render page,
         // [ca.mpreg.webgpuviewer.draw.clear] does it instead so a Render page never has to paint
         // over stale content from prior frames.
-        val imagePages = s.pages.filter { it.page is ImagePage.ImageSingle }
-        val renderPages = s.pages.filter { it.page !is ImagePage.ImageSingle }
+        val hasImagePage = s.pages.any { it.page is ImagePage.ImageSingle }
 
         val dstW = texture.width.toFloat()
         val dstH = texture.height.toFloat()
@@ -290,10 +317,10 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
         val anchorX = dstW / 2f + s.scale * (s.offsetX * dstW + WebGpuRenderer.offsetX * dstW)
         val anchorY = dstH / 2f - s.scale * s.cameraDocY + s.scale * WebGpuRenderer.offsetY * dstH
 
-        if (imagePages.isNotEmpty()) {
+        if (hasImagePage) {
             renderPass(encoder, texture) { pass ->
-                imagePages.forEach { vp ->
-                    val page = vp.page as ImagePage.ImageSingle
+                s.pages.forEach { vp ->
+                    val page = vp.page as? ImagePage.ImageSingle ?: return@forEach
                     // The snapshot was captured on the main thread; the page can have been
                     // evicted since, in which case its images' buffers are gone and drawing one
                     // throws.
@@ -303,33 +330,20 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
 
                     // Tiles draw first, marking every pixel they cover in the stencil buffer
                     // tiles.draw() writes to; the sampler shader below then only shades what's
-                    // left uncovered - skipped entirely once tiles alone cover this page.
-                    // Animated pages never get tiles (they swap images every frame), so both
-                    // calls are skipped outright rather than letting them no-op/report false
-                    // every frame.
-                    val covered = if (page.isAnimated) {
-                        false
-                    } else {
-                        tiles.draw(
-                            pass,
-                            page,
-                            texture,
-                            s.cameraDocY,
-                            vp.docTop,
-                            s.offsetX,
-                            s.scale,
-                            s.suppressGeneration
-                        )
-                        tiles.isFullyCovered(
-                            page,
-                            texture,
-                            s.cameraDocY,
-                            vp.docTop,
-                            s.offsetX,
-                            s.scale,
-                            s.suppressGeneration
-                        )
-                    }
+                    // left uncovered - skipped entirely once tiles alone cover this page, which
+                    // the draw reports from the grid walk it already does. Animated pages never
+                    // get tiles (they swap images every frame), so the call is skipped outright
+                    // rather than letting it no-op every frame.
+                    val covered = !page.isAnimated && tiles.draw(
+                        pass,
+                        page,
+                        texture,
+                        s.cameraDocY,
+                        vp.docTop,
+                        s.offsetX,
+                        s.scale,
+                        s.suppressGeneration
+                    )
                     if (!covered) {
                         val imageScale = pageScale * s.scale
                         page.forEachImage { image, srcOffsetX ->
@@ -358,11 +372,12 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
                     }
                 }
             }
-        } else if (renderPages.isNotEmpty()) {
+        } else {
             Draw.clear(encoder, texture, 0)
         }
 
-        renderPages.forEach { vp ->
+        s.pages.forEach { vp ->
+            if (vp.page is ImagePage.ImageSingle) return@forEach
             // Only ImagePage.ImageSingle overrides isDecoded to anything other than this fixed
             // "Render (or a subclass) with drawable content" default - the isDecoded filter in
             // captureRenderState already excludes anything else (e.g. Dummy).
