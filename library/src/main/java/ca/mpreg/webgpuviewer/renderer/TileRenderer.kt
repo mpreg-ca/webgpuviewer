@@ -20,9 +20,11 @@ import androidx.webgpu.GPUBufferBindingLayout
 import androidx.webgpu.GPUBufferDescriptor
 import androidx.webgpu.GPUColor
 import androidx.webgpu.GPUColorTargetState
+import androidx.webgpu.GPUCommandEncoder
 import androidx.webgpu.GPUDepthStencilState
 import androidx.webgpu.GPUExtent3D
 import androidx.webgpu.GPUFragmentState
+import androidx.webgpu.GPUOrigin3D
 import androidx.webgpu.GPUPassTimestampWrites
 import androidx.webgpu.GPUPipelineLayoutDescriptor
 import androidx.webgpu.GPUPrimitiveState
@@ -38,10 +40,13 @@ import androidx.webgpu.GPUSamplerDescriptor
 import androidx.webgpu.GPUShaderModuleDescriptor
 import androidx.webgpu.GPUShaderSourceWGSL
 import androidx.webgpu.GPUStencilFaceState
+import androidx.webgpu.GPUTexelCopyTextureInfo
 import androidx.webgpu.GPUTexture
 import androidx.webgpu.GPUTextureBindingLayout
 import androidx.webgpu.GPUTextureDescriptor
 import androidx.webgpu.GPUTextureView
+import androidx.webgpu.GPUVertexAttribute
+import androidx.webgpu.GPUVertexBufferLayout
 import androidx.webgpu.GPUVertexState
 import androidx.webgpu.LoadOp
 import androidx.webgpu.MapMode
@@ -55,6 +60,8 @@ import androidx.webgpu.StoreOp
 import androidx.webgpu.TextureFormat
 import androidx.webgpu.TextureSampleType
 import androidx.webgpu.TextureUsage
+import androidx.webgpu.VertexFormat
+import androidx.webgpu.VertexStepMode
 import ca.mpreg.webgpuviewer.renderer.TileRenderer.Companion.OFF_SCREEN_SCORE
 import ca.mpreg.webgpuviewer.renderer.TileRenderer.Companion.STENCIL_BUFFER_COUNT
 import ca.mpreg.webgpuviewer.renderer.TileRenderer.Companion.TILES_PER_BATCH_FALLBACK
@@ -76,6 +83,7 @@ import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.round
+import kotlin.math.sqrt
 import kotlin.time.Duration.Companion.milliseconds
 
 /**
@@ -99,7 +107,9 @@ internal fun solveImagePlacement(
 }
 
 /**
- * A cache of the filtered render, cut into [TILE_SIZE]-square screen-resolution tiles.
+ * A cache of the filtered render, cut into square screen-resolution tiles - [TILE_SIZE] by
+ * default, per grid via [preferredTileSize]. Every tile is a slot in one atlas texture
+ * ([TileAtlas]), so a grid draws in a single instanced call.
  *
  * [RenderPage.render] is too expensive every frame; [RenderPage.renderFast] is cheap but
  * unfiltered. Each frame draws the fast path, then blits whatever filtered tiles already exist
@@ -113,7 +123,7 @@ internal fun solveImagePlacement(
  * rounds only the shared *camera* position and leaves each page's offset from it exact - keeps
  * adjacent pages' tiles pixel-aligned at their shared boundary (see that [draw] overload).
  *
- * Tiles live in content space: tile (tx, ty) holds the square [TILE_SIZE] pixels right/down of
+ * Tiles live in content space: tile (tx, ty) holds the square tile-size pixels right/down of
  * the grid's anchor, so panning survives untouched. Changing scale (or a document position shift
  * in the continuous viewer) invalidates the whole grid, which regenerates once scale has held
  * stable for two frames.
@@ -146,6 +156,31 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
 
         private const val TAG = "TileRenderer"
 
+        /** (tx, ty, atlas x, atlas y) as floats - see the blit shader's instance input. */
+        private const val INSTANCE_BYTES = 16L
+
+        /**
+         * The atlas is carved into slabs, each subdivided into slots of one tile size. A slab is
+         * the unit that changes hands when the preferred size moves, so it is large enough that a
+         * class holds few of them and small enough that a half-used one wastes little.
+         */
+        private const val SLAB_SIZE = 512
+
+        /** Smallest [preferredTileSize] worth having - below this the per-tile pass dominates. */
+        private const val MIN_TILE_SIZE = 128
+
+        /** The sizes [reconsiderTileSize] chooses between, smallest first. */
+        private val TILE_SIZES = intArrayOf(MIN_TILE_SIZE, 256, SLAB_SIZE)
+
+        /** Measurements a size needs before it is allowed to win, or lose, a comparison. */
+        private const val TILE_SIZE_SAMPLES = 4
+
+        /** How much cheaper per pixel another size must look before the grids are re-cut. */
+        private const val TILE_SIZE_MARGIN = 1.15
+
+        /** FrameParams: snap, dst_size, clip, then ts and the atlas's side. */
+        private const val FRAME_UNIFORM_BYTES = 48L
+
         /**
          * Score threshold [nextRequest] uses to tell a genuinely on-screen tile request from one
          * outside a grid's wanted range (e.g. [prewarm]'s tiles, which leave that range empty).
@@ -163,8 +198,22 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         private val timestampsSupported = device.hasFeature(FeatureName.TimestampQuery)
     }
 
-    /** Upper bound on cached tiles, ~[maxTiles] * 256KB of texture memory. */
+    /**
+     * The cache budget, as a count of [TILE_SIZE] tiles - ~[maxTiles] * 256KB. Held as an area
+     * ([maxTileBytes]), so a grid cut small keeps proportionally more tiles for the same memory.
+     * Set it before the first tile is generated: it also sizes the atlas.
+     */
     var maxTiles = 192
+
+    /**
+     * The size grids are cut at from now on, chosen by [reconsiderTileSize] from measured cost.
+     * A grid adopts it on its next draw, through the same wipe a scale change goes through, so
+     * this never disturbs one mid-gesture.
+     */
+    var preferredTileSize = TILE_SIZE
+        set(value) {
+            field = value.coerceIn(MIN_TILE_SIZE, SLAB_SIZE)
+        }
 
     private var frame = 0L
     private var workerActive = false
@@ -188,32 +237,255 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         return resolve to result
     }
 
-    // Exponential moving average of one tile's GPU render-pass duration, in nanoseconds - 0
-    // until the first measurement lands, which is when [nextBatchSize] starts trusting it over
-    // [TILES_PER_BATCH_FALLBACK].
-    private var avgTileGpuNs = 0.0
+    // Exponential moving average of one tile's GPU render-pass duration per entry of
+    // [TILE_SIZES], in nanoseconds - 0 until that size's first measurement lands.
+    private val tileCostNs = DoubleArray(TILE_SIZES.size)
+    private val tileSamples = IntArray(TILE_SIZES.size)
 
-    /** How many tiles [schedule] should generate before its next yield - see [avgTileGpuNs]. */
+    private fun sizeIndex(tileSize: Int) = TILE_SIZES.indexOf(tileSize)
+
+    private fun currentTileCostNs() = tileCostNs.getOrElse(sizeIndex(preferredTileSize)) { 0.0 }
+
+    /** How many tiles [schedule] should generate before its next yield - see [tileCostNs]. */
     private fun nextBatchSize(): Int {
-        if (avgTileGpuNs <= 0.0) return TILES_PER_BATCH_FALLBACK
-        return (BATCH_TARGET_NS / avgTileGpuNs).toInt().coerceIn(1, MAX_TILES_PER_BATCH)
+        val cost = currentTileCostNs()
+        if (cost <= 0.0) return TILES_PER_BATCH_FALLBACK
+        return (BATCH_TARGET_NS / cost).toInt().coerceIn(1, MAX_TILES_PER_BATCH)
     }
 
-    private class Tile(
-        val texture: GPUTexture, val uniform: GPUBuffer, val bindGroup: GPUBindGroup
-    ) {
+    /**
+     * Fold one timed tile into its size's average and re-pick [preferredTileSize].
+     *
+     * Only ever called for a size in [TILE_SIZES]; a caller that set [preferredTileSize] to
+     * something else keeps whatever it chose, since nothing here can compare it.
+     */
+    private fun recordTileCost(tileSize: Int, sampleNs: Double) {
+        val i = sizeIndex(tileSize)
+        if (i < 0) return
+        tileCostNs[i] =
+            if (tileCostNs[i] <= 0.0) sampleNs else tileCostNs[i] * 0.8 + sampleNs * 0.2
+        tileSamples[i]++
+        reconsiderTileSize()
+    }
+
+    /** A size's cost per pixel - what actually decides, since the pixels are the work. */
+    private fun costPerPixel(i: Int) =
+        tileCostNs[i] / (TILE_SIZES[i].toDouble() * TILE_SIZES[i])
+
+    /**
+     * Pick the size that renders a page's pixels cheapest, subject to one tile staying inside
+     * [BATCH_TARGET_NS] - a tile is the smallest unit [schedule] can pace, so one costing more
+     * than a whole batch's target *is* the hitch, whatever its cost per pixel.
+     *
+     * Only sizes with [TILE_SIZE_SAMPLES] readings take part, and a challenger has to be
+     * [TILE_SIZE_MARGIN] better to win: changing this re-cuts every grid, so a near-tie is not
+     * worth the regeneration.
+     */
+    private fun reconsiderTileSize() {
+        val current = sizeIndex(preferredTileSize)
+        if (current < 0 || tileSamples[current] < TILE_SIZE_SAMPLES) return
+
+        if (tileCostNs[current] > BATCH_TARGET_NS && current > 0) {
+            preferredTileSize = TILE_SIZES[current - 1]
+            invalidate()
+            return
+        }
+
+        var best = current
+        var bestCost = costPerPixel(current)
+        for (i in TILE_SIZES.indices) {
+            if (i == current || tileSamples[i] < TILE_SIZE_SAMPLES) continue
+            if (tileCostNs[i] > BATCH_TARGET_NS) continue
+            val cost = costPerPixel(i)
+            if (cost * TILE_SIZE_MARGIN < bestCost) {
+                best = i
+                bestCost = cost
+            }
+        }
+        if (best == current) return
+
+        // Grids re-cut themselves on their next draw - see drawCore's invalidation.
+        preferredTileSize = TILE_SIZES[best]
+        invalidate()
+    }
+
+    /** One cached tile: where in the [TileAtlas] it sits (packed), and when it was last drawn. */
+    private class Tile(val atlasOrigin: Int) {
         var lastUsed = 0L
+    }
+
+    /**
+     * One 2D texture holding every tile, carved into [SLAB_SIZE] slabs. A slab is subdivided into
+     * slots of a single tile size the first time that size needs one and returns to the pool once
+     * every slot is free again, so sizes can be mixed - and the preferred size can change - within
+     * one allocation, one bind group and one draw.
+     *
+     * Tiles are rendered into [scratch] and copied into their slot: compatibility mode has no
+     * single-layer view to render into directly, and a scissored pass over the whole atlas would
+     * cost a full load/store of it per tile.
+     */
+    private inner class TileAtlas(val side: Int) {
+        val texture: GPUTexture = device.createTexture(
+            GPUTextureDescriptor(
+                size = GPUExtent3D(side, side),
+                usage = TextureUsage.CopyDst or TextureUsage.TextureBinding,
+                format = TextureFormat.RGBA8Unorm
+            )
+        )
+
+        val view: GPUTextureView = texture.createView()
+
+        // Where a tile is rendered before being copied into its slot: compatibility mode has no
+        // single-slot view of the atlas to render into, and a scissored pass over the whole thing
+        // would cost a full load/store of it per tile. One per size, since [RenderPage] takes the
+        // target's own dimensions as the tile's, and reused: the copy is submitted with the pass
+        // that filled it, and generation is serialized on this thread anyway.
+        private val scratches = HashMap<Int, GPUTexture>()
+        private val scratchViews = HashMap<Int, GPUTextureView>()
+
+        fun scratch(tileSize: Int): GPUTexture = scratches.getOrPut(tileSize) {
+            device.createTexture(
+                GPUTextureDescriptor(
+                    size = GPUExtent3D(tileSize, tileSize),
+                    usage = TextureUsage.RenderAttachment or TextureUsage.CopySrc,
+                    format = TextureFormat.RGBA8Unorm
+                )
+            )
+        }
+
+        fun scratchView(tileSize: Int): GPUTextureView =
+            scratchViews.getOrPut(tileSize) { scratch(tileSize).createView() }
+
+        private val slabsPerRow = side / SLAB_SIZE
+        private val slabs = arrayOfNulls<Slab>(slabsPerRow * slabsPerRow)
+
+        /** Slabs of each tile size that still have a free slot, most recently used first. */
+        private val open = HashMap<Int, ArrayDeque<Slab>>()
+
+        /** One slab's worth of same-sized slots. [free] holds slot indices within the slab. */
+        private inner class Slab(val index: Int, val tileSize: Int) {
+            val perRow = SLAB_SIZE / tileSize
+            val free = IntArray(perRow * perRow) { it }
+            var freeCount = free.size
+
+            val originX = index % slabsPerRow * SLAB_SIZE
+            val originY = index / slabsPerRow * SLAB_SIZE
+
+            fun take(): Int {
+                val slot = free[--freeCount]
+                return pack(originX + slot % perRow * tileSize, originY + slot / perRow * tileSize)
+            }
+
+            fun give(origin: Int) {
+                val slot =
+                    (unpackY(origin) - originY) / tileSize * perRow + (unpackX(origin) - originX) / tileSize
+                free[freeCount++] = slot
+            }
+        }
+
+        /**
+         * A free slot for a [tileSize] tile as a packed atlas position, or -1 when the atlas is
+         * full - the caller drops the tile and the worker comes back to it.
+         */
+        fun acquire(tileSize: Int): Int {
+            val deque = open.getOrPut(tileSize) { ArrayDeque() }
+            while (deque.isNotEmpty()) {
+                val slab = deque.first()
+                if (slab.freeCount > 0) {
+                    val origin = slab.take()
+                    if (slab.freeCount == 0) deque.removeFirst()
+                    return origin
+                }
+                deque.removeFirst()
+            }
+
+            val index = slabs.indexOfFirst { it == null }
+            if (index < 0) return -1
+            val slab = Slab(index, tileSize)
+            slabs[index] = slab
+            val origin = slab.take()
+            if (slab.freeCount > 0) deque.addFirst(slab)
+            return origin
+        }
+
+        fun release(tileSize: Int, origin: Int) {
+            val slab = slabs[slabIndexOf(origin)] ?: return
+            slab.give(origin)
+            val deque = open.getOrPut(tileSize) { ArrayDeque() }
+            if (slab.freeCount == slab.free.size) {
+                // Fully free: hand the slab back so another size can claim it.
+                deque.remove(slab)
+                slabs[slab.index] = null
+            } else if (slab.freeCount == 1) {
+                deque.addFirst(slab)
+            }
+        }
+
+        private fun slabIndexOf(origin: Int) =
+            unpackY(origin) / SLAB_SIZE * slabsPerRow + unpackX(origin) / SLAB_SIZE
+
+        /** Move what [scratch] of [tileSize] holds into the slot at [origin]. */
+        fun copyScratchInto(encoder: GPUCommandEncoder, origin: Int, tileSize: Int) =
+            encoder.copyTextureToTexture(
+                GPUTexelCopyTextureInfo(texture = scratch(tileSize)),
+                GPUTexelCopyTextureInfo(
+                    texture = texture,
+                    origin = GPUOrigin3D(x = unpackX(origin), y = unpackY(origin))
+                ),
+                GPUExtent3D(tileSize, tileSize)
+            )
 
         fun destroy() {
-            bindGroup.close()
-            uniform.destroy()
+            scratches.values.forEach { it.destroy() }
             texture.destroy()
         }
     }
 
+    // Allocated on the first tile rather than up front, so a viewer that never reaches the tile
+    // path (all animated or low-quality pages) pays nothing for it. Sized to hold [maxTiles]
+    // default-sized tiles, rounded up to whole slabs.
+    private var atlasOrNull: TileAtlas? = null
+
+    private val atlas: TileAtlas
+        get() = atlasOrNull ?: TileAtlas(atlasSide()).also { atlasOrNull = it }
+
+    private fun atlasSide(): Int {
+        val perSlab = (SLAB_SIZE / TILE_SIZE) * (SLAB_SIZE / TILE_SIZE)
+        val slabs = (maxTiles + perSlab - 1) / perSlab
+        return ceil(sqrt(slabs.toFloat())).toInt().coerceAtLeast(1) * SLAB_SIZE
+    }
+
+    private fun newGrid(page: ImagePage.ImageSingle, pageScale: Float) = PageTiles(
+        pageScale, page, device.createBuffer(
+            GPUBufferDescriptor(
+                size = FRAME_UNIFORM_BYTES, usage = BufferUsage.Uniform or BufferUsage.CopyDst
+            )
+        ), preferredTileSize
+    )
+
+    /** Hand [st]'s tiles back to the atlas - it keeps none of its own state about them. */
+    private fun releaseTiles(st: PageTiles) {
+        val pool = atlasOrNull
+        if (pool != null) st.tiles.values.forEach { pool.release(st.tileSize, it.atlasOrigin) }
+        st.tiles.clear()
+        st.instancesDirty = true
+        st.sweptRange = null
+    }
+
+    /** Packed atlas position - both halves are well inside 16 bits at any sane atlas size. */
+    private fun pack(x: Int, y: Int) = (x shl 16) or y
+
+    private fun unpackX(origin: Int) = origin ushr 16
+
+    private fun unpackY(origin: Int) = origin and 0xFFFF
+
     /** One grid per whole [ImagePage.ImageSingle] - both images of a spread share it, seam baked in. */
     private class PageTiles(
-        var scale: Float, val page: ImagePage.ImageSingle, val frameUniform: GPUBuffer
+        var scale: Float,
+        val page: ImagePage.ImageSingle,
+        val frameUniform: GPUBuffer,
+        /** Cut at this size until the grid is wiped, which is when it adopts a new preferred one. */
+        var tileSize: Int,
     ) {
         val tiles = HashMap<Long, Tile>()
         val pending = HashSet<Long>()
@@ -229,12 +501,23 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         var writtenClipT = Float.NaN
         var writtenClipR = Float.NaN
         var writtenClipB = Float.NaN
+        var writtenTs = Float.NaN
 
         /** True once the scale has held for two consecutive frames; gates generation. */
         var stable = false
 
         /** Wanted range the stale sweep last ran against - see [drawCore]'s sweep. */
         var sweptRange: GridRange? = null
+
+        // One bind group for the whole grid (this uniform, the atlas, the sampler) and one
+        // instance per cached tile: its grid coordinate and its place in the atlas. Instances
+        // change only when a tile is generated or dropped, never as the grid moves - the
+        // uniform's snap does that - so a scrolling frame rewrites nothing and blits in one draw.
+        var bindGroup: GPUBindGroup? = null
+        var instances: GPUBuffer? = null
+        var instanceCapacity = 0
+        var instanceCount = 0
+        var instancesDirty = true
 
         /**
          * This page's exact, unrounded vertical offset from the grid's shared anchor - see
@@ -256,10 +539,16 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
 
         val destroyed get() = page.destroyed
 
-        fun destroyAll() {
-            tiles.values.forEach { it.destroy() }
+        fun destroyAll(atlas: TileAtlas?) {
+            tiles.values.forEach { atlas?.release(tileSize, it.atlasOrigin) }
             tiles.clear()
             pending.clear()
+            instances?.destroy()
+            instances = null
+            instanceCapacity = 0
+            instanceCount = 0
+            bindGroup?.close()
+            bindGroup = null
             frameUniform.destroy()
         }
     }
@@ -275,7 +564,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
 
     // Thread-local ByteBuffer to avoid per-blit allocation
     private val byteBufferLocal = ThreadLocal.withInitial {
-        ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder())
+        ByteBuffer.allocateDirect(FRAME_UNIFORM_BYTES.toInt()).order(ByteOrder.nativeOrder())
     }
 
     // Nearest: tiles are blitted 1:1 at integer pixel positions, so this is an exact copy.
@@ -291,8 +580,8 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     // Explicit (not auto-inferred) so it can be shared across blitPipeline/blitPipelineStencilWrite -
     // an implicit/auto pipeline layout is unique to the pipeline it was inferred for, so a bind
     // group made against one pipeline's auto layout is invalid on the other, even though both
-    // pipelines share the exact same shader and bindings. Tile.bindGroup is created once and
-    // reused across both pipelines (see tileBindGroup), so it must be built against this instead.
+    // pipelines share the exact same shader and bindings. A grid's bind group is created once
+    // and reused across both pipelines (see gridBindGroup), so it must be built against this.
     private val blitBindGroupLayout by lazy {
         device.createBindGroupLayout(
             GPUBindGroupLayoutDescriptor(
@@ -304,16 +593,11 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
                     ),
                     GPUBindGroupLayoutEntry(
                         binding = 1,
-                        visibility = ShaderStage.Vertex or ShaderStage.Fragment,
-                        buffer = GPUBufferBindingLayout(type = BufferBindingType.Uniform)
-                    ),
-                    GPUBindGroupLayoutEntry(
-                        binding = 2,
                         visibility = ShaderStage.Fragment,
                         texture = GPUTextureBindingLayout(sampleType = TextureSampleType.Float)
                     ),
                     GPUBindGroupLayoutEntry(
-                        binding = 3,
+                        binding = 2,
                         visibility = ShaderStage.Fragment,
                         sampler = GPUSamplerBindingLayout(type = SamplerBindingType.Filtering)
                     ),
@@ -334,7 +618,21 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         )
         return device.createRenderPipeline(
             GPURenderPipelineDescriptor(
-                vertex = GPUVertexState(module = shaderModule, entryPoint = "vs_main"),
+                vertex = GPUVertexState(
+                    module = shaderModule, entryPoint = "vs_main", buffers = arrayOf(
+                        GPUVertexBufferLayout(
+                            arrayStride = INSTANCE_BYTES,
+                            stepMode = VertexStepMode.Instance,
+                            attributes = arrayOf(
+                                GPUVertexAttribute(
+                                    format = VertexFormat.Float32x4,
+                                    offset = 0,
+                                    shaderLocation = 0
+                                )
+                            )
+                        )
+                    )
+                ),
                 layout = blitPipelineLayout,
                 fragment = GPUFragmentState(
                     module = shaderModule, entryPoint = "fs_main", targets = arrayOf(
@@ -435,7 +733,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         while (it.hasNext()) {
             val st = it.next().value
             if (st.destroyed) {
-                st.destroyAll()
+                st.destroyAll(atlasOrNull)
                 it.remove()
             }
         }
@@ -493,6 +791,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
      * its own copy, which is how [prewarm] ended up silently missing a step the others had.
      */
     private class GridPlacement(
+        val ts: Float,
         val snapX: Float,
         val snapY: Float,
         val clipL: Float,
@@ -511,9 +810,10 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         anchorX: Float,
         anchorY: Float,
         centerYOffset: Float,
-        pageScale: Float
+        pageScale: Float,
+        tileSize: Int
     ): GridPlacement? {
-        val ts = TILE_SIZE.toFloat()
+        val ts = tileSize.toFloat()
         val (leftHalf, rightHalf) = pageHorizontalExtent(page, pageScale)
         val halfH = pageScale * page.height / 2f
         if (leftHalf + rightHalf <= 0f || halfH <= 0f) return null
@@ -530,7 +830,9 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         val clipR = snapX + rightHalf
         val clipB = snapY + centerYOffset + halfH
 
-        return GridPlacement(snapX, snapY, clipL, clipT, clipR, clipB, wantL, wantR, wantT, wantB)
+        return GridPlacement(
+            ts, snapX, snapY, clipL, clipT, clipR, clipB, wantL, wantR, wantT, wantB
+        )
     }
 
     /** The (tx, ty) index bounds of what [gp] wants, and what [drawCore] tests keys against. */
@@ -546,7 +848,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     }
 
     private fun wantedTileRange(gp: GridPlacement): GridRange {
-        val ts = TILE_SIZE.toFloat()
+        val ts = gp.ts
         return GridRange(
             floor(gp.wantL / ts).toInt(),
             ceil(gp.wantR / ts).toInt() - 1,
@@ -571,7 +873,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
 
     /** True if tile ([txi], [tyi]) of [gp]'s grid actually overlaps [dst]'s visible bounds. */
     private fun tileVisible(gp: GridPlacement, dst: GPUTexture, txi: Int, tyi: Int): Boolean {
-        val ts = TILE_SIZE.toFloat()
+        val ts = gp.ts
         val px = gp.snapX + txi * ts
         val py = gp.snapY + tyi * ts
         val visL = max(gp.clipL, 0f)
@@ -618,7 +920,9 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
 
         val st = pages[page] ?: return null
         val a = pagedAnchor(page, dst, 0f, 0f, 1f)
-        val gp = gridPlacement(page, dst, a.anchorX, a.anchorY, 0f, a.pageScale) ?: return null
+        val gp =
+            gridPlacement(page, dst, a.anchorX, a.anchorY, 0f, a.pageScale, st.tileSize)
+                ?: return null
         if (gp.wantL >= gp.wantR || gp.wantT >= gp.wantB) return emptySet()
 
         val keys = HashSet<Long>()
@@ -646,21 +950,13 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         if (!page.hasUploadedImage) return
 
         val a = pagedAnchor(page, dst, 0f, 0f, 1f)
-        val st = pages.getOrPut(page) {
-            PageTiles(
-                a.pageScale, page, device.createBuffer(
-                    GPUBufferDescriptor(
-                        size = 32, usage = BufferUsage.Uniform or BufferUsage.CopyDst
-                    )
-                )
-            )
-        }
+        val st = pages.getOrPut(page) { newGrid(page, a.pageScale) }
 
-        if (st.scale != a.pageScale) {
-            st.tiles.values.forEach { it.destroy() }
-            st.tiles.clear()
+        if (st.scale != a.pageScale || st.tileSize != preferredTileSize) {
+            releaseTiles(st)
             st.pending.clear()
             st.scale = a.pageScale
+            st.tileSize = preferredTileSize
             st.stable = false
             invalidate()
         } else {
@@ -668,14 +964,15 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         }
         if (!st.stable) return
 
-        val gp = gridPlacement(page, dst, a.anchorX, a.anchorY, 0f, a.pageScale) ?: return
+        val gp = gridPlacement(page, dst, a.anchorX, a.anchorY, 0f, a.pageScale, st.tileSize)
+            ?: return
         if (gp.wantL >= gp.wantR || gp.wantT >= gp.wantB) return
 
-        val ts = TILE_SIZE.toFloat()
-        val tx0 = floor(gp.wantL / ts).toInt()
-        val tx1 = ceil(gp.wantR / ts).toInt() - 1
-        val ty0 = floor(gp.wantT / ts).toInt()
-        val ty1 = ceil(gp.wantB / ts).toInt() - 1
+        val wanted = wantedTileRange(gp)
+        val tx0 = wanted.tx0
+        val tx1 = wanted.tx1
+        val ty0 = wanted.ty0
+        val ty1 = wanted.ty1
 
         // A prewarmed tile's bind group references this same frame uniform, but unlike [drawCore]
         // this grid is never drawn on screen to write it - without this, a page that's only ever
@@ -801,15 +1098,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         if (page.destroyed || !page.highQuality || page.isAnimated) return false
         if (!page.hasUploadedImage) return false
 
-        val st = pages.getOrPut(page) {
-            PageTiles(
-                pageScale, page, device.createBuffer(
-                    GPUBufferDescriptor(
-                        size = 32, usage = BufferUsage.Uniform or BufferUsage.CopyDst
-                    )
-                )
-            )
-        }
+        val st = pages.getOrPut(page) { newGrid(page, pageScale) }
 
         if (applyRetainWindow) {
             // getOrPut just moved page to the end of this access-ordered map - trim the front
@@ -818,20 +1107,21 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             while (pages.size > RETAIN_MARGIN) {
                 val eldest = pages.entries.iterator()
                 val entry = eldest.next()
-                entry.value.destroyAll()
+                entry.value.destroyAll(atlasOrNull)
                 eldest.remove()
             }
         }
 
-        if (st.scale != pageScale || st.centerYOffset != centerYOffset) {
-            // Dawn keeps a destroyed texture alive until its command buffers retire, so
-            // destroying now is safe. A changed centerYOffset at fixed scale means a placeholder
-            // corrected its guessed height - invalidate the same way a scale change does.
-            st.tiles.values.forEach { it.destroy() }
-            st.tiles.clear()
+        if (st.scale != pageScale || st.centerYOffset != centerYOffset ||
+            st.tileSize != preferredTileSize
+        ) {
+            // A changed centerYOffset at fixed scale means a placeholder corrected its guessed
+            // height - invalidate the same way a scale change does. A changed preferred size
+            // rides the same path: this is the one moment a grid can be re-cut for free.
+            releaseTiles(st)
             st.pending.clear()
-            st.sweptRange = null
             st.scale = pageScale
+            st.tileSize = preferredTileSize
             st.stable = false
             invalidate()
         } else {
@@ -843,7 +1133,8 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         // doc for why that's safe. generate() has no other way to reach this value.
         st.centerYOffset = centerYOffset
 
-        val gp = gridPlacement(page, dst, anchorX, anchorY, centerYOffset, pageScale)
+        val gp =
+            gridPlacement(page, dst, anchorX, anchorY, centerYOffset, pageScale, st.tileSize)
         if (gp == null) {
             st.pending.clear()
             return false
@@ -869,31 +1160,23 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
 
         val wanted = wantedTileRange(gp)
 
-        var pipelineSet = false
+        // Bookkeeping only - the blit is one instanced draw below, and the shader clamps each
+        // tile to the clip rect, so an off-screen one costs an empty quad rather than a decision
+        // here. tileVisible is still what coverage means: a missing tile nobody can see doesn't
+        // make the page uncovered.
         var covered = true
         forEachTile(wanted) { txi, tyi ->
             val tkey = key(txi, tyi)
             val tile = st.tiles[tkey]
             if (tile != null) {
                 tile.lastUsed = frame
-                if (tileVisible(gp, dst, txi, tyi)) {
-                    if (!pipelineSet) {
-                        if (useStencilMask) {
-                            pass.setPipeline(blitPipelineStencilWrite)
-                            pass.setStencilReference(1)
-                        } else {
-                            pass.setPipeline(blitPipeline)
-                        }
-                        pipelineSet = true
-                    }
-                    pass.setBindGroup(0, tile.bindGroup)
-                    pass.draw(6)
-                }
             } else {
                 if (st.stable) st.pending.add(tkey)
                 if (covered && tileVisible(gp, dst, txi, tyi)) covered = false
             }
         }
+
+        drawInstanced(pass, st, useStencilMask)
 
         // Drop what fell outside the wanted range - without this, a continuous-mode page
         // scrolling past keeps accumulating tiles that may never hit evict()'s global cap on
@@ -908,8 +1191,9 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             while (staleIt.hasNext()) {
                 val (k, t) = staleIt.next()
                 if (!wanted.holds(k) && t.lastUsed < frame - 1) {
-                    t.destroy()
+                    atlasOrNull?.release(st.tileSize, t.atlasOrigin)
                     staleIt.remove()
+                    st.instancesDirty = true
                 }
             }
         }
@@ -919,12 +1203,161 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     }
 
     /**
+     * Blit every tile [st] has cached, as one instanced draw. Nothing is uploaded on a frame that
+     * only moved the grid - that lives in the uniform - so this is a bind group, a vertex buffer
+     * and a draw call for a whole page.
+     */
+    private fun drawInstanced(
+        pass: GPURenderPassEncoder, st: PageTiles, useStencilMask: Boolean
+    ) {
+        if (st.instancesDirty) uploadInstances(st)
+        val instances = st.instances ?: return
+        if (st.instanceCount == 0) return
+
+        if (useStencilMask) {
+            pass.setPipeline(blitPipelineStencilWrite)
+            pass.setStencilReference(1)
+        } else {
+            pass.setPipeline(blitPipeline)
+        }
+        pass.setBindGroup(0, st.bindGroup ?: gridBindGroup(st).also { st.bindGroup = it })
+        pass.setVertexBuffer(0, instances)
+        pass.draw(6, st.instanceCount)
+    }
+
+    /**
+     * Blit exactly [keys] of [st] - [drawInstanced]'s counterpart for a caller that has just
+     * generated some tiles into a pass that already drew the others. The instance buffer is its
+     * own: Dawn keeps a destroyed buffer alive until the command buffers referencing it retire.
+     */
+    private fun drawTiles(pass: GPURenderPassEncoder, st: PageTiles, keys: List<Long>) {
+        val present = keys.mapNotNull { tkey -> st.tiles[tkey]?.let { tkey to it } }
+        if (present.isEmpty()) return
+
+        val bytes = ByteBuffer.allocateDirect(present.size * INSTANCE_BYTES.toInt())
+            .order(ByteOrder.nativeOrder())
+        present.forEach { (tkey, tile) ->
+            tile.lastUsed = frame
+            bytes.putFloat((tkey shr 32).toInt().toFloat())
+            bytes.putFloat(tkey.toInt().toFloat())
+            bytes.putFloat(unpackX(tile.atlasOrigin).toFloat())
+            bytes.putFloat(unpackY(tile.atlasOrigin).toFloat())
+        }
+        bytes.flip()
+
+        val instances = device.createBuffer(
+            GPUBufferDescriptor(
+                size = present.size * INSTANCE_BYTES,
+                usage = BufferUsage.Vertex or BufferUsage.CopyDst
+            )
+        )
+        device.queue.writeBuffer(instances, 0, bytes)
+
+        pass.setPipeline(blitPipeline)
+        pass.setBindGroup(0, st.bindGroup ?: gridBindGroup(st).also { st.bindGroup = it })
+        pass.setVertexBuffer(0, instances)
+        pass.draw(6, present.size)
+        instances.destroy()
+    }
+
+    /** One bind group per grid: its own uniform, the shared atlas, the shared sampler. */
+    private fun gridBindGroup(st: PageTiles): GPUBindGroup = device.createBindGroup(
+        GPUBindGroupDescriptor(
+            layout = blitBindGroupLayout, entries = arrayOf(
+                GPUBindGroupEntry(0, buffer = st.frameUniform),
+                GPUBindGroupEntry(1, textureView = atlas.view),
+                GPUBindGroupEntry(2, sampler = blitSampler),
+            )
+        )
+    )
+
+    /**
+     * Rewrite [st]'s instance data - grid coordinate and atlas position per cached tile, as the
+     * blit shader reads them. Called from the draw rather
+     * than from generation, so a batch that lands several tiles still only uploads once.
+     */
+    private fun uploadInstances(st: PageTiles) {
+        st.instancesDirty = false
+        st.instanceCount = st.tiles.size
+        if (st.instanceCount == 0) return
+
+        if (st.instanceCapacity < st.instanceCount) {
+            // Rounded up so a grid filling in tile by tile doesn't reallocate on every one.
+            val capacity = (st.instanceCount + 63) / 64 * 64
+            st.instances?.destroy()
+            st.instances = device.createBuffer(
+                GPUBufferDescriptor(
+                    size = capacity * INSTANCE_BYTES,
+                    usage = BufferUsage.Vertex or BufferUsage.CopyDst
+                )
+            )
+            st.instanceCapacity = capacity
+        }
+
+        val bytes = ByteBuffer.allocateDirect(st.instanceCount * INSTANCE_BYTES.toInt())
+            .order(ByteOrder.nativeOrder())
+        for ((tkey, tile) in st.tiles) {
+            bytes.putFloat((tkey shr 32).toInt().toFloat())
+            bytes.putFloat(tkey.toInt().toFloat())
+            bytes.putFloat(unpackX(tile.atlasOrigin).toFloat())
+            bytes.putFloat(unpackY(tile.atlasOrigin).toFloat())
+        }
+        bytes.flip()
+        device.queue.writeBuffer(st.instances!!, 0, bytes)
+    }
+
+    /**
+     * Time one throwaway tile at a size nothing has measured yet, so [reconsiderTileSize] has
+     * something to compare against. The tile is discarded, and this only runs once the queue has
+     * drained, so nothing on screen is waiting on it. Null when there is nothing worth probing -
+     * including when the adapter has no timestamp queries, without which no size can be measured
+     * and [preferredTileSize] simply stays where it started.
+     */
+    private fun probeTileSize(measurementScope: CoroutineScope): Job? {
+        val queries = timestampQuerySet ?: return null
+        val index = TILE_SIZES.indices.firstOrNull {
+            TILE_SIZES[it] != preferredTileSize && tileSamples[it] < TILE_SIZE_SAMPLES
+        } ?: return null
+        val tileSize = TILE_SIZES[index]
+
+        // The most recently drawn grid - the page on screen, whose cost is the one that matters.
+        val st = pages.values.lastOrNull {
+            it.stable && !it.destroyed && it.page.hasUploadedImage
+        } ?: return null
+
+        val pool = atlas
+        val (resolve, result) = createTimestampBuffers()
+        val encoder = device.createCommandEncoder()
+        val pass = encoder.beginRenderPass(
+            clearedColorPass(
+                pool.scratchView(tileSize), timestampWrites = GPUPassTimestampWrites(
+                    queries, beginningOfPassWriteIndex = 0, endOfPassWriteIndex = 1
+                )
+            )
+        )
+        try {
+            // The grid's own anchor tile: whatever is at the middle of the page, which is as
+            // representative as this gets.
+            renderTileContent(st, 0, 0, tileSize, pass, pool.scratch(tileSize))
+        } finally {
+            pass.end()
+        }
+
+        encoder.resolveQuerySet(queries, 0, 2, resolve, 0)
+        encoder.copyBufferToBuffer(resolve, 0, result, 0, 16)
+        device.queue.submit(arrayOf(encoder.finish()))
+        resolve.destroy()
+
+        return measurementScope.launch { measureTileGpuTime(result, tileSize) }
+    }
+
+    /**
      * Start the generation worker if it isn't running.
      *
      * The worker shares the render thread but not the render mutex, so suspending between
      * batches actually lets a queued frame through - the same reasoning as
      * [WebGpuRenderer.onDispatcher]. Batch size comes from [nextBatchSize], re-read every batch
-     * as [avgTileGpuNs] accumulates measurements. Each tile's [generate] job is collected and
+     * as [tileCostNs] accumulates measurements. Each tile's [generate] job is collected and
      * joined once per batch (not per tile) on `this` coroutine directly - no nested
      * [coroutineScope], and that join is itself what lets a queued frame through, so no separate
      * [yield] is needed. Without [FeatureName.TimestampQuery], [generate] never returns a [Job],
@@ -951,7 +1384,11 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
                             Log.e(TAG, "Tile render failed", e)
                         }
                     }
-                    if (generated == 0) break
+                    if (generated == 0) {
+                        // Drained: the one moment when timing a size we don't use costs nothing.
+                        (probeTileSize(this) ?: break).join()
+                        continue
+                    }
                     invalidate()
                     if (timestampsSupported) measurements.joinAll() else delay(5.milliseconds)
                 }
@@ -1026,9 +1463,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         st: PageTiles, tx: Int, ty: Int, measurementScope: CoroutineScope = workerScope
     ): Job? {
         return generateTile(st, tx, ty, measurementScope) { pass, texture ->
-            renderTileContent(
-                st, tx, ty, pass, texture
-            )
+            renderTileContent(st, tx, ty, st.tileSize, pass, texture)
         }
     }
 
@@ -1039,12 +1474,17 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
      * Positions each image via [solveImagePlacement], the same inversion of
      * [Image.prepareForRender]'s placement the fast path already uses. The target passed in is
      * this image's ordinary full-frame placement minus the tile's own origin, so solving against
-     * a [TILE_SIZE]-square destination places exactly the crop this tile is responsible for.
+     * a tile-square destination places exactly the crop this tile is responsible for.
      */
     private fun renderTileContent(
-        st: PageTiles, tx: Int, ty: Int, pass: GPURenderPassEncoder, texture: GPUTexture
+        st: PageTiles,
+        tx: Int,
+        ty: Int,
+        tileSize: Int,
+        pass: GPURenderPassEncoder,
+        texture: GPUTexture
     ) {
-        val ts = TILE_SIZE.toFloat()
+        val ts = tileSize.toFloat()
         val s = st.scale
         st.page.forEachImage { image, srcOffsetX ->
             if (image.mipmaps.isNotEmpty()) {
@@ -1132,13 +1572,9 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         st.pending.clear()
         toGenerate.forEach { tkey -> generateTileNow(st, (tkey shr 32).toInt(), tkey.toInt()) }
 
-        pass.setPipeline(blitPipeline)
-        toGenerate.forEach { tkey ->
-            val tile = st.tiles[tkey] ?: return@forEach
-            tile.lastUsed = frame
-            pass.setBindGroup(0, tile.bindGroup)
-            pass.draw(6)
-        }
+        // Only the tiles that just landed: [drawGridForFullPage] already blitted the rest, and
+        // these blend premultiplied-over, so drawing one twice is not the same as drawing it once.
+        drawTiles(pass, st, toGenerate)
         return true
     }
 
@@ -1154,7 +1590,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     ): Boolean = drawGridForFullPage(pass, page, dst) != null
 
     /**
-     * Render one [TILE_SIZE] tile at ([tx], [ty]) into [st] via [render], then store it. The GPU
+     * Render one tile at ([tx], [ty]) into [st] via [render], then store it. The GPU
      * timing measurement this starts is launched onto [measurementScope] - see [generate]'s doc
      * for why that's a per-batch scope from [schedule] rather than [workerScope] directly.
      */
@@ -1169,57 +1605,56 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         if (st.tiles.containsKey(key)) return null
         evict()
 
+        val pool = atlas
+        // Every slot is spoken for by a tile too fresh for evict() to take - drop this one and
+        // let the worker come back to it.
+        val origin = pool.acquire(st.tileSize)
+        if (origin < 0) return null
+
         val queries = timestampQuerySet
         if (queries == null) {
-            withTileTexture { texture, uniform ->
-                val encoder = device.createCommandEncoder()
-                val pass = encoder.beginRenderPass(clearedColorPass(texture))
-                try {
-                    render(pass, texture)
-                } finally {
-                    pass.end()
-                }
-                device.queue.submit(arrayOf(encoder.finish()))
-
-                writeTileUniform(uniform, tx, ty)
-                val bindGroup = tileBindGroup(st.frameUniform, uniform, texture)
-                st.tiles[key] = Tile(texture, uniform, bindGroup).also { it.lastUsed = frame }
-            }
-            return null
-        }
-        val (resolve, result) = createTimestampBuffers()
-
-        withTileTexture { texture, uniform ->
             val encoder = device.createCommandEncoder()
-            val pass = encoder.beginRenderPass(
-                clearedColorPass(
-                    texture, timestampWrites = GPUPassTimestampWrites(
-                        queries, beginningOfPassWriteIndex = 0, endOfPassWriteIndex = 1
-                    )
-                )
-            )
-
+            val pass = encoder.beginRenderPass(clearedColorPass(pool.scratchView(st.tileSize)))
             try {
-                render(pass, texture)
+                render(pass, pool.scratch(st.tileSize))
             } finally {
                 pass.end()
             }
-
-            encoder.resolveQuerySet(queries, 0, 2, resolve, 0)
-            encoder.copyBufferToBuffer(resolve, 0, result, 0, 16)
-
+            pool.copyScratchInto(encoder, origin, st.tileSize)
             device.queue.submit(arrayOf(encoder.finish()))
-            resolve.destroy()
-
-            writeTileUniform(uniform, tx, ty)
-            val bindGroup = tileBindGroup(st.frameUniform, uniform, texture)
-            st.tiles[key] = Tile(texture, uniform, bindGroup).also { it.lastUsed = frame }
+            st.tiles[key] = Tile(origin).also { it.lastUsed = frame }
+            st.instancesDirty = true
+            return null
         }
 
-        return measurementScope.launch { measureTileGpuTime(result) }
+        val (resolve, result) = createTimestampBuffers()
+        val encoder = device.createCommandEncoder()
+        val pass = encoder.beginRenderPass(
+            clearedColorPass(
+                pool.scratchView(st.tileSize), timestampWrites = GPUPassTimestampWrites(
+                    queries, beginningOfPassWriteIndex = 0, endOfPassWriteIndex = 1
+                )
+            )
+        )
+        try {
+            render(pass, pool.scratch(st.tileSize))
+        } finally {
+            pass.end()
+        }
+
+        pool.copyScratchInto(encoder, origin, st.tileSize)
+        encoder.resolveQuerySet(queries, 0, 2, resolve, 0)
+        encoder.copyBufferToBuffer(resolve, 0, result, 0, 16)
+
+        device.queue.submit(arrayOf(encoder.finish()))
+        resolve.destroy()
+        st.tiles[key] = Tile(origin).also { it.lastUsed = frame }
+        st.instancesDirty = true
+
+        return measurementScope.launch { measureTileGpuTime(result, st.tileSize) }
     }
 
-    private suspend fun measureTileGpuTime(result: GPUBuffer) {
+    private suspend fun measureTileGpuTime(result: GPUBuffer, tileSize: Int) {
         awaitPumped { result.mapAndAwait(MapMode.Read, 0, result.size) }
         val timestamps = result.getConstMappedRange(0, 16)
         timestamps.order(ByteOrder.nativeOrder())
@@ -1229,8 +1664,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         result.destroy()
         if (end > start) {
             val sampleNs = (end - start).toDouble()
-            avgTileGpuNs =
-                if (avgTileGpuNs <= 0.0) sampleNs else avgTileGpuNs * 0.8 + sampleNs * 0.2
+            recordTileCost(tileSize, sampleNs)
         }
     }
 
@@ -1248,35 +1682,12 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         }
     }
 
-    private inline fun withTileTexture(block: (GPUTexture, GPUBuffer) -> Unit) {
-        val texture = device.createTexture(
-            GPUTextureDescriptor(
-                size = GPUExtent3D(TILE_SIZE, TILE_SIZE),
-                usage = TextureUsage.RenderAttachment or TextureUsage.TextureBinding,
-                format = TextureFormat.RGBA8Unorm
-            )
-        )
-        // Holds just the tile's grid coordinate, which never changes, so it and the bind group
-        // are created once here. 32 bytes rather than the 8 the shader reads, since writeBuffer
-        // writes the whole scratch ByteBuffer and a write must fit in the destination.
-        val uniform = device.createBuffer(
-            GPUBufferDescriptor(size = 32, usage = BufferUsage.Uniform or BufferUsage.CopyDst)
-        )
-        try {
-            block(texture, uniform)
-        } catch (e: Exception) {
-            texture.destroy()
-            uniform.destroy()
-            throw e
-        }
-    }
-
     private fun clearedColorPass(
-        texture: GPUTexture, timestampWrites: GPUPassTimestampWrites? = null
+        view: GPUTextureView, timestampWrites: GPUPassTimestampWrites? = null
     ) = GPURenderPassDescriptor(
         colorAttachments = arrayOf(
             GPURenderPassColorAttachment(
-                view = texture.createView(),
+                view = view,
                 loadOp = LoadOp.Clear,
                 storeOp = StoreOp.Store,
                 clearValue = GPUColor(0.0, 0.0, 0.0, 0.0)
@@ -1301,7 +1712,8 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     ) {
         val dstW = dst.width.toFloat()
         val dstH = dst.height.toFloat()
-        if (st.writtenSnapX == snapX && st.writtenSnapY == snapY && st.writtenDstW == dstW && st.writtenDstH == dstH && st.writtenClipL == clipL && st.writtenClipT == clipT && st.writtenClipR == clipR && st.writtenClipB == clipB) return
+        val ts = st.tileSize.toFloat()
+        if (st.writtenSnapX == snapX && st.writtenSnapY == snapY && st.writtenDstW == dstW && st.writtenDstH == dstH && st.writtenClipL == clipL && st.writtenClipT == clipT && st.writtenClipR == clipR && st.writtenClipB == clipB && st.writtenTs == ts) return
 
         val byteBuffer = byteBufferLocal.get()
         byteBuffer.clear()
@@ -1313,6 +1725,8 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         byteBuffer.putFloat(clipT)
         byteBuffer.putFloat(clipR)
         byteBuffer.putFloat(clipB)
+        byteBuffer.putFloat(ts)
+        byteBuffer.putFloat(atlas.side.toFloat())
         byteBuffer.flip()
         device.queue.writeBuffer(st.frameUniform, 0, byteBuffer)
         st.writtenSnapX = snapX
@@ -1323,42 +1737,26 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         st.writtenClipT = clipT
         st.writtenClipR = clipR
         st.writtenClipB = clipB
+        st.writtenTs = ts
     }
 
-    private fun writeTileUniform(uniform: GPUBuffer, tx: Int, ty: Int) {
-        val byteBuffer = byteBufferLocal.get()
-        byteBuffer.clear()
-        byteBuffer.putFloat(tx.toFloat())
-        byteBuffer.putFloat(ty.toFloat())
-        byteBuffer.flip()
-        device.queue.writeBuffer(uniform, 0, byteBuffer)
-    }
+    /** What [maxTiles] tiles of [TILE_SIZE] come to - the budget every size is held to. */
+    private val maxTileBytes get() = maxTiles.toLong() * TILE_SIZE * TILE_SIZE * 4
 
-    private fun tileBindGroup(
-        frameUniform: GPUBuffer, tileUniform: GPUBuffer, texture: GPUTexture
-    ): GPUBindGroup = device.createBindGroup(
-        GPUBindGroupDescriptor(
-            layout = blitBindGroupLayout, entries = arrayOf(
-                GPUBindGroupEntry(0, buffer = frameUniform),
-                GPUBindGroupEntry(1, buffer = tileUniform),
-                GPUBindGroupEntry(2, textureView = texture.createView()),
-                GPUBindGroupEntry(3, sampler = blitSampler),
-            )
-        )
-    )
+    private fun tileBytes(st: PageTiles) = st.tileSize.toLong() * st.tileSize * 4
 
     /**
-     * Evict least-recently-used tiles down to [maxTiles], best-effort.
+     * Evict least-recently-used tiles down to [maxTileBytes], best-effort.
      *
-     * Tiles used this frame or last are never touched: the pass that blitted them may not have
-     * been submitted yet, and destroying a texture a recording encoder references is a
-     * validation error. If everything is that fresh the cap is allowed to overshoot - the
-     * wanted set is bounded by the viewport, so the overshoot is too.
+     * Tiles used this frame or last are never touched: a freed slot is handed straight back out,
+     * and rewriting one a pass still being recorded reads from would draw the wrong content. If
+     * everything is that fresh the cap is allowed to overshoot - the wanted set is bounded by the
+     * viewport, so the overshoot is too.
      */
     private fun evict() {
-        var total = 0
-        for (st in pages.values) total += st.tiles.size
-        if (total < maxTiles) return
+        var total = 0L
+        for (st in pages.values) total += st.tiles.size * tileBytes(st)
+        if (total < maxTileBytes) return
 
         val candidates = ArrayList<Triple<PageTiles, Long, Tile>>()
         for (st in pages.values) {
@@ -1366,11 +1764,12 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         }
         candidates.sortBy { it.third.lastUsed }
         var i = 0
-        while (total >= maxTiles && i < candidates.size) {
+        while (total >= maxTileBytes && i < candidates.size) {
             val (st, k, t) = candidates[i]
             st.tiles.remove(k)
-            t.destroy()
-            total--
+            st.instancesDirty = true
+            atlasOrNull?.release(st.tileSize, t.atlasOrigin)
+            total -= tileBytes(st)
             i++
         }
     }
@@ -1382,39 +1781,39 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
      */
     fun cleanup() {
         workerScope.launch {
-            pages.values.forEach { it.destroyAll() }
+            pages.values.forEach { it.destroyAll(atlasOrNull) }
             pages.clear()
+            atlasOrNull?.destroy()
+            atlasOrNull = null
         }
     }
 }
 
 private const val BLIT_SHADER = """
-const TS: f32 = $TILE_SIZE.0;
-
 struct FrameParams {
     // Snapped screen-pixel position of the grid's centre; the tile grid hangs off it.
     snap: vec2<f32>,
     dst_size: vec2<f32>,
     // The grid's rect in screen pixels that blits are clipped to - see the class doc.
     clip: vec4<f32>,
-}
-
-struct TileParams {
-    t: vec2<f32>,  // this tile's grid coordinate, fixed for the tile's lifetime
+    // This grid's tile size and the atlas's, both in pixels. The grid's is per grid now, so
+    // neither can be a shader constant.
+    ts: f32,
+    atlas_size: f32,
 }
 
 @group(0) @binding(0) var<uniform> frame_params: FrameParams;
-@group(0) @binding(1) var<uniform> tile_params: TileParams;
-@group(0) @binding(2) var src_tex: texture_2d<f32>;
-@group(0) @binding(3) var src_sampler: sampler;
+@group(0) @binding(1) var src_tex: texture_2d<f32>;
+@group(0) @binding(2) var src_sampler: sampler;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
 }
 
+// One instance per cached tile: its grid coordinate, then its position in the atlas.
 @vertex
-fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
+fn vs_main(@builtin(vertex_index) vertex_index: u32, @location(0) tile: vec4<f32>) -> VertexOutput {
     var corners = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0), // Top-left
         vec2<f32>(0.0, 1.0), // Bottom-left
@@ -1425,11 +1824,12 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     );
 
     let pos = corners[vertex_index];
+    let ts = frame_params.ts;
 
     // Clamping the corners to the clip rect shrinks the quad and its uv window in step, so
     // whatever survives is still a 1:1 texel copy. Offscreen overhang is left to NDC clipping.
-    let origin = frame_params.snap + tile_params.t * TS;
-    let p = clamp(origin + pos * TS, frame_params.clip.xy, frame_params.clip.zw);
+    let origin = frame_params.snap + tile.xy * ts;
+    let p = clamp(origin + pos * ts, frame_params.clip.xy, frame_params.clip.zw);
 
     var out: VertexOutput;
     out.position = vec4<f32>(
@@ -1437,7 +1837,8 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
         1.0 - p.y / frame_params.dst_size.y * 2.0,
         0.0, 1.0
     );
-    out.uv = (p - origin) / TS;
+    // Straight into the atlas: this tile's slot plus however much of the tile survived the clamp.
+    out.uv = (tile.zw + (p - origin)) / frame_params.atlas_size;
     return out;
 }
 
@@ -1445,6 +1846,6 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // 1:1 at integer positions with a nearest sampler: an exact copy of the tile's texels,
     // already premultiplied by RenderPage.
-     return textureSample(src_tex, src_sampler, in.uv);
+    return textureSample(src_tex, src_sampler, in.uv);
 }
 """

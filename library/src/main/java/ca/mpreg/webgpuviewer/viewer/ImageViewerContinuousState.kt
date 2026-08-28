@@ -8,7 +8,6 @@ import androidx.webgpu.GPUTexture
 import ca.mpreg.webgpuviewer.draw.Draw
 import ca.mpreg.webgpuviewer.draw.clear
 import ca.mpreg.webgpuviewer.renderer.RenderPage
-import ca.mpreg.webgpuviewer.renderer.TileRenderer.Companion.TILE_SIZE
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
 import ca.mpreg.webgpuviewer.renderer.solveImagePlacement
 import kotlinx.coroutines.Job
@@ -234,7 +233,7 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
         val visTop = 0.5f * screenH - screenH / (2f * scale)
         // +1 tile of margin, matching TileRenderer's own prefetch ring, so a boundary tile just
         // past the viewport has its page already discovered.
-        val visBot = 0.5f * screenH + screenH / (2f * scale) + TILE_SIZE / scale
+        val visBot = 0.5f * screenH + screenH / (2f * scale) + tiles.preferredTileSize / scale
 
         // Backward: pages above page 0, needed once zoomed out enough that visTop goes negative -
         // i.e. the visible band reaches above where page 0 itself starts. Mirrors the forward
