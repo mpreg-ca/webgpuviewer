@@ -28,10 +28,10 @@ import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer.Companion.dispatcher
 import ca.mpreg.webgpuviewer.transition.Transition
 import ca.mpreg.webgpuviewer.transition.TransitionBasic
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicBoolean
@@ -218,6 +218,8 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
                 renderWake.receive()
                 continue
             }
+            // Drop the wake this frame's invalidate left, or going idle costs a spurious one.
+            renderWake.tryReceive()
             // Capture render state on main thread before any thread switching
             val snapshot = captureRenderState() ?: continue
             // Now render on GPU thread with captured state

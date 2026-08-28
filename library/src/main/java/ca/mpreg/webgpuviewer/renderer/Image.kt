@@ -9,10 +9,9 @@ import androidx.webgpu.GPUTexture
 import androidx.webgpu.GPUTextureView
 import ca.mpreg.webgpuviewer.ImageUtil
 import ca.mpreg.webgpuviewer.Trim
-import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
-import java.util.concurrent.Executors
 import kotlin.math.floor
 import kotlin.math.log2
 import kotlin.math.round
@@ -36,15 +35,6 @@ class Image private constructor(
     var trim: Rect? = null
 
     companion object {
-        // Trim detection and the resize chain. Not Dispatchers.Default: sized to the core
-        // count, it lets one decode saturate every core at normal priority.
-        private val cpuDispatcher = Executors.newFixedThreadPool(2) { runnable ->
-            Thread(runnable, "WebGpuViewer-ImageCpu").apply {
-                isDaemon = true
-                priority = Thread.MIN_PRIORITY
-            }
-        }.asCoroutineDispatcher()
-
         suspend operator fun invoke(
             pixels: ByteBuffer, width: Int, height: Int,
             createMipMaps: Boolean = true,
@@ -62,7 +52,7 @@ class Image private constructor(
             // Runs on a background dispatcher rather than as compute shaders - the GPU versions
             // would park on a buffer readback while holding the render thread, stalling every
             // queued frame (a stutter each time a page decodes).
-            withContext(cpuDispatcher) {
+            withContext(Dispatchers.Default) {
                 var backgroundFromTrim = false
 
                 val trimWith = trimColors?.takeIf { it.isNotEmpty() }
@@ -115,7 +105,7 @@ class Image private constructor(
                     val newHeight = floor(height * scale).toInt()
                     Log.d("Renderer", "Create mipmap using CPU ${scale} ${newWidth} ${newHeight}")
 
-                    currentPixels = withContext(cpuDispatcher) {
+                    currentPixels = withContext(Dispatchers.Default) {
                         ImageUtil.resize(currentPixels, textureWidth, textureHeight)
                     }
                     mipmapDataList.add(MipmapData(currentPixels, newWidth, newHeight, scale))
