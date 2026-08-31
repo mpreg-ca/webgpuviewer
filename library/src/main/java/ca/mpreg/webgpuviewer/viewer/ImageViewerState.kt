@@ -22,6 +22,7 @@ import androidx.webgpu.GPURenderPassEncoder
 import androidx.webgpu.GPUTexture
 import androidx.webgpu.LoadOp
 import androidx.webgpu.StoreOp
+import ca.mpreg.webgpuviewer.filter.FilterChain
 import ca.mpreg.webgpuviewer.renderer.TileRenderer
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer.Companion.dispatcher
@@ -40,6 +41,14 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
     val renderer = WebGpuRenderer()
 
     internal val tiles = TileRenderer { invalidate() }
+
+    /**
+     * Post-processing over the finished frame - assign [FilterChain.filters] to run some. Wired
+     * to [invalidate] here, so changing a filter's settings redraws by itself.
+     */
+    val filters: FilterChain = renderer.filters.also { chain ->
+        chain.onInvalidate = { invalidate() }
+    }
 
     var scope: CoroutineScope? = null
 

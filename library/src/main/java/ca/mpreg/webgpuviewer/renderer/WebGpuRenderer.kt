@@ -25,6 +25,7 @@ import androidx.webgpu.UncapturedErrorCallback
 import androidx.webgpu.WebGpuRuntimeException
 import androidx.webgpu.helper.Util.windowFromSurface
 import androidx.webgpu.helper.initLibrary
+import ca.mpreg.webgpuviewer.filter.FilterChain
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer.Companion.withContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -157,6 +158,12 @@ class WebGpuRenderer {
     @Volatile
     private var surface: GPUSurface? = null
 
+    /**
+     * Post-processing over the finished frame - see [FilterChain]. Empty by default, in which
+     * case [render] hands the swapchain texture straight to its caller as it always did.
+     */
+    val filters = FilterChain()
+
     var width: Int = 0
     var height: Int = 0
 
@@ -217,7 +224,10 @@ class WebGpuRenderer {
 
             try {
                 val encoder = device.createCommandEncoder()
-                fn(encoder, texture)
+                // Draws into an offscreen texture when filters are enabled; endFrame runs them
+                // over it and lands the result on the swapchain.
+                fn(encoder, filters.beginFrame(texture))
+                filters.endFrame(encoder, texture)
                 device.queue.submit(arrayOf(encoder.finish()))
                 surface.present()
             } catch (e: CancellationException) {
@@ -245,6 +255,7 @@ class WebGpuRenderer {
 
         val doCleanup: suspend () -> Unit = {
             mutex.withLock {
+                filters.cleanup()
                 surface?.close()
                 surface = null
             }
