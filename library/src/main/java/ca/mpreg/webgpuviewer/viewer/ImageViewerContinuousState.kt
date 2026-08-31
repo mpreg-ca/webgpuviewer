@@ -3,6 +3,7 @@ package ca.mpreg.webgpuviewer.viewer
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.spring
+import androidx.compose.ui.util.fastCoerceIn
 import androidx.webgpu.GPUCommandEncoder
 import androidx.webgpu.GPUTexture
 import ca.mpreg.webgpuviewer.draw.Draw
@@ -12,6 +13,7 @@ import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
 import ca.mpreg.webgpuviewer.renderer.solveImagePlacement
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlin.math.max
 
 class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
     companion object {
@@ -21,6 +23,35 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
     var scale = 1f
 
     var offsetX = 0f
+
+    /**
+     * How much of the viewport width a page fills when fully zoomed out, from 0 to 1. The
+     * default 1 zooms out to exactly the full width; 0.6 stops with the page at 60% of it and
+     * margin either side.
+     *
+     * Only the zoom-out floor moves. A page is still laid out and measured against the full
+     * width - [getPageHeight] and the whole document coordinate space are unchanged - so this
+     * decides how far out a pinch may go, not how tall anything is.
+     *
+     * Clamped away from 0, which is not a scale anything can be drawn at. Setting it lifts a
+     * [scale] that is now below the floor, so it takes effect without waiting for a gesture.
+     */
+    var minZoomWidthFraction: Float = 1f
+        set(value) {
+            val clamped = value.fastCoerceIn(0.01f, 1f)
+            if (clamped == field) return
+            field = clamped
+            if (scale < clamped) scale = clamped
+            invalidate()
+        }
+
+    /** Lowest [scale] a gesture may settle at - see [minZoomWidthFraction]. */
+    val minScale: Float get() = minZoomWidthFraction
+
+    /** Follows [minScale], so a double tap off the zoom-out floor still doubles what is on screen. */
+    val doubleTapScale: Float get() = minScale * 2f
+
+    val maxScale: Float get() = max(doubleTapScale * 2f, 4f)
 
     /**
      * True while [ImageViewerContinuous]'s gestures are actively driving zoom (pinch, drag, fling,

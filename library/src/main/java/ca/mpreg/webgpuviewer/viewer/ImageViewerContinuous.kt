@@ -55,10 +55,6 @@ fun ImageViewerContinuous(
         state.density = density
     }
 
-    val minScale = 1f
-    val doubleTapScale = minScale * 2f
-    val maxScale = max(doubleTapScale * 2f, 4f)
-
     RequestMaxRefreshRate()
 
     // See ImageViewer.kt: AndroidEmbeddedExternalSurface over AndroidExternalSurface.
@@ -115,7 +111,7 @@ fun ImageViewerContinuous(
 
                         if (waitForCleanUp(secondDown.id, doubleTapTimeout, touchSlop) != null) {
                             // Double tap: toggle zoom
-                            if (state.scale > minScale + 0.1f) {
+                            if (state.scale > state.minScale + 0.1f) {
                                 // Zoom out: animate offsetX to 0, anchor Y to tap point
                                 val py = secondDown.position.y / state.height - 0.5f
                                 state.animationJob = scope.launch {
@@ -123,7 +119,7 @@ fun ImageViewerContinuous(
                                     try {
                                         val startScale = state.scale
                                         val startOffsetX = state.offsetX
-                                        val totalDiff = 1f / minScale - 1f / startScale
+                                        val totalDiff = 1f / state.minScale - 1f / startScale
                                         val px =
                                             if (totalDiff != 0f) -startOffsetX / totalDiff else 0f
                                         animate(
@@ -132,7 +128,8 @@ fun ImageViewerContinuous(
                                                 visibilityThreshold = 0.002f
                                             )
                                         ) { t, _ ->
-                                            val newScale = startScale + (minScale - startScale) * t
+                                            val newScale =
+                                                startScale + (state.minScale - startScale) * t
                                             val diff = 1f / newScale - 1f / state.scale
                                             state.offsetX += px * diff
                                             state.scrollY -= py * diff * state.height
@@ -160,7 +157,7 @@ fun ImageViewerContinuous(
                                             )
                                         ) { t, _ ->
                                             val newScale =
-                                                startScale + (doubleTapScale - startScale) * t
+                                                startScale + (state.doubleTapScale - startScale) * t
                                             val diff = 1f / newScale - 1f / state.scale
                                             state.offsetX += px * diff
                                             state.scrollY -= py * diff * state.height
@@ -216,7 +213,7 @@ fun ImageViewerContinuous(
                                 // Decided before the finally below, so isScaleAnimating has no
                                 // gap between this drag ending and its fling starting.
                                 willFlingZoom =
-                                    abs(dragVelocity.y) > 200 && state.scale > minScale && state.scale < maxScale
+                                    abs(dragVelocity.y) > 200 && state.scale > state.minScale && state.scale < state.maxScale
                             } finally {
                                 if (!willFlingZoom) state.isScaleAnimating = false
                             }
@@ -231,7 +228,7 @@ fun ImageViewerContinuous(
                                         ) {
                                             val newScale =
                                                 (originalScale * 10f.pow(2 * (totalDeltaY + value) / state.height)).fastCoerceIn(
-                                                    minScale, maxScale
+                                                    state.minScale, state.maxScale
                                                 )
                                             val diff = 1f / newScale - 1f / originalScale
                                             val maxOffsetX =
@@ -251,7 +248,8 @@ fun ImageViewerContinuous(
                                 }
                             } else {
                                 // Snap scale and offsetX back if overshot
-                                val targetScale = state.scale.fastCoerceIn(minScale, maxScale)
+                                val targetScale =
+                                    state.scale.fastCoerceIn(state.minScale, state.maxScale)
                                 val targetMaxOffsetX =
                                     max(0f, (targetScale - 1f) / (2f * targetScale))
                                 val targetOffsetX =
@@ -357,7 +355,7 @@ fun ImageViewerContinuous(
                         longPressJob?.cancel()
                         if (longPressed || canceled) return@awaitEachGesture
 
-                        if (state.scale < minScale) {
+                        if (state.scale < state.minScale) {
                             // Snap scale back up
                             state.animationJob = scope.launch {
                                 state.isScaleAnimating = true
@@ -370,7 +368,7 @@ fun ImageViewerContinuous(
                                             visibilityThreshold = 0.002f
                                         )
                                     ) { t, _ ->
-                                        state.scale = startScale + (minScale - startScale) * t
+                                        state.scale = startScale + (state.minScale - startScale) * t
                                         state.offsetX = startOffsetX * (1f - t)
                                         state.invalidate()
                                     }
@@ -378,7 +376,7 @@ fun ImageViewerContinuous(
                                     state.isScaleAnimating = false
                                 }
                             }
-                        } else if (state.scale > maxScale) {
+                        } else if (state.scale > state.maxScale) {
                             // Snap scale back down
                             state.animationJob = scope.launch {
                                 state.isScaleAnimating = true
@@ -386,7 +384,7 @@ fun ImageViewerContinuous(
                                     val startScale = state.scale
                                     val startOffsetX = state.offsetX
                                     val targetMaxOffsetX =
-                                        max(0f, (maxScale - 1f) / (2f * maxScale))
+                                        max(0f, (state.maxScale - 1f) / (2f * state.maxScale))
                                     val targetOffsetX = startOffsetX.fastCoerceIn(
                                         -targetMaxOffsetX, targetMaxOffsetX
                                     )
@@ -396,7 +394,7 @@ fun ImageViewerContinuous(
                                             visibilityThreshold = 0.002f
                                         )
                                     ) { t, _ ->
-                                        state.scale = startScale + (maxScale - startScale) * t
+                                        state.scale = startScale + (state.maxScale - startScale) * t
                                         state.offsetX =
                                             startOffsetX + (targetOffsetX - startOffsetX) * t
                                         state.invalidate()
