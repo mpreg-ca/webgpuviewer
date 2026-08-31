@@ -1481,7 +1481,9 @@ open class ImagePage {
         val (left, right) = xEdges(scale >= homeScale)
         val (minV, maxV) = rawBounds(width, left, right, parent.width, scale)
         if (minV > maxV) {
-            val rest = restingX(scale)
+            // [maxV, minV] is every x showing the content whole - a lone spread side zoomed
+            // past its half would otherwise stay pinned to the seam, hanging off screen.
+            val rest = restingX(scale).fastCoerceIn(maxV, minV)
             return rest to rest
         }
         return minV to maxV
