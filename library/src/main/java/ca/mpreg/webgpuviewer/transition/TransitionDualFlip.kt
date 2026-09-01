@@ -52,7 +52,7 @@ object TransitionDualFlip : Transition() {
     /** Never zero - the arc's radius is length/bend. */
     private const val MIN_BEND = 0.04f
 
-    /** How much of each end of the turn eases back to flat lighting, matching the static halves. */
+    /** How much of each end eases back to flat lighting, to match the static halves. */
     private const val LIT_ENDS = 0.15f
 
     // Along the leaf only - it does not bend vertically, so rows buy just a shorter diagonal.
@@ -94,7 +94,7 @@ object TransitionDualFlip : Transition() {
         /** Whether that face has a cached page to sample; blank if not. */
         val hasFront: Boolean,
         val hasBack: Boolean,
-        /** Shading strength, 0 at either end of the turn - see [LIT_ENDS]. */
+        /** Shading strength, 0 at either end - see [LIT_ENDS]. */
         val shading: Float,
     )
 
@@ -362,7 +362,7 @@ fn shadow_alpha(z: f32) -> f32 {
 
 /// Lambert shading at [p], tangent angle [b]. The normal has no y - the sheet bends only about
 /// the spine - but the light does, so take the direction to it in full.
-/// Eased off at either end of the turn, so the leaf lands as lit as the static half it becomes.
+/// Eased off at either end, so the leaf lands as lit as the static half it becomes.
 fn leaf_shade(p: vec3<f32>, b: f32, front: bool) -> f32 {
     var n = vec3<f32>(-flip.geom.y * sin(b), 0.0, cos(b));
     if (!front) { n = -n; }

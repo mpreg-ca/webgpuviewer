@@ -932,15 +932,9 @@ open class ImagePage {
             }
         }
 
-        override fun pageRect(dst: GPUTexture): FloatArray? {
-            forEachSide { side, offsetX ->
-                val image = (side as? ImageSingle)?.currentImage
-                if (image != null && image.mipmaps.isNotEmpty()) {
-                    return image.placement(dst, x + offsetX / dst.width, y, scale)
-                }
-            }
-            return null
-        }
+        /** Via [leafRect], so a spread of two [Render] sides still has a rect. */
+        override fun pageRect(dst: GPUTexture): FloatArray? =
+            leafRect(dst, true) ?: leafRect(dst, false)
 
         /** That side's own rect, so a spread turns one real page rather than half of a sheet. */
         override fun leafRect(dst: GPUTexture, left: Boolean): FloatArray? {

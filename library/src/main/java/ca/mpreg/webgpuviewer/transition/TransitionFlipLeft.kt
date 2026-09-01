@@ -35,8 +35,7 @@ import kotlin.math.atan2
  *
  * The cache is already at display resolution, so the fold resamples it with a plain sampler. The
  * fold works in page-relative coordinates and reflects across the page's rect within the cache -
- * see [ImagePage.pageRect] - so a page narrower or shorter than the surface folds as itself, not as a
- * screen-sized sheet.
+ * see [ImagePage.wholeRect] - so a small page folds as itself, and a spread folds as one sheet.
  */
 object TransitionFlipLeft : Transition() {
     override val premultipliedOutput = true
@@ -209,7 +208,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         foldAngle: Float,
     ) {
         if (cachedView == null) return
-        val rect = page.pageRect(dst) ?: return
+        val rect = page.wholeRect(dst) ?: return
 
         val byteBuffer = byteBufferLocal.get()
         byteBuffer.clear()
