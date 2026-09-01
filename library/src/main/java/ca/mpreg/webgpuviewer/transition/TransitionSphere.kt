@@ -30,13 +30,16 @@ import java.nio.ByteOrder
  * texture. [getCachedTexture] keys on the page's own transform, so the flat render happens once per
  * transition while only the rotation is per-frame.
  *
- * A hemisphere maps the page's rect within the cache - see [ImagePage.pageRect] - so it stays page-shaped
- * rather than taking the surface's proportions.
+ * What the hemisphere wraps is the page's rect clipped to that surface. A page zoomed past the
+ * surface clips to the whole of it, so the cache is taken exactly as drawn, pan and zoom included
+ * - nothing undoes the page's transform. A page smaller than the surface wraps just its own rect,
+ * so the sphere is the page rather than the letterbox around it.
  */
 object TransitionSphere : Transition() {
     override val premultipliedOutput = true
 
-    // Thread-local ByteBuffer to avoid per-frame allocation
+    // Thread-local ByteBuffer to avoid per-frame allocation. Sized to the uniform exactly:
+    // writeBuffer sends the whole capacity, so flip() does not shorten it.
     private val byteBufferLocal = ThreadLocal.withInitial {
         ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder())
     }
@@ -52,7 +55,8 @@ object TransitionSphere : Transition() {
 
     override val code = """
 struct Uniforms {
-    // The page's rect inside the cached surface: (x1, y1, x2, y2), normalised.
+    // The page's rect inside the cached surface: (x1, y1, x2, y2), normalised. May reach outside
+    // it, which is what the clip in the vertex stage is for.
     page_rect: vec4<f32>,
     dst_width: f32,
     dst_height: f32,
@@ -98,11 +102,14 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     let aspect = dst_size_f.x / dst_size_f.y;
     let sphere_r = 0.15;
 
-    // Flat position: uv runs 0..1 over the page, so the flat quad spans the page's rect within the
-    // surface, and that same position is the texture coordinate. Keeping uv page-relative is what
-    // makes the sphere mapping below page-shaped rather than screen-shaped.
+    // Flat position: the page's rect where it fits inside the surface, the surface itself where
+    // it does not. Clipping gives both without a branch - a page zoomed past the surface clips to
+    // 0..1 and is taken as drawn, while a smaller one keeps its own rect and wraps the page
+    // rather than the letterbox. uv runs 0..1 over whichever it is, and doubles as the texture
+    // coordinate.
     let is_back = transform.is_second > 0.5;
-    let flat_pos = mix(transform.page_rect.xy, transform.page_rect.zw, uv);
+    let clipped = clamp(transform.page_rect, vec4<f32>(0.0), vec4<f32>(1.0));
+    let flat_pos = mix(clipped.xy, clipped.zw, uv);
     var flat_ndc = vec2<f32>(flat_pos.x * 2.0 - 1.0, 1.0 - flat_pos.y * 2.0);
 
     // Sphere position: map UV to sphere surface
