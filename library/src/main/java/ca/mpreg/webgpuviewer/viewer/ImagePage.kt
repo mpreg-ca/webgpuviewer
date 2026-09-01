@@ -706,19 +706,16 @@ open class ImagePage {
                 1f
             }
 
-            val origA = (image.backgroundColor ushr 24) and 0xFF
-            val a = (origA * bgAlpha).toInt()
+            val a = (((image.backgroundColor ushr 24) and 0xFF) * bgAlpha).toInt()
             if (a <= 0) return
 
             val x1 = if (backgroundSpansFullWidth) 0f else rect[0]
             val x2 = if (backgroundSpansFullWidth) 1f else rect[2]
-            val origR = (image.backgroundColor shr 16) and 0xFF
-            val origG = (image.backgroundColor shr 8) and 0xFF
-            val origB = image.backgroundColor and 0xFF
-            val r = (origR * bgAlpha).toInt()
-            val g = (origG * bgAlpha).toInt()
-            val b = (origB * bgAlpha).toInt()
-            val bgColor = (a shl 24) or (r shl 16) or (g shl 8) or b
+            // Alpha only. The frame clears transparent, so fading this out crossfades to whatever
+            // the app painted behind the surface - the backdrop this is meant to give way to.
+            // Both pipelines blend with SrcAlpha already, so scaling rgb here applied the fade a
+            // second time and took the crossfade through black on its way there.
+            val bgColor = (a shl 24) or (image.backgroundColor and 0xFFFFFF)
             if (maskedBackground) {
                 RenderPage.drawMaskedRect(pass, x1, 0f, x2, 1f, bgColor)
             } else {
