@@ -20,6 +20,7 @@ import ca.mpreg.webgpuviewer.draw.Draw
 import ca.mpreg.webgpuviewer.draw.rect
 import ca.mpreg.webgpuviewer.renderer.TileRenderer
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.blitCachedRegion
+import ca.mpreg.webgpuviewer.transition.TransitionDualFlip.LIT_ENDS
 import ca.mpreg.webgpuviewer.viewer.ImagePage
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -50,6 +51,9 @@ object TransitionDualFlip : Transition() {
 
     /** Never zero - the arc's radius is length/bend. */
     private const val MIN_BEND = 0.04f
+
+    /** How much of each end of the turn eases back to flat lighting, matching the static halves. */
+    private const val LIT_ENDS = 0.15f
 
     // Along the leaf only - it does not bend vertically, so rows buy just a shorter diagonal.
     private const val COLS = 64
@@ -90,6 +94,8 @@ object TransitionDualFlip : Transition() {
         /** Whether that face has a cached page to sample; blank if not. */
         val hasFront: Boolean,
         val hasBack: Boolean,
+        /** Shading strength, 0 at either end of the turn - see [LIT_ENDS]. */
+        val shading: Float,
     )
 
     override fun render(
@@ -206,7 +212,13 @@ object TransitionDualFlip : Transition() {
             aspect = dst.width.toFloat() / dst.height,
             hasFront = rawFront != null && cached1 != null,
             hasBack = rawBack != null && cached2 != null,
+            shading = min(smoothstep(t / LIT_ENDS), smoothstep((1f - t) / LIT_ENDS)),
         )
+    }
+
+    private fun smoothstep(x: Float): Float {
+        val e = x.coerceIn(0f, 1f)
+        return e * e * (3f - 2f * e)
     }
 
     /** [rect] reflected across the spine - where the leaf's other face has to lie. */
@@ -235,7 +247,7 @@ object TransitionDualFlip : Transition() {
         byteBuffer.putFloat(leaf.aspect)
         byteBuffer.putFloat(if (leaf.hasFront) 1f else 0f)
         byteBuffer.putFloat(if (leaf.hasBack) 1f else 0f)
-        byteBuffer.putFloat(0f)
+        byteBuffer.putFloat(leaf.shading)
         byteBuffer.putFloat(0f)
         // Opaque, so premultiplied and straight agree.
         byteBuffer.putFloat(((blank shr 16) and 0xFF) / 255f)
@@ -280,7 +292,7 @@ struct Uniforms {
     geom: vec4<f32>,
     // sheet length, top y, bottom y, surface aspect
     span: vec4<f32>,
-    // front textured, back textured, unused, unused
+    // front textured, back textured, shading strength, unused
     flags: vec4<f32>,
     // What a face with no page behind it is painted, premultiplied.
     blank: vec4<f32>,
@@ -345,15 +357,17 @@ fn shadow_cast(p: vec3<f32>) -> vec2<f32> {
 
 /// How dark the shadow is where the point casting it sits [z] above the page.
 fn shadow_alpha(z: f32) -> f32 {
-    return SHADOW_DEPTH * exp(-SHADOW_FALLOFF * max(z, 0.0) / flip.span.x);
+    return flip.flags.z * SHADOW_DEPTH * exp(-SHADOW_FALLOFF * max(z, 0.0) / flip.span.x);
 }
 
 /// Lambert shading at [p], tangent angle [b]. The normal has no y - the sheet bends only about
 /// the spine - but the light does, so take the direction to it in full.
+/// Eased off at either end of the turn, so the leaf lands as lit as the static half it becomes.
 fn leaf_shade(p: vec3<f32>, b: f32, front: bool) -> f32 {
     var n = vec3<f32>(-flip.geom.y * sin(b), 0.0, cos(b));
     if (!front) { n = -n; }
-    return 0.42 + 0.58 * max(dot(n, normalize(light_pos() - p)), 0.0);
+    let lambert = 0.42 + 0.58 * max(dot(n, normalize(light_pos() - p)), 0.0);
+    return mix(1.0, lambert, flip.flags.z);
 }
 
 /// The face showing at a point of the sheet - whichever way the surface is turned.
