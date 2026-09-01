@@ -6,6 +6,7 @@ import androidx.webgpu.BlendOperation
 import androidx.webgpu.BufferBindingType
 import androidx.webgpu.BufferUsage
 import androidx.webgpu.CompareFunction
+import androidx.webgpu.Constants
 import androidx.webgpu.FeatureName
 import androidx.webgpu.FilterMode
 import androidx.webgpu.GPUBindGroup
@@ -240,6 +241,79 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             field = value.coerceIn(MIN_TILE_SIZE, SLAB_SIZE)
         }
 
+    /**
+     * How a tile that magnifies the page is resized - see [Rescaler]. [UpscalerCatmullRom]
+     * resolves the tile in one step, the way this has always worked; anything with a
+     * [Rescaler.factor] above 1 splits it, resolving at `scale / factor` first and letting the
+     * upscaler cover the rest.
+     *
+     * Tiles only - the live fast path ([RenderPage.renderFast]) that a pan or pinch draws through
+     * is deliberately cheap and is left alone. Assigning wipes every grid, since the tiles already
+     * cached were resized by the old rescaler.
+     */
+    @Volatile
+    var upscaler: Upscaler = UpscalerCatmullRom()
+        set(value) {
+            if (field === value) return
+            val previous = field
+            field = value
+            replaceRescaler(previous)
+        }
+
+    /**
+     * How a tile that shrinks the page is resized - see [Rescaler]. [DownscalerBox] is the only
+     * one, and like [UpscalerCatmullRom] it adds no pass of its own.
+     */
+    @Volatile
+    var downscaler: Downscaler = DownscalerBox()
+        set(value) {
+            if (field === value) return
+            val previous = field
+            field = value
+            replaceRescaler(previous)
+        }
+
+    /**
+     * Drop every tile the outgoing rescaler produced and let go of what it held. On the worker,
+     * which owns both the grids and a rescaler's textures.
+     */
+    private fun replaceRescaler(previous: Rescaler) {
+        workerScope.launch {
+            pages.values.forEach { releaseTiles(it) }
+            previous.cleanup()
+            invalidate()
+        }
+    }
+
+    /**
+     * True when either rescaler adds passes of its own, so a tile costs far more than
+     * [RenderPage.render] alone and [probeTileSize] cannot reproduce that cost. False for both
+     * defaults, which leaves everything downstream unchanged.
+     */
+    private val staged
+        get() = upscaler.run { factor > 1 && supported } ||
+                downscaler.run { factor > 1 && supported }
+
+    // The pipelines [renderTileContent] draws through, re-derived only when a rescaler is
+    // swapped. By identity, since each rescaler class shares one instance of its shader source.
+    private var filteredCache: RenderPage.Filtered? = null
+    private var filteredCacheUp: Upscaler? = null
+    private var filteredCacheDown: Downscaler? = null
+
+    /** The resolves the rescalers in force supply - see [Rescaler.code]. */
+    private fun filtered(): RenderPage.Filtered {
+        val up = upscaler
+        val down = downscaler
+        var pair = filteredCache
+        if (pair == null || up !== filteredCacheUp || down !== filteredCacheDown) {
+            pair = RenderPage.filtered(up.code, down.code)
+            filteredCache = pair
+            filteredCacheUp = up
+            filteredCacheDown = down
+        }
+        return pair
+    }
+
     private var frame = 0L
     private var workerActive = false
     private val workerScope = CoroutineScope(WebGpuRenderer.dispatcher + SupervisorJob())
@@ -334,8 +408,15 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
      * a tile inside [BATCH_TARGET_NS] - one tile is the smallest unit [schedule] can pace, so a
      * tile costing more than a batch's target is itself the hitch. A challenger needs
      * [TILE_SIZE_MARGIN] to win, since switching re-cuts every grid.
+     *
+     * Frozen while [staged], because the sizes are then not comparable: the size in use is timed
+     * generating real tiles through the rescaler, every other size by [probeTileSize] without one.
+     * So the size in use reads as expensive, this switches away, and the size it switches to
+     * becomes expensive in turn - and every switch re-cuts every grid (see [drawCore]), which on
+     * screen is the high-quality tiles dropping out and back while only the scroll moves.
      */
     private fun reconsiderTileSize() {
+        if (staged) return
         val current = sizeIndex(preferredTileSize)
         if (current < 0 || tileSamples[current] < TILE_SIZE_SAMPLES) return
 
@@ -1365,6 +1446,9 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
      * no size can be measured and [preferredTileSize] stays where it started.
      */
     private fun probeTileSize(measurementScope: CoroutineScope): Job? {
+        // Nothing to choose between while [reconsiderTileSize] is frozen, and this would measure
+        // the wrong thing anyway: it renders the plain way, with no rescaler in the middle.
+        if (staged) return null
         val queries = timestampQuerySet ?: return null
         val index = TILE_SIZES.indices.firstOrNull {
             TILE_SIZES[it] != preferredTileSize && tileSamples[it] < TILE_SIZE_SAMPLES
@@ -1517,8 +1601,48 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     private fun generateTileNow(
         st: PageTiles, tx: Int, ty: Int, measurementScope: CoroutineScope = workerScope
     ): Job? {
-        return generateTile(st, tx, ty, measurementScope) { pass, texture ->
-            renderTileContent(st, tx, ty, st.tileSize, pass, texture)
+        // Which way this tile resizes decides which rescaler gets a say.
+        val rescaler: Rescaler = if (st.scale >= 1f) upscaler else downscaler
+        val factor = rescaler.factor
+
+        // [Rescaler.appliesAt] keeps a rescaler off a tile with less than a whole run of resizing
+        // to give it. What it declines resolves in one step, as always.
+        val use = factor > 1 && rescaler.supported && rescaler.appliesAt(st.scale) &&
+                rescaler.fits(st.tileSize)
+
+        // The tile as the first step sees it, plus the rescaler's halo. Resized, that is the tile
+        // with factor*halo to spare each side, which [Rescaler.resolve] cuts off.
+        val inner = rescaler.firstStepSpan(st.tileSize)
+        val size = inner + 2 * rescaler.halo
+        // A null here means the rescaler just gave up - fall through rather than lose the tile.
+        val source = if (use) rescaler.input(size) else null
+        val sourceView = rescaler.inputView
+
+        if (source == null || sourceView == null) {
+            return generateTile(
+                st, tx, ty, measurementScope, staged = false, prepare = { _, _ -> }
+            ) { pass, tex ->
+                renderTileContent(st, tx, ty, st.tileSize, pass, tex)
+            }
+        }
+
+        return generateTile(
+            st, tx, ty, measurementScope, staged = true,
+            prepare = { encoder, timestamps ->
+                val pass = encoder.beginRenderPass(clearedColorPass(sourceView, timestamps))
+                try {
+                    renderTileContent(
+                        st, tx, ty, inner, pass, source,
+                        scale = rescaler.firstStepScale(st.scale),
+                        inset = rescaler.halo.toFloat()
+                    )
+                } finally {
+                    pass.end()
+                }
+                rescaler.encode(encoder, size)
+            },
+        ) { pass, _ ->
+            rescaler.resolve(pass)
         }
     }
 
@@ -1537,17 +1661,25 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         ty: Int,
         tileSize: Int,
         pass: GPURenderPassEncoder,
-        texture: GPUTexture
+        texture: GPUTexture,
+        scale: Float = st.scale,
+        inset: Float = 0f,
     ) {
+        // [tileSize] is in this destination's pixels, so it already carries [scale];
+        // [centerYOffset] is in the grid's and has to be brought across. [inset] widens the
+        // destination without moving the tile within it.
         val ts = tileSize.toFloat()
-        val s = st.scale
+        val s = scale
+        val centerY = st.centerYOffset * (scale / st.scale)
+        val dst = ts + 2f * inset
+        val filtered = filtered()
         st.page.forEachImage { image, srcOffsetX ->
             if (image.mipmaps.isNotEmpty()) {
                 // In raw (unscaled) pixels since solveImagePlacement scales by s itself.
-                val targetX = -tx * ts + s * (srcOffsetX + image.x)
-                val targetY = st.centerYOffset - ty * ts + s * image.y
-                val (x, y) = solveImagePlacement(targetX, targetY, s, image, ts, ts)
-                RenderPage.render(pass, image, texture, x, y, s)
+                val targetX = -tx * ts + inset + s * (srcOffsetX + image.x)
+                val targetY = centerY - ty * ts + inset + s * image.y
+                val (x, y) = solveImagePlacement(targetX, targetY, s, image, dst, dst)
+                RenderPage.render(pass, image, texture, x, y, s, filtered)
             }
         }
     }
@@ -1653,6 +1785,8 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         tx: Int,
         ty: Int,
         measurementScope: CoroutineScope,
+        staged: Boolean,
+        prepare: (GPUCommandEncoder, GPUPassTimestampWrites?) -> Unit,
         render: (GPURenderPassEncoder, GPUTexture) -> Unit
     ): Job? {
         val key = key(tx, ty)
@@ -1673,6 +1807,8 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         val queries = timestampQuerySet
         if (queries == null) {
             val encoder = device.createCommandEncoder()
+            // Before the pass opens: a compute pass cannot nest inside a render pass.
+            prepare(encoder, null)
             val pass = encoder.beginRenderPass(clearedColorPass(pool.scratchView(st.tileSize)))
             try {
                 render(pass, pool.scratch(st.tileSize))
@@ -1688,10 +1824,34 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
 
         val timing = acquireTimestampBuffers()
         val encoder = device.createCommandEncoder()
+
+        // A rescaler's passes run before this one and would otherwise go unmeasured - which
+        // matters, since [nextBatchSize] divides a frame's budget by this number and would queue
+        // eight of a tile that reads as free. So a staged tile puts the opening timestamp on
+        // whatever pass [prepare] opens first, leaving only the closing one here; the GPU runs
+        // everything between the two.
+        //
+        // Per tile, not per renderer: a rescaler declines any tile below its [Rescaler.factor],
+        // and those have no first pass to carry the opening write. Getting that wrong leaves
+        // query 0 unwritten and the elapsed time read off stale memory.
+        val opening = if (staged) {
+            prepare(
+                encoder, GPUPassTimestampWrites(
+                    queries,
+                    beginningOfPassWriteIndex = 0,
+                    endOfPassWriteIndex = Constants.QUERY_SET_INDEX_UNDEFINED
+                )
+            )
+            Constants.QUERY_SET_INDEX_UNDEFINED
+        } else {
+            prepare(encoder, null)
+            0
+        }
+
         val pass = encoder.beginRenderPass(
             clearedColorPass(
                 pool.scratchView(st.tileSize), timestampWrites = GPUPassTimestampWrites(
-                    queries, beginningOfPassWriteIndex = 0, endOfPassWriteIndex = 1
+                    queries, beginningOfPassWriteIndex = opening, endOfPassWriteIndex = 1
                 )
             )
         )
@@ -1844,6 +2004,10 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
      */
     fun cleanup() {
         workerScope.launch {
+            // On the worker with everything else it owns: a rescaler's textures can be mid-tile
+            // when the view is torn down.
+            upscaler.cleanup()
+            downscaler.cleanup()
             pages.values.forEach { it.destroyAll(atlasOrNull) }
             pages.clear()
             atlasOrNull?.destroy()

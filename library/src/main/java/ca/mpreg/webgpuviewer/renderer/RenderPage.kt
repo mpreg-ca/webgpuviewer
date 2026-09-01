@@ -24,6 +24,7 @@ import androidx.webgpu.GPUVertexState
 import androidx.webgpu.OptionalBool
 import androidx.webgpu.PrimitiveTopology.Companion.TriangleList
 import androidx.webgpu.TextureFormat
+import ca.mpreg.webgpuviewer.renderer.RenderPage.MAGNIFY_MAIN
 import ca.mpreg.webgpuviewer.renderer.RenderPage.TILE_SAMPLER_FS
 import ca.mpreg.webgpuviewer.renderer.RenderPage.draw
 import ca.mpreg.webgpuviewer.renderer.RenderPage.drawMaskedRect
@@ -31,7 +32,6 @@ import ca.mpreg.webgpuviewer.renderer.RenderPage.drawTile
 import ca.mpreg.webgpuviewer.renderer.RenderPage.plainVariant
 import ca.mpreg.webgpuviewer.renderer.RenderPage.render
 import ca.mpreg.webgpuviewer.renderer.RenderPage.renderFast
-import ca.mpreg.webgpuviewer.renderer.RenderPage.renderImage
 import ca.mpreg.webgpuviewer.renderer.RenderPage.samplerVariant
 import ca.mpreg.webgpuviewer.renderer.RenderPage.variantFor
 import ca.mpreg.webgpuviewer.viewer.ImagePage
@@ -87,7 +87,29 @@ object RenderPage {
             )
         )
     }
-    private val filteredVariant = Variant { buildPipeline(HEADER + VS_MAIN + FILTERED_FS) }
+
+    /** The two resolves in force. [render] picks between them once the mip level is known. */
+    internal class Filtered(val magnify: Variant, val minify: Variant)
+
+    /**
+     * Pipelines for a pair of rescaler resolves, built on first use and kept.
+     *
+     * Keyed by the shader text, not the rescaler, and kept apart by direction: two
+     * [UpscalerCatmullRom]s share a pipeline, and so does an [UpscalerArtCnn] with either, its own
+     * leftover resolve being Catmull-Rom too. Only [TileRenderer] reaches this, and only when its
+     * rescalers change, so hashing a few KB of source is not on any hot path.
+     */
+    private val magnifyVariants = HashMap<String, Variant>()
+    private val minifyVariants = HashMap<String, Variant>()
+
+    internal fun filtered(magnify: String, minify: String) = Filtered(
+        magnifyVariants.getOrPut(magnify) {
+            Variant { buildPipeline(HEADER + VS_MAIN + magnify + MAGNIFY_MAIN) }
+        },
+        minifyVariants.getOrPut(minify) {
+            Variant { buildPipeline(HEADER + VS_MAIN + minify + MINIFY_MAIN) }
+        },
+    )
 
     // As samplerVariant, but stencil-free - Transition's cache-seed pass has none, and doesn't
     // need one: it fills once, then tiles blit on top in later passes via ordinary blending.
@@ -491,251 +513,29 @@ fn fs_main(in: TileVertexOutput) -> @location(0) vec4<f32> {
 }
 """
 
-    /** Fragment stage for [render]: box filter when minifying, Catmull-Rom when magnifying. */
-    private const val FILTERED_FS = """
-fn catmull_rom_weights(t: f32) -> array<f32, 4> {
-    let t2 = t * t;
-    let t3 = t2 * t;
-
-    return array<f32, 4>(
-        -0.5 * t3 + t2 - 0.5 * t,          // Weight 0 (Negative lobe)
-         1.5 * t3 - 2.5 * t2 + 1.0,        // Weight 1 (Primary influence)
-        -1.5 * t3 + 2.0 * t2 + 0.5 * t,    // Weight 2 (Primary influence)
-         0.5 * t3 - 0.5 * t2               // Weight 3 (Negative lobe)
-    );
-}
-
-fn catmull_rom_fast_unrolled(
-    tex: texture_2d<f32>,
-    p_start: vec2<i32>,
-    wx: array<f32, 4>,
-    wy: array<f32, 4>
-) -> vec4<f32> {
-    let r0 = to_linear_exact(textureLoad(tex, vec2<i32>(p_start.x,     p_start.y), 0)) * wx[0]
-           + to_linear_exact(textureLoad(tex, vec2<i32>(p_start.x + 1, p_start.y), 0)) * wx[1]
-           + to_linear_exact(textureLoad(tex, vec2<i32>(p_start.x + 2, p_start.y), 0)) * wx[2]
-           + to_linear_exact(textureLoad(tex, vec2<i32>(p_start.x + 3, p_start.y), 0)) * wx[3];
-    let r1 = to_linear_exact(textureLoad(tex, vec2<i32>(p_start.x,     p_start.y + 1), 0)) * wx[0]
-           + to_linear_exact(textureLoad(tex, vec2<i32>(p_start.x + 1, p_start.y + 1), 0)) * wx[1]
-           + to_linear_exact(textureLoad(tex, vec2<i32>(p_start.x + 2, p_start.y + 1), 0)) * wx[2]
-           + to_linear_exact(textureLoad(tex, vec2<i32>(p_start.x + 3, p_start.y + 1), 0)) * wx[3];
-    let r2 = to_linear_exact(textureLoad(tex, vec2<i32>(p_start.x,     p_start.y + 2), 0)) * wx[0]
-           + to_linear_exact(textureLoad(tex, vec2<i32>(p_start.x + 1, p_start.y + 2), 0)) * wx[1]
-           + to_linear_exact(textureLoad(tex, vec2<i32>(p_start.x + 2, p_start.y + 2), 0)) * wx[2]
-           + to_linear_exact(textureLoad(tex, vec2<i32>(p_start.x + 3, p_start.y + 2), 0)) * wx[3];
-    let r3 = to_linear_exact(textureLoad(tex, vec2<i32>(p_start.x,     p_start.y + 3), 0)) * wx[0]
-           + to_linear_exact(textureLoad(tex, vec2<i32>(p_start.x + 1, p_start.y + 3), 0)) * wx[1]
-           + to_linear_exact(textureLoad(tex, vec2<i32>(p_start.x + 2, p_start.y + 3), 0)) * wx[2]
-           + to_linear_exact(textureLoad(tex, vec2<i32>(p_start.x + 3, p_start.y + 3), 0)) * wx[3];
-
-    return r0 * wy[0] + r1 * wy[1] + r2 * wy[2] + r3 * wy[3];
-}
-
-fn load_safe_linear(pos: vec2<i32>, max_coord: vec2<i32>) -> vec4<f32> {
-    let clamped = clamp(pos, vec2<i32>(0), max_coord);
-    return to_linear_exact(totalLoad(clamped));
-}
-
-fn catmull_rom_slow_unrolled(
-    start_i: vec2<i32>,
-    max_coord: vec2<i32>,
-    wx: array<f32, 4>,
-    wy: array<f32, 4>
-) -> vec4<f32> {
-    let r0 = load_safe_linear(vec2<i32>(start_i.x,     start_i.y), max_coord) * wx[0]
-           + load_safe_linear(vec2<i32>(start_i.x + 1, start_i.y), max_coord) * wx[1]
-           + load_safe_linear(vec2<i32>(start_i.x + 2, start_i.y), max_coord) * wx[2]
-           + load_safe_linear(vec2<i32>(start_i.x + 3, start_i.y), max_coord) * wx[3];
-    let r1 = load_safe_linear(vec2<i32>(start_i.x,     start_i.y + 1), max_coord) * wx[0]
-           + load_safe_linear(vec2<i32>(start_i.x + 1, start_i.y + 1), max_coord) * wx[1]
-           + load_safe_linear(vec2<i32>(start_i.x + 2, start_i.y + 1), max_coord) * wx[2]
-           + load_safe_linear(vec2<i32>(start_i.x + 3, start_i.y + 1), max_coord) * wx[3];
-    let r2 = load_safe_linear(vec2<i32>(start_i.x,     start_i.y + 2), max_coord) * wx[0]
-           + load_safe_linear(vec2<i32>(start_i.x + 1, start_i.y + 2), max_coord) * wx[1]
-           + load_safe_linear(vec2<i32>(start_i.x + 2, start_i.y + 2), max_coord) * wx[2]
-           + load_safe_linear(vec2<i32>(start_i.x + 3, start_i.y + 2), max_coord) * wx[3];
-    let r3 = load_safe_linear(vec2<i32>(start_i.x,     start_i.y + 3), max_coord) * wx[0]
-           + load_safe_linear(vec2<i32>(start_i.x + 1, start_i.y + 3), max_coord) * wx[1]
-           + load_safe_linear(vec2<i32>(start_i.x + 2, start_i.y + 3), max_coord) * wx[2]
-           + load_safe_linear(vec2<i32>(start_i.x + 3, start_i.y + 3), max_coord) * wx[3];
-    return r0 * wy[0] + r1 * wy[1] + r2 * wy[2] + r3 * wy[3];
-}
-
-fn textureSampleCatmullRom(uv: vec2<f32>) -> vec4<f32> {
-    let tex_size_u = totalDimensions();
-    let tex_size = vec2<f32>(tex_size_u);
-    let pixel_coord = uv * tex_size - 0.5;
-    let base_coord = vec2<i32>(floor(pixel_coord));
-    let f = fract(pixel_coord);
-
-    let wx = catmull_rom_weights(f.x);
-    let wy = catmull_rom_weights(f.y);
-    let max_coord = vec2<i32>(tex_size_u) - 1;
-
-    let ts = i32(transform.tile_size);
-
-    let start_i = base_coord - vec2<i32>(1); // Top-left
-    let end_i   = base_coord + vec2<i32>(2); // Bottom-right
-
-    let canvas_in_bounds = start_i.x >= 0 && start_i.y >= 0 && end_i.x <= max_coord.x && end_i.y <= max_coord.y;
-    let tile_TL = start_i / ts;
-    let tile_BR = end_i / ts;
-    let is_single_tile = all(tile_TL == tile_BR) && canvas_in_bounds;
-
-    var final_color_linear = vec4<f32>(0.0);
-
-    if (is_single_tile) {
-        let idx = tile_TL.y * 2 + tile_TL.x;
-        let local_offset = -tile_TL * ts;
-        let p_start = start_i + local_offset;
-
-        if (idx == 0) {
-            final_color_linear = catmull_rom_fast_unrolled(src_tex0, p_start, wx, wy);
-        } else if (idx == 1) {
-            final_color_linear = catmull_rom_fast_unrolled(src_tex1, p_start, wx, wy);
-        } else if (idx == 2) {
-            final_color_linear = catmull_rom_fast_unrolled(src_tex2, p_start, wx, wy);
-        } else {
-            final_color_linear = catmull_rom_fast_unrolled(src_tex3, p_start, wx, wy);
-        }
-    } else {
-        final_color_linear = catmull_rom_slow_unrolled(start_i, max_coord, wx, wy);
-    }
-
-    return clamp(to_srgb_exact(final_color_linear), vec4(0.0), vec4(1.0));
-}
-
-fn loop_over_tile(
-    tex: texture_2d<f32>,
-    start_i: vec2<i32>,
-    end_i: vec2<i32>,
-    src_start: vec2<f32>,
-    src_end: vec2<f32>,
-    local_offset: vec2<i32>
-) -> vec4<f32> {
-    var color_sum = vec4<f32>(0.0);
-    var weight_sum = 0.0;
-
-    for (var y: i32 = start_i.y; y < end_i.y; y++) {
-        let y_f = f32(y);
-
-        var y_overlap = 1.0;
-        if (y == start_i.y) {
-            y_overlap = min(y_f + 1.0, src_end.y) - src_start.y;
-        } else if (y == end_i.y - 1) {
-            y_overlap = src_end.y - max(y_f, src_start.y);
-        }
-        y_overlap = max(0.0, y_overlap);
-
-        let py = y + local_offset.y;
-
-        for (var x: i32 = start_i.x; x < end_i.x; x++) {
-            let x_f = f32(x);
-
-            var x_overlap = 1.0;
-            if (x == start_i.x) {
-                x_overlap = min(x_f + 1.0, src_end.x) - src_start.x;
-            } else if (x == end_i.x - 1) {
-                x_overlap = src_end.x - max(x_f, src_start.x);
-            }
-            x_overlap = max(0.0, x_overlap);
-
-            let weight = x_overlap * y_overlap;
-            let px = x + local_offset.x;
-
-            let texel = to_linear_exact(textureLoad(tex, vec2<i32>(px, py), 0));
-            color_sum += texel * weight;
-            weight_sum += weight;
-        }
-    }
-    return color_sum / max(weight_sum, 0.0001);
-}
-
-fn downsample(src_start: vec2<f32>, scale: vec2<f32>) -> vec4<f32> {
-    let src_size_f = vec2<f32>(totalDimensions());
-    let src_end = src_start + scale;
-
-    let start_i = vec2<i32>(clamp(floor(src_start), vec2<f32>(0.0), src_size_f));
-    let end_i   = vec2<i32>(clamp(ceil(src_end), vec2<f32>(0.0), src_size_f));
-
-    let ts = i32(transform.tile_size);
-
-    let tile_TL = start_i / ts;
-    let tile_BR = (end_i - 1) / ts;
-
-    let in_bounds = start_i.x >= 0 && start_i.y >= 0 && (end_i.x - 1) < ts * 2 && (end_i.y - 1) < ts * 2;
-    let is_single_tile = all(tile_TL == tile_BR) && in_bounds;
-
-    var color_sum = vec4<f32>(0.0);
-    var weight_sum = 0.0;
-
-    if (is_single_tile) {
-        let idx = tile_TL.y * 2 + tile_TL.x;
-        let local_offset = -tile_TL * ts;
-
-        var avg_color = vec4<f32>(0.0);
-
-        if (idx == 0) {
-            avg_color = loop_over_tile(src_tex0, start_i, end_i, src_start, src_end, local_offset);
-        } else if (idx == 1) {
-            avg_color = loop_over_tile(src_tex1, start_i, end_i, src_start, src_end, local_offset);
-        } else if (idx == 2) {
-            avg_color = loop_over_tile(src_tex2, start_i, end_i, src_start, src_end, local_offset);
-        } else {
-            avg_color = loop_over_tile(src_tex3, start_i, end_i, src_start, src_end, local_offset);
-        }
-
-        return to_srgb_exact(avg_color);
-    } else {
-        for (var y: i32 = start_i.y; y < end_i.y; y++) {
-            let y_f = f32(y);
-            var y_overlap = 1.0;
-            if (y == start_i.y) {
-                y_overlap = min(y_f + 1.0, src_end.y) - src_start.y;
-            } else if (y == end_i.y - 1) {
-                y_overlap = src_end.y - max(y_f, src_start.y);
-            }
-            y_overlap = max(0.0, y_overlap);
-
-            for (var x: i32 = start_i.x; x < end_i.x; x++) {
-                let x_f = f32(x);
-                var x_overlap = 1.0;
-                if (x == start_i.x) {
-                    x_overlap = min(x_f + 1.0, src_end.x) - src_start.x;
-                } else if (x == end_i.x - 1) {
-                    x_overlap = src_end.x - max(x_f, src_start.x);
-                }
-                x_overlap = max(0.0, x_overlap);
-
-                let weight = x_overlap * y_overlap;
-                let texel = to_linear_exact(totalLoad(vec2<i32>(x, y)));
-                color_sum += texel * weight;
-                weight_sum += weight;
-            }
-        }
-
-        return to_srgb_exact(color_sum / max(weight_sum, 0.0001));
-    }
-}
-
+    /**
+     * Fragment stage for a magnifying draw: [Upscaler]'s `resolve_magnify`, and the premultiply
+     * every draw through here ends with.
+     */
+    private const val MAGNIFY_MAIN = """
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let src_size_f = vec2<f32>(totalDimensions());
-    let scale_factor = 1.0 / transform.scale;
-    let scale_vec = vec2<f32>(scale_factor);
-
-    var col = vec4<f32>(0.0);
-
-    if (scale_factor > 1.0) {
-        // downsample expects src_start (position in the source image in pixels)
-        let src_start = in.uv * src_size_f;
-        col = downsample(src_start, scale_vec);
-    } else {
-        col = textureSampleCatmullRom(in.uv);
-    }
-
+    let col = resolve_magnify(in.uv);
     return vec4<f32>(col.rgb * col.a, col.a);
-}"""
+}
+"""
+
+    /** As [MAGNIFY_MAIN], for a minifying draw: [Downscaler]'s `resolve_minify`. */
+    private const val MINIFY_MAIN = """
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    // resolve_minify takes src_start, the footprint's position in source pixels, and the
+    // footprint's own size - which is how many source pixels one destination pixel covers.
+    let src_start = in.uv * vec2<f32>(totalDimensions());
+    let col = resolve_minify(src_start, vec2<f32>(1.0 / transform.scale));
+    return vec4<f32>(col.rgb * col.a, col.a);
+}
+"""
 
     /**
      * Draw an image into [pass] with the filtered shader. Takes a pass rather than an encoder so
@@ -743,8 +543,21 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
      * which dominates frame cost on tile-based GPUs. Opening/ending the pass is the caller's job.
      */
     internal fun render(
-        pass: GPURenderPassEncoder, image: Image, dst: GPUTexture, x: Float, y: Float, scale: Float
-    ) = renderImage(pass, image, dst, x, y, scale, filteredVariant)
+        pass: GPURenderPassEncoder,
+        image: Image,
+        dst: GPUTexture,
+        x: Float,
+        y: Float,
+        scale: Float,
+        filtered: Filtered,
+    ) {
+        val res = image.prepareForRender(dst, x, y, scale) ?: return
+        // Decided here rather than per fragment: it is one value for the whole draw, and a shader
+        // carrying both resolves needs registers for the union of them. Against
+        // [Image.MipMapForDraw.scale], not the caller's - picking a mip level moves the scale the
+        // draw resolves at, and moves it toward 1, the very boundary being tested.
+        draw(pass, image, dst, res, if (res.scale < 1f) filtered.minify else filtered.magnify)
+    }
 
     /** Picks one of the 4 tile pipelines - shared by [renderFast] and [ImagePage.ImageSingle.renderPage]. */
     internal fun variantFor(linear: Boolean, masked: Boolean): Variant = when {
@@ -771,20 +584,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         masked: Boolean = true
     ) = renderImageTiled(pass, image, dst, x, y, scale, variantFor(linear, masked))
 
-    private fun renderImage(
-        pass: GPURenderPassEncoder,
-        image: Image,
-        dst: GPUTexture,
-        x: Float,
-        y: Float,
-        scale: Float,
-        variant: Variant
-    ) {
-        val res = image.prepareForRender(dst, x, y, scale) ?: return
-        draw(pass, image, dst, res, variant)
-    }
-
-    /** As [renderImage], for [renderFast]/[ImagePage.ImageSingle.renderPage] - draws every tile separately. */
+    /** As [render], for [renderFast]/[ImagePage.ImageSingle.renderPage] - draws every tile separately. */
     private fun renderImageTiled(
         pass: GPURenderPassEncoder,
         image: Image,

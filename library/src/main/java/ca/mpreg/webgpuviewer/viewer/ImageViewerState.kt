@@ -23,7 +23,13 @@ import androidx.webgpu.GPUTexture
 import androidx.webgpu.LoadOp
 import androidx.webgpu.StoreOp
 import ca.mpreg.webgpuviewer.filter.FilterChain
+import ca.mpreg.webgpuviewer.renderer.Downscaler
+import ca.mpreg.webgpuviewer.renderer.DownscalerBox
+import ca.mpreg.webgpuviewer.renderer.Rescaler
 import ca.mpreg.webgpuviewer.renderer.TileRenderer
+import ca.mpreg.webgpuviewer.renderer.Upscaler
+import ca.mpreg.webgpuviewer.renderer.UpscalerArtCnn
+import ca.mpreg.webgpuviewer.renderer.UpscalerCatmullRom
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer.Companion.dispatcher
 import ca.mpreg.webgpuviewer.transition.Transition
@@ -41,6 +47,27 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
     val renderer = WebGpuRenderer()
 
     internal val tiles = TileRenderer { invalidate() }
+
+    /**
+     * How a high-quality tile that magnifies the page is resized - see [Rescaler].
+     * [UpscalerCatmullRom] by default; [UpscalerArtCnn] runs a doubling network first and leaves
+     * whatever zoom is left over to Catmull-Rom. Assigning drops the tiles already generated.
+     */
+    var upscaler: Upscaler
+        get() = tiles.upscaler
+        set(value) {
+            tiles.upscaler = value
+        }
+
+    /**
+     * How a high-quality tile that shrinks the page is resized - see [Rescaler]. [DownscalerBox]
+     * is the only one, and is the default.
+     */
+    var downscaler: Downscaler
+        get() = tiles.downscaler
+        set(value) {
+            tiles.downscaler = value
+        }
 
     /**
      * Post-processing over the finished frame - assign [FilterChain.filters] to run some. Wired
