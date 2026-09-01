@@ -112,18 +112,18 @@ open class ImagePage {
             renderWith(encoder, x, y, scale, tex)
         }
 
-        // render() treats dst as entirely its own canvas (see the class doc) - so unlike ImageSingle,
-        // whose real content only ever occupies part of dst, this page's rect within a flat
-        // render of it IS the whole thing, just panned/zoomed by its own live x/y/scale the same
-        // way renderWith/renderCacheSeed already thread through. Without this, TransitionFlipLeft/
-        // TransitionFlipRight/TransitionSphere - which all bail out on a null pageRect rather than
-        // treating it as screen-shaped - would just never draw a Render page at all.
-        override fun pageRect(dst: GPUTexture): FloatArray = floatArrayOf(
-            0.5f + scale * (x - 0.5f),
-            0.5f + scale * (y - 0.5f),
-            0.5f + scale * (x + 0.5f),
-            0.5f + scale * (y + 0.5f),
-        )
+        // The rect [fillPage] fills, not all of [dst] - a page smaller than the surface would
+        // otherwise warp stretched to a height it never asked for. Non-null, so transitions that
+        // bail on a null pageRect still draw a Render page.
+        override fun pageRect(dst: GPUTexture): FloatArray {
+            val halfWidthFrac = scale * width / (2f * dst.width)
+            val halfHeightFrac = scale * height / (2f * dst.height)
+            val cx = 0.5f + scale * x
+            val cy = 0.5f + scale * y
+            return floatArrayOf(
+                cx - halfWidthFrac, cy - halfHeightFrac, cx + halfWidthFrac, cy + halfHeightFrac
+            )
+        }
 
         // Set by renderWith right before calling render(), and only valid for the duration of
         // that call - rect/circle/text read it instead of taking a pass parameter, since there's
