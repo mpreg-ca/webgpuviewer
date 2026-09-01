@@ -942,20 +942,37 @@ open class ImagePage {
             return null
         }
 
-        /** Both sides - [pageRect] answers with whichever it finds first, which would half-fade. */
-        override fun fadeRect(dst: GPUTexture): FloatArray? {
-            var union: FloatArray? = null
-            forEachSide { side, offsetX ->
-                val image = (side as? ImageSingle)?.currentImage
-                if (image != null && image.mipmaps.isNotEmpty()) {
-                    val r = image.placement(dst, x + offsetX / dst.width, y, scale)
-                    val u = union
-                    union = if (u == null) r else floatArrayOf(
-                        min(u[0], r[0]), min(u[1], r[1]), max(u[2], r[2]), max(u[3], r[3])
-                    )
-                }
+        /** That side's own rect, so a spread turns one real page rather than half of a sheet. */
+        override fun leafRect(dst: GPUTexture, left: Boolean): FloatArray? {
+            val side = (if (left) this.left else this.right) ?: return null
+            val placeX = x + (if (left) -0.5f else 0.5f) * side.width / dst.width
+            (side as? ImageSingle)?.currentImage?.let { image ->
+                if (image.mipmaps.isNotEmpty()) return image.placement(dst, placeX, y, scale)
             }
-            return union
+            // A Render side has no image to place - [sideColumn]'s fallback, plus the y axis.
+            if (side !is Render) return null
+            val cx = 0.5f + scale * (placeX + WebGpuRenderer.offsetX)
+            val cy = 0.5f + scale * (y + WebGpuRenderer.offsetY)
+            val hw = scale * 0.5f * side.width / dst.width
+            val hh = scale * 0.5f * side.height / dst.height
+            return floatArrayOf(cx - hw, cy - hh, cx + hw, cy + hh)
+        }
+
+        /** The seam, not the midpoint - the two sides can be different widths. */
+        override fun spineX(dst: GPUTexture): Float? {
+            leafRect(dst, true)?.let { return it[2] }
+            leafRect(dst, false)?.let { return it[0] }
+            return null
+        }
+
+        /** Both sides at once - the spread as one sheet, rather than [pageRect]'s single page. */
+        override fun wholeRect(dst: GPUTexture): FloatArray? {
+            val l = leafRect(dst, true)
+            val r = leafRect(dst, false)
+            if (l == null || r == null) return l ?: r
+            return floatArrayOf(
+                min(l[0], r[0]), min(l[1], r[1]), max(l[2], r[2]), max(l[3], r[3])
+            )
         }
 
         override val backgroundColor: Int?
@@ -1180,6 +1197,25 @@ open class ImagePage {
     open fun pageRect(dst: GPUTexture): FloatArray? = null
 
     /**
+     * One half of this page, normalised like [pageRect] - for
+     * [ca.mpreg.webgpuviewer.transition.TransitionDualFlip]. [ImageSpread] answers with that side's
+     * own rect, null where it has no page; everything else splits [pageRect] down the middle, which
+     * is what lets a single page turn like a spread.
+     */
+    internal open fun leafRect(dst: GPUTexture, left: Boolean): FloatArray? {
+        val r = pageRect(dst) ?: return null
+        val mid = (r[0] + r[2]) * 0.5f
+        return if (left) floatArrayOf(r[0], r[1], mid, r[3])
+        else floatArrayOf(mid, r[1], r[2], r[3])
+    }
+
+    /** Where this page's two [leafRect] halves meet - the spine a page flip turns about. */
+    internal open fun spineX(dst: GPUTexture): Float? {
+        val r = pageRect(dst) ?: return null
+        return (r[0] + r[2]) * 0.5f
+    }
+
+    /**
      * The color a transition should blend/fade toward for this page as a whole - [Images] reads
      * it from its first image's own [ca.mpreg.webgpuviewer.renderer.Image.backgroundColor];
      * [Render] also uses it (when overridden non-null) as its own background fill, both during a
@@ -1317,8 +1353,15 @@ open class ImagePage {
         }
     }
 
-    /** What [drawFade] veils - [pageRect], except a spread takes both sides (its own override). */
-    protected open fun fadeRect(dst: GPUTexture): FloatArray? = pageRect(dst)
+    /**
+     * Everything this page covers, normalised like [pageRect]. An [ImageSpread] answers with both
+     * sides together where [pageRect] gives whichever it finds first, so a transition treating the
+     * page as one sheet wants this one.
+     */
+    internal open fun wholeRect(dst: GPUTexture): FloatArray? = pageRect(dst)
+
+    /** What [drawFade] veils - the whole page, so a spread does not half-fade. */
+    protected open fun fadeRect(dst: GPUTexture): FloatArray? = wholeRect(dst)
 
     /** Veil this page's rect, in fractions of the target, with what is left of the fade. */
     internal fun drawFade(

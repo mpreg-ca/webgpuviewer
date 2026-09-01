@@ -34,6 +34,8 @@ import androidx.webgpu.TextureUsage
 import ca.mpreg.webgpuviewer.renderer.TileRenderer
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.blitCached
+import ca.mpreg.webgpuviewer.transition.Transition.Companion.blitCachedRegion
+import ca.mpreg.webgpuviewer.transition.Transition.Companion.blitPipeline
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.cacheLock
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.getCachedTexture
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.invalidateCache
@@ -176,6 +178,124 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     return textureSample(src_tex, src_sampler, in.uv);
 }
 """
+
+        /** As [blitPipeline], but drawing only a sub-rectangle - see [blitCachedRegion]. */
+        private val regionPipeline: GPURenderPipeline by lazy {
+            val device = WebGpuRenderer.device
+            val shaderModule = device.createShaderModule(
+                GPUShaderModuleDescriptor(shaderSourceWGSL = GPUShaderSourceWGSL(REGION_SHADER))
+            )
+            device.createRenderPipeline(
+                GPURenderPipelineDescriptor(
+                    vertex = GPUVertexState(shaderModule, entryPoint = "vs_main"),
+                    fragment = GPUFragmentState(
+                        shaderModule, entryPoint = "fs_main", targets = arrayOf(
+                            GPUColorTargetState(
+                                format = TextureFormat.RGBA8Unorm, blend = GPUBlendState(
+                                    color = GPUBlendComponent(
+                                        srcFactor = BlendFactor.One,
+                                        dstFactor = BlendFactor.OneMinusSrcAlpha,
+                                        operation = BlendOperation.Add
+                                    ), alpha = GPUBlendComponent(
+                                        srcFactor = BlendFactor.One,
+                                        dstFactor = BlendFactor.OneMinusSrcAlpha,
+                                        operation = BlendOperation.Add
+                                    )
+                                )
+                            )
+                        )
+                    ),
+                    primitive = GPUPrimitiveState(topology = TriangleList),
+                )
+            )
+        }
+
+        private const val REGION_SHADER = """
+struct Uniforms {
+    rect: vec4<f32>,
+}
+
+@group(0) @binding(0) var<uniform> uniforms: Uniforms;
+@group(0) @binding(1) var src_tex: texture_2d<f32>;
+@group(0) @binding(2) var src_sampler: sampler;
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+}
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
+    var corners = array<vec2<f32>, 6>(
+        vec2<f32>(0.0, 0.0),
+        vec2<f32>(0.0, 1.0),
+        vec2<f32>(1.0, 0.0),
+        vec2<f32>(1.0, 0.0),
+        vec2<f32>(0.0, 1.0),
+        vec2<f32>(1.0, 1.0)
+    );
+
+    let pos = mix(uniforms.rect.xy, uniforms.rect.zw, corners[vertex_index]);
+
+    var out: VertexOutput;
+    out.position = vec4<f32>(pos.x * 2.0 - 1.0, 1.0 - pos.y * 2.0, 0.0, 1.0);
+    // 1:1 - the cache renders the whole surface, so a region belongs at its own coordinates.
+    out.uv = pos;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    return textureSample(src_tex, src_sampler, in.uv);
+}
+"""
+
+        private val regionByteBuffer = ThreadLocal.withInitial {
+            ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder())
+        }
+
+        /**
+         * Blit one region of a cached texture into [pass] at those same coordinates - one side of
+         * a cached spread without the other, which [blitCached] cannot do. Null [cachedView] draws
+         * nothing.
+         */
+        internal fun blitCachedRegion(
+            pass: GPURenderPassEncoder,
+            cachedView: GPUTextureView?,
+            x1: Float,
+            y1: Float,
+            x2: Float,
+            y2: Float,
+        ) {
+            if (cachedView == null || x2 <= x1 || y2 <= y1) return
+
+            val byteBuffer = regionByteBuffer.get()
+            byteBuffer.clear()
+            byteBuffer.putFloat(x1)
+            byteBuffer.putFloat(y1)
+            byteBuffer.putFloat(x2)
+            byteBuffer.putFloat(y2)
+            byteBuffer.flip()
+
+            val uniformBuffer = WebGpuRenderer.device.createBuffer(
+                GPUBufferDescriptor(size = 16, usage = BufferUsage.Uniform or BufferUsage.CopyDst)
+            )
+            WebGpuRenderer.device.queue.writeBuffer(uniformBuffer, 0, byteBuffer)
+
+            pass.setPipeline(regionPipeline)
+            pass.setBindGroup(
+                0, WebGpuRenderer.device.createBindGroup(
+                    GPUBindGroupDescriptor(
+                        layout = regionPipeline.getBindGroupLayout(0), entries = arrayOf(
+                            GPUBindGroupEntry(0, buffer = uniformBuffer),
+                            GPUBindGroupEntry(1, textureView = cachedView),
+                            GPUBindGroupEntry(2, sampler = blitSampler)
+                        )
+                    )
+                )
+            )
+            pass.draw(6)
+        }
 
         private val blitSampler by lazy {
             WebGpuRenderer.device.createSampler()

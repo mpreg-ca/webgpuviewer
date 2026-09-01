@@ -34,6 +34,9 @@ import java.nio.ByteOrder
  * surface clips to the whole of it, so the cache is taken exactly as drawn, pan and zoom included
  * - nothing undoes the page's transform. A page smaller than the surface wraps just its own rect,
  * so the sphere is the page rather than the letterbox around it.
+ *
+ * That rect is [ImagePage.wholeRect], not [ImagePage.pageRect], so a spread wraps as one sheet
+ * with both its pages rather than turning one side and dropping the other.
  */
 object TransitionSphere : Transition() {
     override val premultipliedOutput = true
@@ -224,7 +227,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         isSecond: Float,
     ) {
         if (cachedView == null) return
-        val rect = page.pageRect(dst) ?: return
+        val rect = page.wholeRect(dst) ?: return
 
         val byteBuffer = byteBufferLocal.get()
         byteBuffer.clear()
