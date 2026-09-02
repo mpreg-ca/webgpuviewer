@@ -1192,7 +1192,7 @@ open class ImagePage {
 
     /**
      * One half of this page, normalised like [pageRect] - for
-     * [ca.mpreg.webgpuviewer.transition.TransitionDualFlip]. [ImageSpread] answers with that side's
+     * [ca.mpreg.webgpuviewer.transition.TransitionFlip]. [ImageSpread] answers with that side's
      * own rect, null where it has no page; everything else splits [pageRect] down the middle, which
      * is what lets a single page turn like a spread.
      */

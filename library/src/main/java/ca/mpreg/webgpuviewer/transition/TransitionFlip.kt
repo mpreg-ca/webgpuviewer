@@ -20,7 +20,7 @@ import ca.mpreg.webgpuviewer.draw.Draw
 import ca.mpreg.webgpuviewer.draw.rect
 import ca.mpreg.webgpuviewer.renderer.TileRenderer
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.blitCachedRegion
-import ca.mpreg.webgpuviewer.transition.TransitionDualFlip.LIT_ENDS
+import ca.mpreg.webgpuviewer.transition.TransitionFlip.LIT_ENDS
 import ca.mpreg.webgpuviewer.viewer.ImagePage
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -41,7 +41,7 @@ import kotlin.math.sin
  * attachment: height rises with the tangent angle while it stays inside PI, so strips emitted
  * spine-outwards land back to front.
  */
-object TransitionDualFlip : Transition() {
+object TransitionFlip : Transition() {
     override val premultipliedOutput = true
 
     private const val UNIFORM_SIZE = 96
