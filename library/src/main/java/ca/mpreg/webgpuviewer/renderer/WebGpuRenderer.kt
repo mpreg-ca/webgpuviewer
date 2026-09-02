@@ -19,6 +19,7 @@ import androidx.webgpu.GPUSurfaceConfiguration
 import androidx.webgpu.GPUSurfaceDescriptor
 import androidx.webgpu.GPUSurfaceSourceAndroidNativeWindow
 import androidx.webgpu.GPUTexture
+import androidx.webgpu.SurfaceGetCurrentTextureStatus
 import androidx.webgpu.TextureFormat
 import androidx.webgpu.TextureUsage
 import androidx.webgpu.UncapturedErrorCallback
@@ -26,6 +27,7 @@ import androidx.webgpu.WebGpuRuntimeException
 import androidx.webgpu.helper.Util.windowFromSurface
 import androidx.webgpu.helper.initLibrary
 import ca.mpreg.webgpuviewer.filter.FilterChain
+import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer.Companion.mutex
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer.Companion.withContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -209,17 +211,32 @@ class WebGpuRenderer {
         }
     }
 
-    suspend fun render(fn: suspend (GPUCommandEncoder, GPUTexture) -> Unit) {
+    /** Draws one frame. False when the swapchain had no texture: nothing drawn, retry next frame. */
+    suspend fun render(fn: suspend (GPUCommandEncoder, GPUTexture) -> Unit): Boolean {
         val startTime = if (profilingEnabled) System.nanoTime() else 0L
 
         mutex.withLock {
-            val surface = surface ?: return
+            val surface = surface ?: return false
 
-            val texture = try {
-                surface.getCurrentTexture().texture
+            val current = try {
+                surface.getCurrentTexture()
             } catch (e: Exception) {
                 Log.w("WebGpuRenderer", "Failed to get current texture", e)
-                return
+                return false
+            }
+
+            // A non-success status hands back a null texture, and every GPUTexture read goes
+            // straight through its handle - so one segfaults rather than throws. Outdated means
+            // a window resize under a frame already in flight.
+            val texture = current.texture
+            if (!current.status.isSurfaceSuccess() || texture.handle == 0L) {
+                Log.w(
+                    "WebGpuRenderer",
+                    "No surface texture: ${SurfaceGetCurrentTextureStatus.toString(current.status)}"
+                )
+                // Lost needs a whole new surface, which only the app can hand over.
+                if (current.status != SurfaceGetCurrentTextureStatus.Lost) reconfigure(surface)
+                return false
             }
 
             try {
@@ -247,6 +264,22 @@ class WebGpuRenderer {
                 )
             )
         }
+
+        return true
+    }
+
+    /** Rebuild the swapchain at the size [init] was last given. Must hold [mutex]. */
+    private fun reconfigure(surface: GPUSurface) {
+        if (width <= 0 || height <= 0) return
+        try {
+            surface.configure(
+                GPUSurfaceConfiguration(
+                    device, width, height, TextureFormat.RGBA8Unorm, TextureUsage.RenderAttachment
+                )
+            )
+        } catch (e: Exception) {
+            Log.w("WebGpuRenderer", "Failed to reconfigure surface", e)
+        }
     }
 
     fun cleanup() {
@@ -273,6 +306,11 @@ class WebGpuRenderer {
         }
     }
 }
+
+/** Suboptimal still draws - it only asks to be reconfigured eventually. */
+private fun Int.isSurfaceSuccess(): Boolean =
+    this == SurfaceGetCurrentTextureStatus.SuccessOptimal ||
+            this == SurfaceGetCurrentTextureStatus.SuccessSuboptimal
 
 private val defaultUncapturedErrorCallback
     get(): UncapturedErrorCallback {

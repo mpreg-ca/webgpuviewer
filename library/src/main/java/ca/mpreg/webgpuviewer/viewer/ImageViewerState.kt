@@ -260,8 +260,12 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
             val snapshot = captureRenderState() ?: continue
             // Now render on GPU thread with captured state
             drawing = launch(dispatcher) {
-                renderer.render { encoder, texture ->
-                    renderSnapshot(encoder, texture, snapshot)
+                // Nothing drawn - ask for the frame again.
+                if (!renderer.render { encoder, texture ->
+                        renderSnapshot(encoder, texture, snapshot)
+                    }
+                ) {
+                    invalidate()
                 }
             }
         }
