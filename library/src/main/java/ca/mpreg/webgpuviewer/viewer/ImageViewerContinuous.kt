@@ -65,6 +65,71 @@ fun ImageViewerContinuous(
                 val doubleTapTimeout = viewConfiguration.doubleTapTimeoutMillis
                 val touchSlop = viewConfiguration.touchSlop
 
+                /**
+                 * Walk a scale that overshot back into bounds about [originX]/[originY], the point
+                 * the zoom was anchored to - fractions of the viewport from its centre. False if
+                 * the scale was already fine. Position interpolates on the reciprocal of the
+                 * scale, as ImagePage.animateTo does, so the origin holds throughout.
+                 */
+                fun snapScaleIntoBounds(originX: Float, originY: Float): Boolean {
+                    val startScale = state.scale
+                    val targetScale = startScale.fastCoerceIn(state.minScale, state.maxScale)
+                    if (targetScale == startScale) return false
+
+                    val diffEnd = 1f / targetScale - 1f / startScale
+                    val startOffsetX = state.offsetX
+                    val maxOffsetX = max(0f, (targetScale - 1f) / (2f * targetScale))
+                    val endOffsetX =
+                        (startOffsetX + originX * diffEnd).fastCoerceIn(-maxOffsetX, maxOffsetX)
+                    val endScroll = -originY * diffEnd * state.height
+
+                    state.animationJob = scope.launch {
+                        state.isScaleAnimating = true
+                        var applied = 0f
+                        try {
+                            animate(
+                                0f, 1f, animationSpec = spring(
+                                    stiffness = Spring.StiffnessMediumLow,
+                                    visibilityThreshold = 0.002f
+                                )
+                            ) { t, _ ->
+                                val newScale = startScale + (targetScale - startScale) * t
+                                val c = ((1f / newScale - 1f / startScale) / diffEnd).fastCoerceIn(
+                                    0f, 1f
+                                )
+                                state.scale = newScale
+                                state.offsetX = startOffsetX + (endOffsetX - startOffsetX) * c
+                                // As a step, so scrollBy keeps its page crossings and clamp.
+                                state.scrollBy(endScroll * c - applied)
+                                applied = endScroll * c
+                                state.invalidate()
+                            }
+                        } finally {
+                            state.isScaleAnimating = false
+                        }
+                    }
+                    return true
+                }
+
+                /** Walk a pan that overshot back to the edge it overshot, the scale being fine. */
+                fun snapOffsetXIntoBounds() {
+                    val maxOffsetX = max(0f, (state.scale - 1f) / (2f * state.scale))
+                    val clampedX = state.offsetX.fastCoerceIn(-maxOffsetX, maxOffsetX)
+                    if (clampedX == state.offsetX) return
+                    state.animationJob = scope.launch {
+                        val startX = state.offsetX
+                        animate(
+                            0f, 1f, animationSpec = spring(
+                                stiffness = Spring.StiffnessMediumLow,
+                                visibilityThreshold = 0.002f
+                            )
+                        ) { t, _ ->
+                            state.offsetX = startX + (clampedX - startX) * t
+                            state.invalidate()
+                        }
+                    }
+                }
+
                 awaitEachGesture {
                     val firstDown = awaitFirstDown(pass = PointerEventPass.Initial)
                     state.animationJob?.cancel()
@@ -184,6 +249,7 @@ fun ImageViewerContinuous(
                                 state.scrollBy(target - anchorApplied)
                                 anchorApplied = target
                             }
+
                             val px = secondDown.position.x / state.width - 0.5f
                             val py = secondDown.position.y / state.height - 0.5f
                             var totalDeltaY = 0f
@@ -251,43 +317,9 @@ fun ImageViewerContinuous(
                                         state.isScaleAnimating = false
                                     }
                                 }
-                            } else {
-                                // Snap scale and offsetX back if overshot
-                                val targetScale =
-                                    state.scale.fastCoerceIn(state.minScale, state.maxScale)
-                                val targetMaxOffsetX =
-                                    max(0f, (targetScale - 1f) / (2f * targetScale))
-                                val targetOffsetX =
-                                    state.offsetX.fastCoerceIn(-targetMaxOffsetX, targetMaxOffsetX)
-                                if (targetScale != state.scale || targetOffsetX != state.offsetX) {
-                                    state.animationJob = scope.launch {
-                                        state.isScaleAnimating = true
-                                        try {
-                                            val startScale = state.scale
-                                            val startOffsetX = state.offsetX
-                                            animate(
-                                                0f, 1f, animationSpec = spring(
-                                                    stiffness = Spring.StiffnessMediumLow,
-                                                    visibilityThreshold = 0.002f
-                                                )
-                                            ) { t, _ ->
-                                                state.scale =
-                                                    startScale + (targetScale - startScale) * t
-                                                state.offsetX =
-                                                    startOffsetX + (targetOffsetX - startOffsetX) * t
-                                                // This zoom's origin is a function of its scale,
-                                                // so walking the scale home walks the origin home.
-                                                anchorScroll(
-                                                    -py * (1f / state.scale - 1f / originalScale) *
-                                                        state.height
-                                                )
-                                                state.invalidate()
-                                            }
-                                        } finally {
-                                            state.isScaleAnimating = false
-                                        }
-                                    }
-                                }
+                            } else if (!snapScaleIntoBounds(px, py)) {
+                                // Only the pan overshot.
+                                snapOffsetXIntoBounds()
                             }
                         }
                     } else {
@@ -296,6 +328,8 @@ fun ImageViewerContinuous(
                         velocityTracker.addPointerInputChange(firstDown)
 
                         var single = true
+                        var zoomOriginX = 0f
+                        var zoomOriginY = 0f
                         var lastMoveTime = firstDown.uptimeMillis
                         var lastEventTime = firstDown.uptimeMillis
 
@@ -338,6 +372,9 @@ fun ImageViewerContinuous(
                                             val diff = 1f / newScale - 1f / state.scale
                                             val cx = centroid.x / state.width - 0.5f
                                             val cy = centroid.y / state.height - 0.5f
+                                            // What the snap-back below anchors to.
+                                            zoomOriginX = cx
+                                            zoomOriginY = cy
                                             state.offsetX += cx * diff
                                             state.scale = newScale
                                             state.scrollBy(-cy * diff * state.height)
@@ -366,55 +403,7 @@ fun ImageViewerContinuous(
                         longPressJob?.cancel()
                         if (longPressed || canceled) return@awaitEachGesture
 
-                        if (state.scale < state.minScale) {
-                            // Snap scale back up
-                            state.animationJob = scope.launch {
-                                state.isScaleAnimating = true
-                                try {
-                                    val startScale = state.scale
-                                    val startOffsetX = state.offsetX
-                                    animate(
-                                        0f, 1f, animationSpec = spring(
-                                            stiffness = Spring.StiffnessMediumLow,
-                                            visibilityThreshold = 0.002f
-                                        )
-                                    ) { t, _ ->
-                                        state.scale = startScale + (state.minScale - startScale) * t
-                                        state.offsetX = startOffsetX * (1f - t)
-                                        state.invalidate()
-                                    }
-                                } finally {
-                                    state.isScaleAnimating = false
-                                }
-                            }
-                        } else if (state.scale > state.maxScale) {
-                            // Snap scale back down
-                            state.animationJob = scope.launch {
-                                state.isScaleAnimating = true
-                                try {
-                                    val startScale = state.scale
-                                    val startOffsetX = state.offsetX
-                                    val targetMaxOffsetX =
-                                        max(0f, (state.maxScale - 1f) / (2f * state.maxScale))
-                                    val targetOffsetX = startOffsetX.fastCoerceIn(
-                                        -targetMaxOffsetX, targetMaxOffsetX
-                                    )
-                                    animate(
-                                        0f, 1f, animationSpec = spring(
-                                            stiffness = Spring.StiffnessMediumLow,
-                                            visibilityThreshold = 0.002f
-                                        )
-                                    ) { t, _ ->
-                                        state.scale = startScale + (state.maxScale - startScale) * t
-                                        state.offsetX =
-                                            startOffsetX + (targetOffsetX - startOffsetX) * t
-                                        state.invalidate()
-                                    }
-                                } finally {
-                                    state.isScaleAnimating = false
-                                }
-                            }
-                        } else {
+                        if (!snapScaleIntoBounds(zoomOriginX, zoomOriginY)) {
                             // Scale in bounds: fling pan or snap offsetX
                             val velocity = velocityTracker.calculateVelocity()
                             // Held still before lifting: no fling, however fast it got there.
@@ -461,22 +450,7 @@ fun ImageViewerContinuous(
                                     }
                                 }
                             } else {
-                                val maxOffsetX = max(0f, (state.scale - 1f) / (2f * state.scale))
-                                val clampedX = state.offsetX.fastCoerceIn(-maxOffsetX, maxOffsetX)
-                                if (clampedX != state.offsetX) {
-                                    state.animationJob = scope.launch {
-                                        val startX = state.offsetX
-                                        animate(
-                                            0f, 1f, animationSpec = spring(
-                                                stiffness = Spring.StiffnessMediumLow,
-                                                visibilityThreshold = 0.002f
-                                            )
-                                        ) { t, _ ->
-                                            state.offsetX = startX + (clampedX - startX) * t
-                                            state.invalidate()
-                                        }
-                                    }
-                                }
+                                snapOffsetXIntoBounds()
                             }
                         }
                     }

@@ -373,7 +373,8 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
             docTopBack -= pageHeight
             yTop -= pageHeight
             // Walking up, so the first match is the deepest one above page 0.
-            if (scrolledThrough == null && isScrolledThrough(yTop, pageHeight)) scrolledThrough = page
+            if (scrolledThrough == null && isScrolledThrough(yTop, pageHeight)) scrolledThrough =
+                page
             // Walked upward, so each one goes in front of the last - top to bottom, as the
             // forward walk below appends.
             if (page.isDecoded) {
