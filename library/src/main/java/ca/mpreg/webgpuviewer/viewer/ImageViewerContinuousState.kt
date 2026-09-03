@@ -17,7 +17,7 @@ import kotlin.math.max
 
 class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
     companion object {
-        private const val MAX_VISIBLE_PAGES = 4
+        const val MAX_VISIBLE_PAGES = 4
     }
 
     var scale = 1f
@@ -73,7 +73,9 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
     var isFlinging: Boolean = false
 
     private val scrollLock = Any()
+
     var scrollY = 0f
+        private set
 
     /**
      * Visual-only slide, animated to 0 by [animateSlideIn]. Kept out of [scrollY], which would
@@ -100,7 +102,8 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
         return page.height * (width.toFloat() / pageWidth)
     }
 
-    var currentPageHeight: Float? = null
+    /** Height page 0 was last measured at, to carry the position across a decode correcting it. */
+    private var currentPageHeight: Float? = null
 
     /**
      * The page read through, reported when it changes: the deepest one whose bottom has reached
@@ -110,6 +113,19 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
     var onPageScrolledThrough: ((ImagePage) -> Unit)? = null
 
     private var lastScrolledThrough: ImagePage? = null
+
+    /**
+     * Pages the last frame reached below and above the current one. What the viewport actually
+     * shows depends on the zoom, so a caller's decode window has to follow this rather than a
+     * fixed count - a page on screen has to be decoded, not merely reserved.
+     */
+    @Volatile
+    var pagesBelow: Int = 0
+        private set
+
+    @Volatile
+    var pagesAbove: Int = 0
+        private set
 
     /**
      * Document-space top of whatever page currently sits at [scrollY] == 0, in screen pixels at
@@ -148,7 +164,12 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
                 val newHeight = getPageHeight(newPage)
                 anchorDocY -= newHeight
                 currentPageHeight = newHeight
-                if (newHeight <= 0f) break
+                // No height to hold a position inside, so rest at its top rather than leave the
+                // position above it, which the next scroll would read as another step back.
+                if (newHeight <= 0f) {
+                    scrollY = 0f
+                    break
+                }
                 scrollY += newHeight
             }
 
@@ -225,9 +246,25 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
         }
     }
 
+    /**
+     * Document-space position of the viewport's top, in page-space pixels at zoom 1. Where the
+     * reader is in a form that survives a page crossing, which [scrollY] on its own doesn't - so
+     * it is what to remember a position by, and [scrollTo] what to put it back with.
+     */
+    val documentY: Float get() = synchronized(scrollLock) { anchorDocY + scrollY }
+
+    /** Put the viewport's top at [docY] - see [documentY]. */
+    fun scrollTo(docY: Float) {
+        synchronized(scrollLock) { scrollBy(docY - (anchorDocY + scrollY)) }
+    }
+
     /** Move to the top of the page [getPage] now answers 0 with, after the app jumps pages. */
     fun resetScroll() {
-        synchronized(scrollLock) { scrollY = 0f }
+        synchronized(scrollLock) {
+            scrollY = 0f
+            // A different page now: its own height is the baseline, not the page left behind.
+            currentPageHeight = null
+        }
     }
 
     /** Slide the current page into place after a jump - [direction] 1 when it came from below. */
@@ -289,9 +326,10 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
         if (page0 != null) {
             val pageHeight = getPageHeight(page0)
             // A decode correcting a placeholder's height holds the same fraction of the page: at
-            // its top nothing moves, near its bottom the pages below stay put.
-            currentPageHeight?.let { h -> if (h > 0f) scrollY *= pageHeight / h }
-            currentPageHeight = pageHeight
+            // its top nothing moves, near its bottom the pages below stay put. Both heights have
+            // to be measured, and an unmeasured one is not a baseline to correct against later.
+            currentPageHeight?.let { h -> if (h > 0f && pageHeight > 0f) scrollY *= pageHeight / h }
+            if (pageHeight > 0f) currentPageHeight = pageHeight
             // A decode shortening the document under a position already at its end: only
             // [scrollBy] used to notice, on the next scroll, as a jump.
             clampToDocumentEnd()
@@ -327,8 +365,10 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
         var yTop = y0
         var iBack = -1
         var docTopBack = anchorDocY
+        var above = 0
         while (yTop > visTop && iBack >= -MAX_VISIBLE_PAGES) {
             val page = getPage(iBack) ?: break
+            above = -iBack
             val pageHeight = getPageHeight(page)
             docTopBack -= pageHeight
             yTop -= pageHeight
@@ -353,8 +393,10 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
         var docTop = anchorDocY
         var prevHeight = 0f
         var hasPrev = false
+        var below = 0
         while (y < visBot && i <= MAX_VISIBLE_PAGES) {
             val page = getPage(i) ?: break
+            below = i
             // Anchor to the previous page in this walk, never frozen: an undecoded page's height
             // is a guess, so re-deriving this fresh every frame self-corrects once it decodes.
             if (hasPrev) docTop += prevHeight
@@ -377,6 +419,8 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
         }
 
         onScreenPages = pages.map { it.page }
+        pagesBelow = below
+        pagesAbove = above
 
         // By identity: a page that stays the deepest one read through is reported once.
         scrolledThrough?.takeIf { it !== lastScrolledThrough }?.let {

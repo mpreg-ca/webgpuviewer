@@ -132,8 +132,8 @@ fun ImageViewerContinuous(
                                                 startScale + (state.minScale - startScale) * t
                                             val diff = 1f / newScale - 1f / state.scale
                                             state.offsetX += px * diff
-                                            state.scrollY -= py * diff * state.height
                                             state.scale = newScale
+                                            state.scrollBy(-py * diff * state.height)
                                             state.invalidate()
                                         }
                                     } finally {
@@ -149,7 +149,6 @@ fun ImageViewerContinuous(
                                     try {
                                         val startScale = state.scale
                                         val startOffsetX = state.offsetX
-                                        val startScrollY = state.scrollY
                                         animate(
                                             0f, 1f, animationSpec = spring(
                                                 stiffness = Spring.StiffnessMediumLow,
@@ -160,8 +159,8 @@ fun ImageViewerContinuous(
                                                 startScale + (state.doubleTapScale - startScale) * t
                                             val diff = 1f / newScale - 1f / state.scale
                                             state.offsetX += px * diff
-                                            state.scrollY -= py * diff * state.height
                                             state.scale = newScale
+                                            state.scrollBy(-py * diff * state.height)
                                             state.invalidate()
                                         }
                                     } finally {
@@ -176,7 +175,15 @@ fun ImageViewerContinuous(
                             val dragPointerId = secondDown.id
                             val originalScale = state.scale
                             val originalOffsetX = state.offsetX
-                            val originalScrollY = state.scrollY
+                            // Zoom anchors the tap point, and the scroll that needs is a
+                            // function of the total scale change - so it is applied as the step
+                            // since the last frame. Page crossings and the end of the document
+                            // are scrollBy's to keep, and it is the only thing that keeps them.
+                            var anchorApplied = 0f
+                            fun anchorScroll(target: Float) {
+                                state.scrollBy(target - anchorApplied)
+                                anchorApplied = target
+                            }
                             val px = secondDown.position.x / state.width - 0.5f
                             val py = secondDown.position.y / state.height - 0.5f
                             var totalDeltaY = 0f
@@ -202,8 +209,7 @@ fun ImageViewerContinuous(
                                             val diff = 1f / newScale - 1f / originalScale
                                             state.scale = newScale
                                             state.offsetX = originalOffsetX + px * diff
-                                            state.scrollY =
-                                                originalScrollY - py * diff * state.height
+                                            anchorScroll(-py * diff * state.height)
                                             state.invalidate()
                                             change.consume()
                                         }
@@ -238,8 +244,7 @@ fun ImageViewerContinuous(
                                                 (originalOffsetX + px * diff).fastCoerceIn(
                                                     -maxOffsetX, maxOffsetX
                                                 )
-                                            state.scrollY =
-                                                originalScrollY - py * diff * state.height
+                                            anchorScroll(-py * diff * state.height)
                                             state.invalidate()
                                         }
                                     } finally {
@@ -270,6 +275,12 @@ fun ImageViewerContinuous(
                                                     startScale + (targetScale - startScale) * t
                                                 state.offsetX =
                                                     startOffsetX + (targetOffsetX - startOffsetX) * t
+                                                // This zoom's origin is a function of its scale,
+                                                // so walking the scale home walks the origin home.
+                                                anchorScroll(
+                                                    -py * (1f / state.scale - 1f / originalScale) *
+                                                        state.height
+                                                )
                                                 state.invalidate()
                                             }
                                         } finally {
@@ -328,8 +339,8 @@ fun ImageViewerContinuous(
                                             val cx = centroid.x / state.width - 0.5f
                                             val cy = centroid.y / state.height - 0.5f
                                             state.offsetX += cx * diff
-                                            state.scrollBy(-cy * diff * state.height)
                                             state.scale = newScale
+                                            state.scrollBy(-cy * diff * state.height)
                                         }
 
                                         if (single) {
