@@ -2048,6 +2048,13 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
      */
     fun cleanup() {
         workerScope.launch {
+            // Nothing to free on a lost device, and calling into its objects crashed in native code.
+            if (!WebGpuRenderer.isAvailable) {
+                pages.clear()
+                atlasOrNull = null
+                timestampPool.clear()
+                return@launch
+            }
             // On the worker with everything else it owns: a rescaler's textures can be mid-tile
             // when the view is torn down.
             upscaler.cleanup()
