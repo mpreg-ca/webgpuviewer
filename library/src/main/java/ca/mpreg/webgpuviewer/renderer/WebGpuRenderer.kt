@@ -64,6 +64,14 @@ class WebGpuRenderer {
         @Volatile
         private var deviceLost = false
 
+        /**
+         * Called once, on whichever thread the driver reports it from, when the device is lost.
+         * Nothing renders after that for the life of the process, so a host should move to a
+         * viewer that does not need WebGPU.
+         */
+        @Volatile
+        var onDeviceLost: (() -> Unit)? = null
+
         val isAvailable: Boolean
             get() = initError == null && !deviceLost &&
                     ::instance.isInitialized && ::adapter.isInitialized && ::device.isInitialized
@@ -170,11 +178,13 @@ class WebGpuRenderer {
                     device = adapter.requestDevice(
                         GPUDeviceDescriptor(
                             deviceLostCallback = DeviceLostCallback { lost, reason, message ->
+                                val first = !deviceLost
                                 deviceLost = true
                                 Log.e(
                                     "WebGpuRenderer",
                                     "WebGPU device lost reason=$reason: $message device=$lost"
                                 )
+                                if (first) onDeviceLost?.invoke()
                             },
                             deviceLostCallbackExecutor = Executor(Runnable::run),
                             uncapturedErrorCallback = UncapturedErrorCallback { _, type, message ->
