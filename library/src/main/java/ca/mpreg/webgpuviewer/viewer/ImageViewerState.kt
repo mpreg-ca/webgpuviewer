@@ -419,6 +419,7 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
         // Held by an object that outlives this state, so it has to be dropped by hand - but only
         // if it is still ours: a replacement viewer inits before the one it replaces cleans up.
         if (Hdr.requestFrame === invalidateCallback) Hdr.requestFrame = null
+        Transition.releasePagesOf(this)
         tiles.cleanup()
         renderer.cleanup()
     }

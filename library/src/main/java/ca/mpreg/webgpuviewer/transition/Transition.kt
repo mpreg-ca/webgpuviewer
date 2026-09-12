@@ -40,6 +40,7 @@ import ca.mpreg.webgpuviewer.transition.Transition.Companion.cacheLock
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.getCachedTexture
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.invalidateCache
 import ca.mpreg.webgpuviewer.viewer.ImagePage
+import ca.mpreg.webgpuviewer.viewer.ImageViewerState
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.pow
@@ -429,6 +430,24 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 cachedPage2 = null
                 blittedKeys1 = emptySet()
                 blittedKeys2 = emptySet()
+            }
+        }
+
+        /**
+         * Forget cached renders of [state]'s pages. The cache is static and a page reaches its
+         * viewer through [ImagePage.parent], so a slot left pointing at a finished viewer's page
+         * would keep that viewer and its host alive until another page takes the slot.
+         */
+        internal fun releasePagesOf(state: ImageViewerState) {
+            synchronized(cacheLock) {
+                if (cachedPage1?.parent === state) {
+                    cachedPage1 = null
+                    blittedKeys1 = emptySet()
+                }
+                if (cachedPage2?.parent === state) {
+                    cachedPage2 = null
+                    blittedKeys2 = emptySet()
+                }
             }
         }
 
