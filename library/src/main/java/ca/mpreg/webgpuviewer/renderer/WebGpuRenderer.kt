@@ -229,6 +229,9 @@ class WebGpuRenderer {
     @Volatile
     private var surface: GPUSurface? = null
 
+    /** The window reference [windowFromSurface] took for [surface], released in [cleanup]; see [NativeWindow]. */
+    private var window = 0L
+
     /**
      * The format the swapchain is currently configured as, so [render] can notice when
      * [Hdr.frameFormat] has moved and rebuild it.
@@ -306,7 +309,7 @@ class WebGpuRenderer {
                 instance.createSurface(
                     GPUSurfaceDescriptor(
                         surfaceSourceAndroidNativeWindow = GPUSurfaceSourceAndroidNativeWindow(
-                            windowFromSurface(it)
+                            windowFromSurface(it).also { acquired -> window = acquired }
                         )
                     )
                 ).apply {
@@ -443,6 +446,11 @@ class WebGpuRenderer {
                 filters.cleanup()
                 surface?.close()
                 surface = null
+                // After the surface: Vulkan holds its own reference while its surface lives, so ours is the last.
+                if (window != 0L) {
+                    NativeWindow.release(window)
+                    window = 0L
+                }
                 pendingSurface = null
                 resizePending = false
             }

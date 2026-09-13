@@ -10,6 +10,7 @@ add_library(resize SHARED
     hdr.cpp
     resize.cpp
     trim.cpp
+    window.cpp
 )
 
-target_link_libraries(resize jnigraphics log)
+target_link_libraries(resize android jnigraphics log)
