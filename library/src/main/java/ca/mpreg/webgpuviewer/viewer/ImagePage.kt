@@ -35,6 +35,7 @@ import ca.mpreg.webgpuviewer.renderer.Image
 import ca.mpreg.webgpuviewer.renderer.RenderPage
 import ca.mpreg.webgpuviewer.renderer.TileRenderer
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
+import ca.mpreg.webgpuviewer.renderer.endAndRelease
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -265,11 +266,12 @@ open class ImagePage {
             val clearValue =
                 backgroundColor?.let { argbToGPUColor(it) } ?: GPUColor(0.0, 0.0, 0.0, 0.0)
 
+            val targetView = dst.createView()
             val openedPass = encoder.beginRenderPass(
                 GPURenderPassDescriptor(
                     colorAttachments = arrayOf(
                         GPURenderPassColorAttachment(
-                            view = dst.createView(),
+                            view = targetView,
                             loadOp = if (clear) LoadOp.Clear else LoadOp.Load,
                             storeOp = StoreOp.Store,
                             clearValue = clearValue
@@ -288,7 +290,7 @@ open class ImagePage {
                 }
                 render(dst, x, y, scale)
             } finally {
-                openedPass.end()
+                openedPass.endAndRelease(targetView)
             }
         }
     }
@@ -432,11 +434,12 @@ open class ImagePage {
             // Clears and draws in the same pass, rather than a separate clear pass first. No
             // stencil attachment - this fallback never needs TileRenderer's masking, unlike the
             // overrides below that bypass it entirely.
+            val targetView = dst.createView()
             val pass = encoder.beginRenderPass(
                 GPURenderPassDescriptor(
                     colorAttachments = arrayOf(
                         GPURenderPassColorAttachment(
-                            view = dst.createView(),
+                            view = targetView,
                             loadOp = LoadOp.Clear,
                             storeOp = StoreOp.Store,
                             clearValue = GPUColor(0.0, 0.0, 0.0, 0.0)
@@ -447,45 +450,51 @@ open class ImagePage {
             try {
                 renderPage(pass, dst, x, y, scale, linear = false, masked = false)
             } finally {
-                pass.end()
+                pass.endAndRelease(targetView)
             }
         }
 
         /** Opens a `LoadOp.Clear` pass on [dst], with a stencil attachment for [TileRenderer]'s masking. */
         private fun beginLivePass(
             encoder: GPUCommandEncoder, dst: GPUTexture, tiles: TileRenderer
-        ) = encoder.beginRenderPass(
-            GPURenderPassDescriptor(
-                colorAttachments = arrayOf(
-                    GPURenderPassColorAttachment(
-                        view = dst.createView(),
-                        loadOp = LoadOp.Clear,
-                        storeOp = StoreOp.Store,
-                        clearValue = GPUColor(0.0, 0.0, 0.0, 0.0)
-                    )
-                ), depthStencilAttachment = GPURenderPassDepthStencilAttachment(
-                    view = tiles.stencilViewFor(dst),
-                    stencilLoadOp = LoadOp.Clear,
-                    stencilStoreOp = StoreOp.Discard,
-                    stencilClearValue = 0,
-                )
-            )
-        )
-
-        /** Opens a `LoadOp.Clear` pass on [tex], no stencil attachment - a transition's cache is never masked. */
-        private fun beginCachePass(encoder: GPUCommandEncoder, tex: GPUTexture) =
-            encoder.beginRenderPass(
+        ): GPURenderPassEncoder {
+            val targetView = dst.createView()
+            // The pass holds its own reference to its attachment, so ours can go at once.
+            return encoder.beginRenderPass(
                 GPURenderPassDescriptor(
                     colorAttachments = arrayOf(
                         GPURenderPassColorAttachment(
-                            view = tex.createView(),
+                            view = targetView,
+                            loadOp = LoadOp.Clear,
+                            storeOp = StoreOp.Store,
+                            clearValue = GPUColor(0.0, 0.0, 0.0, 0.0)
+                        )
+                    ), depthStencilAttachment = GPURenderPassDepthStencilAttachment(
+                        view = tiles.stencilViewFor(dst),
+                        stencilLoadOp = LoadOp.Clear,
+                        stencilStoreOp = StoreOp.Discard,
+                        stencilClearValue = 0,
+                    )
+                )
+            ).also { targetView.close() }
+        }
+
+        /** Opens a `LoadOp.Clear` pass on [tex], no stencil attachment - a transition's cache is never masked. */
+        private fun beginCachePass(encoder: GPUCommandEncoder, tex: GPUTexture): GPURenderPassEncoder {
+            val targetView = tex.createView()
+            return encoder.beginRenderPass(
+                GPURenderPassDescriptor(
+                    colorAttachments = arrayOf(
+                        GPURenderPassColorAttachment(
+                            view = targetView,
                             loadOp = LoadOp.Clear,
                             storeOp = StoreOp.Store,
                             clearValue = GPUColor(0.0, 0.0, 0.0, 0.0)
                         )
                     )
                 )
-            )
+            ).also { targetView.close() }
+        }
 
         /**
          * As [ImagePage.drawLive]. Animated frames always want the fast path regardless of
@@ -504,7 +513,7 @@ open class ImagePage {
                     renderBackground(pass, dst, 0f, 0f, 1f)
                     renderPage(pass, dst, 0f, 0f, 1f)
                 } finally {
-                    pass.end()
+                    pass.endAndRelease()
                 }
                 return false
             }
@@ -535,7 +544,7 @@ open class ImagePage {
                 }
                 return covered
             } finally {
-                pass.end()
+                pass.endAndRelease()
             }
         }
 
@@ -565,7 +574,7 @@ open class ImagePage {
                         }
                     }
                 } finally {
-                    pass.end()
+                    pass.endAndRelease()
                 }
                 return
             }
@@ -595,7 +604,7 @@ open class ImagePage {
                     }
                 }
             } finally {
-                pass.end()
+                pass.endAndRelease()
             }
         }
 
@@ -612,11 +621,12 @@ open class ImagePage {
                 renderCacheSeed(encoder, tex, tiles)
                 return
             }
+            val targetView = tex.createView()
             val pass = encoder.beginRenderPass(
                 GPURenderPassDescriptor(
                     colorAttachments = arrayOf(
                         GPURenderPassColorAttachment(
-                            view = tex.createView(),
+                            view = targetView,
                             loadOp = LoadOp.Load,
                             storeOp = StoreOp.Store,
                             clearValue = GPUColor(0.0, 0.0, 0.0, 0.0)
@@ -627,7 +637,7 @@ open class ImagePage {
             try {
                 tiles.blitAvailableTiles(pass, this, tex)
             } finally {
-                pass.end()
+                pass.endAndRelease(targetView)
             }
         }
 

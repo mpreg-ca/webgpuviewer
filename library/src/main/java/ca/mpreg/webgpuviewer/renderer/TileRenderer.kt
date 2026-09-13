@@ -1503,12 +1503,12 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             // The grid's anchor tile - the middle of the page, as representative as this gets.
             renderTileContent(st, 0, 0, tileSize, pass, pool.scratch(tileSize))
         } finally {
-            pass.end()
+            pass.endAndRelease()
         }
 
         encoder.resolveQuerySet(queries, 0, 2, timing.resolve, 0)
         encoder.copyBufferToBuffer(timing.resolve, 0, timing.result, 0, 16)
-        device.queue.submit(arrayOf(encoder.finish()))
+        device.queue.submitAndRelease(encoder)
 
         return measurementScope.launch { measureTileGpuTime(timing, tileSize) }
     }
@@ -1666,7 +1666,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
                         inset = rescaler.halo.toFloat()
                     )
                 } finally {
-                    pass.end()
+                    pass.endAndRelease()
                 }
                 rescaler.encode(encoder, size)
             },
@@ -1844,10 +1844,10 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             try {
                 render(pass, pool.scratch(st.tileSize))
             } finally {
-                pass.end()
+                pass.endAndRelease()
             }
             pool.copyScratchInto(encoder, origin, st.tileSize)
-            device.queue.submit(arrayOf(encoder.finish()))
+            device.queue.submitAndRelease(encoder)
             st.tiles[key] = Tile(origin).also { it.lastUsed = frame }
             st.instancesDirty = true
             return null
@@ -1889,14 +1889,14 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         try {
             render(pass, pool.scratch(st.tileSize))
         } finally {
-            pass.end()
+            pass.endAndRelease()
         }
 
         pool.copyScratchInto(encoder, origin, st.tileSize)
         encoder.resolveQuerySet(queries, 0, 2, timing.resolve, 0)
         encoder.copyBufferToBuffer(timing.resolve, 0, timing.result, 0, 16)
 
-        device.queue.submit(arrayOf(encoder.finish()))
+        device.queue.submitAndRelease(encoder)
         st.tiles[key] = Tile(origin).also { it.lastUsed = frame }
         st.instancesDirty = true
 

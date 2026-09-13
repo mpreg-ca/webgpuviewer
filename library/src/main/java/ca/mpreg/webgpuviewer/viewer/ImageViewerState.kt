@@ -32,6 +32,7 @@ import ca.mpreg.webgpuviewer.renderer.Upscaler
 import ca.mpreg.webgpuviewer.renderer.UpscalerArtCnn
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer.Companion.dispatcher
+import ca.mpreg.webgpuviewer.renderer.endAndRelease
 import ca.mpreg.webgpuviewer.transition.Transition
 import ca.mpreg.webgpuviewer.transition.TransitionBasic
 import kotlinx.coroutines.CoroutineScope
@@ -340,11 +341,12 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
         clearColor: Int = 0,
         block: (GPURenderPassEncoder) -> Unit
     ) {
+        val targetView = texture.createView()
         val pass = encoder.beginRenderPass(
             GPURenderPassDescriptor(
                 colorAttachments = arrayOf(
                     GPURenderPassColorAttachment(
-                        view = texture.createView(),
+                        view = targetView,
                         loadOp = LoadOp.Clear,
                         storeOp = StoreOp.Store,
                         clearValue = GPUColor(
@@ -368,7 +370,7 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
         try {
             block(pass)
         } finally {
-            pass.end()
+            pass.endAndRelease(targetView)
         }
     }
 

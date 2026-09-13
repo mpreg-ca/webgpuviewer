@@ -4,6 +4,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.webgpu.GPUCommandEncoder
 import androidx.webgpu.GPUTexture
 import ca.mpreg.webgpuviewer.renderer.TileRenderer
+import ca.mpreg.webgpuviewer.renderer.endAndRelease
 import ca.mpreg.webgpuviewer.viewer.ImagePage
 
 object TransitionStackLeft : Transition() {
@@ -35,7 +36,7 @@ object TransitionStackLeft : Transition() {
                 blitCached(pass, dst.format, cached2, -(frac + 1f), 0f)
             }
         } finally {
-            pass.end()
+            pass.endAndRelease()
         }
     }
 }

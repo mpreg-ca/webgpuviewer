@@ -90,7 +90,7 @@ class UpscalerArtCnn : Upscaler() {
                     compute.dispatchWorkgroups(p.groups, p.groups)
                 }
             } finally {
-                compute.end()
+                compute.endAndRelease()
             }
         } catch (e: Exception) {
             fail(e)
