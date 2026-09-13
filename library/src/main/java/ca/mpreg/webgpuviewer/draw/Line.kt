@@ -11,6 +11,8 @@ import androidx.webgpu.GPUShaderSourceWGSL
 import androidx.webgpu.GPUTexture
 import ca.mpreg.webgpuviewer.renderer.FormatKeyed
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
+import ca.mpreg.webgpuviewer.renderer.endAndRelease
+import ca.mpreg.webgpuviewer.renderer.setTransientBindGroup
 import ca.mpreg.webgpuviewer.renderer.wgslStorageFormat
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -109,19 +111,20 @@ fun Draw.line(
     val dispatchW = ceil(texture.width / 8f).toInt()
     val dispatchH = ceil(texture.height / 8f).toInt()
 
+    val targetView = texture.createView()
     val pass = encoder.beginComputePass()
     val pipeline = pipelines[texture.format]
     pass.setPipeline(pipeline)
-    pass.setBindGroup(
+    pass.setTransientBindGroup(
         0, device.createBindGroup(
             GPUBindGroupDescriptor(
                 layout = pipeline.getBindGroupLayout(0), entries = arrayOf(
-                    GPUBindGroupEntry(0, textureView = texture.createView()),
+                    GPUBindGroupEntry(0, textureView = targetView),
                     GPUBindGroupEntry(1, buffer = uniformBuffer),
                 )
             )
         )
     )
     pass.dispatchWorkgroups(dispatchW, dispatchH)
-    pass.end()
+    pass.endAndRelease(targetView)
 }

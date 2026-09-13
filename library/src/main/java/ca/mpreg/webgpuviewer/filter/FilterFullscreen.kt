@@ -7,6 +7,7 @@ import androidx.webgpu.GPUCommandEncoder
 import androidx.webgpu.GPURenderPipeline
 import androidx.webgpu.GPUTextureView
 import ca.mpreg.webgpuviewer.renderer.Fullscreen
+import ca.mpreg.webgpuviewer.renderer.endAndRelease
 
 /**
  * A [Filter] that is one fragment pass over the whole frame - the shape every per-pixel filter
@@ -44,6 +45,7 @@ abstract class FilterFullscreen : Filter() {
     /** Drop the cached bind groups, for a filter whose own bindings have changed. */
     protected fun rebind() {
         boundHandles.fill(0L)
+        bindGroups.forEach { it?.close() }
         bindGroups.fill(null)
         invalidate()
     }
@@ -60,6 +62,8 @@ abstract class FilterFullscreen : Filter() {
             )
         )
         boundHandles[nextBindGroup] = handle
+        // Evicted: a pass that used it holds its own reference, so ours can go.
+        bindGroups[nextBindGroup]?.close()
         bindGroups[nextBindGroup] = group
         nextBindGroup = (nextBindGroup + 1) % CACHED_BIND_GROUPS
         return group
@@ -89,7 +93,7 @@ abstract class FilterFullscreen : Filter() {
             pass.setBindGroup(0, group)
             pass.draw(3)
         } finally {
-            pass.end()
+            pass.endAndRelease()
         }
     }
 

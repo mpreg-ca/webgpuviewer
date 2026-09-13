@@ -19,6 +19,9 @@ import ca.mpreg.webgpuviewer.Trim.Companion.findInContext
 import ca.mpreg.webgpuviewer.renderer.Image
 import ca.mpreg.webgpuviewer.renderer.Mipmap
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
+import ca.mpreg.webgpuviewer.renderer.endAndRelease
+import ca.mpreg.webgpuviewer.renderer.setTransientBindGroup
+import ca.mpreg.webgpuviewer.renderer.submitAndRelease
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.awaitAll
@@ -358,13 +361,14 @@ class Trim {
             device.queue.writeBuffer(resultBuffer, 0L, initBuffer)
 
             val encoder = device.createCommandEncoder()
+            val targetView = texture.createView()
             val pass = encoder.beginComputePass()
             pass.setPipeline(pipeline)
-            pass.setBindGroup(
+            pass.setTransientBindGroup(
                 0, device.createBindGroup(
                     GPUBindGroupDescriptor(
                         layout = pipeline.getBindGroupLayout(0), entries = arrayOf(
-                            GPUBindGroupEntry(0, textureView = texture.createView()),
+                            GPUBindGroupEntry(0, textureView = targetView),
                             GPUBindGroupEntry(1, buffer = resultBuffer),
                             GPUBindGroupEntry(2, buffer = uniformBuffer),
                         )
@@ -377,10 +381,10 @@ class Trim {
                 Edge.TOP, Edge.BOTTOM -> ceil(texture.width / 64.0).toInt()
             }
             pass.dispatchWorkgroups(dispatchSize)
-            pass.end()
+            pass.endAndRelease(targetView)
 
             encoder.copyBufferToBuffer(resultBuffer, 0, stagingBuffer, 0, 32)
-            device.queue.submit(arrayOf(encoder.finish()))
+            device.queue.submitAndRelease(encoder)
 
             val res = CompletableDeferred<EdgeResult>()
 
@@ -955,13 +959,14 @@ fn find_bottom(@builtin(global_invocation_id) global_id: vec3<u32>) {
             device.queue.writeBuffer(resultBuffer, 0L, initBuffer)
 
             val encoder = device.createCommandEncoder()
+            val targetView = texture.createView()
             val pass = encoder.beginComputePass()
             pass.setPipeline(pipeline)
-            pass.setBindGroup(
+            pass.setTransientBindGroup(
                 0, device.createBindGroup(
                     GPUBindGroupDescriptor(
                         layout = pipeline.getBindGroupLayout(0), entries = arrayOf(
-                            GPUBindGroupEntry(0, textureView = texture.createView()),
+                            GPUBindGroupEntry(0, textureView = targetView),
                             GPUBindGroupEntry(1, buffer = resultBuffer),
                             GPUBindGroupEntry(2, buffer = uniformBuffer),
                         )
@@ -972,11 +977,11 @@ fn find_bottom(@builtin(global_invocation_id) global_id: vec3<u32>) {
             pass.dispatchWorkgroups(
                 ceil(texture.width / 8.0).toInt(), ceil(texture.height / 8.0).toInt()
             )
-            pass.end()
+            pass.endAndRelease(targetView)
 
             encoder.copyBufferToBuffer(resultBuffer, 0, stagingBuffer, 0, 16)
 
-            device.queue.submit(arrayOf(encoder.finish()))
+            device.queue.submitAndRelease(encoder)
 
             val res = CompletableDeferred<Rect>()
 

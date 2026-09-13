@@ -24,6 +24,8 @@ import androidx.webgpu.StoreOp
 import ca.mpreg.webgpuviewer.renderer.FormatKeyed
 import ca.mpreg.webgpuviewer.renderer.TileRenderer
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
+import ca.mpreg.webgpuviewer.renderer.endAndRelease
+import ca.mpreg.webgpuviewer.renderer.setTransientBindGroup
 import ca.mpreg.webgpuviewer.viewer.ImagePage
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -150,11 +152,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         )
         WebGpuRenderer.device.queue.writeBuffer(uniformBuffer, 0, byteBuffer)
 
+        val targetView = dst.createView()
         val pass = encoder.beginRenderPass(
             GPURenderPassDescriptor(
                 colorAttachments = arrayOf(
                     GPURenderPassColorAttachment(
-                        view = dst.createView(),
+                        view = targetView,
                         loadOp = LoadOp.Clear,
                         storeOp = StoreOp.Store,
                         clearValue = GPUColor(1.0, 1.0, 1.0, 1.0)
@@ -165,7 +168,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
         val fadeWhitePipeline = fadeWhitePipelines[dst.format]
         pass.setPipeline(fadeWhitePipeline)
-        pass.setBindGroup(
+        pass.setTransientBindGroup(
             0, WebGpuRenderer.device.createBindGroup(
                 GPUBindGroupDescriptor(
                     layout = fadeWhitePipeline.getBindGroupLayout(0),
@@ -178,7 +181,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             )
         )
         pass.draw(6)
-        pass.end()
+        pass.endAndRelease(targetView, uniformBuffer)
     }
 
     override fun render(

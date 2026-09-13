@@ -293,7 +293,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
         val maskedRectPipeline = maskedRectPipelines[format]
         pass.setPipeline(maskedRectPipeline)
-        pass.setBindGroup(
+        pass.setTransientBindGroup(
             0, device.createBindGroup(
                 GPUBindGroupDescriptor(
                     layout = maskedRectPipeline.getBindGroupLayout(0), entries = arrayOf(
@@ -303,6 +303,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             )
         )
         pass.draw(6)
+        uniformBuffer.close()
     }
 
     /** Uniforms, texture bindings and the vertex stage's view of the source, shared by both. */
@@ -646,7 +647,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         })
 
         pass.setPipeline(pipeline)
-        pass.setBindGroup(
+        pass.setTransientBindGroup(
             0, device.createBindGroup(
                 GPUBindGroupDescriptor(layout = pipeline.getBindGroupLayout(0), entries = entries)
             )
@@ -678,7 +679,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // samplerVariant's stencil test reads against 1 - see [TileRenderer.blitPipelineStencilWrite],
         // the only thing that ever writes this attachment.
         if (variant === samplerVariant) pass.setStencilReference(1)
-        pass.setBindGroup(
+        pass.setTransientBindGroup(
             0, device.createBindGroup(
                 GPUBindGroupDescriptor(
                     layout = pipeline.getBindGroupLayout(0), entries = arrayOf(

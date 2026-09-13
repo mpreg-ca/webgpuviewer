@@ -393,13 +393,16 @@ class WebGpuRenderer {
                 // over it and lands the result on the swapchain.
                 fn(encoder, filters.beginFrame(texture))
                 filters.endFrame(encoder, texture)
-                device.queue.submit(arrayOf(encoder.finish()))
+                device.queue.submitAndRelease(encoder)
                 surface.present()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 Log.e("WebGpuRenderer", "Render error", e)
                 // Don't rethrow - allow the app to continue rendering next frame
+            } finally {
+                // getCurrentTexture hands out a new reference every frame - see [endAndRelease].
+                texture.close()
             }
         }
 

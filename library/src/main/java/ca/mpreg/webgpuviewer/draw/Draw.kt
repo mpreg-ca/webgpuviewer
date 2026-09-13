@@ -4,6 +4,7 @@ import androidx.webgpu.GPUBuffer
 import androidx.webgpu.GPUBufferDescriptor
 import androidx.webgpu.GPUCommandEncoder
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
+import ca.mpreg.webgpuviewer.renderer.submitAndRelease
 
 object Draw {
     internal val device get() = WebGpuRenderer.device
@@ -14,8 +15,11 @@ object Draw {
         val buffers = tempBuffers.get()
         val encoder = device.createCommandEncoder()
         block.invoke(this, encoder)
-        device.queue.submit(arrayOf(encoder.finish()))
-        buffers.forEach { it.destroy() }
+        device.queue.submitAndRelease(encoder)
+        buffers.forEach {
+            it.destroy()
+            it.close()
+        }
         buffers.clear()
     }
 

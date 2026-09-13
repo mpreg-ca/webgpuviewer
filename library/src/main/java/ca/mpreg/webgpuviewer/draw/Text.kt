@@ -47,6 +47,7 @@ import ca.mpreg.webgpuviewer.draw.Font.Companion.forFamily
 import ca.mpreg.webgpuviewer.draw.Font.Companion.invoke
 import ca.mpreg.webgpuviewer.renderer.FormatKeyed
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
+import ca.mpreg.webgpuviewer.renderer.setTransientBindGroup
 import org.json.JSONObject
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -1063,7 +1064,7 @@ private fun drawGlyphInstances(
     val pipeline = pipelines[format]
     pass.setPipeline(pipeline)
     pass.setVertexBuffer(0, vertexBuffer)
-    pass.setBindGroup(
+    pass.setTransientBindGroup(
         0, device.createBindGroup(
             GPUBindGroupDescriptor(
                 layout = pipeline.getBindGroupLayout(0), entries = arrayOf(
@@ -1075,4 +1076,6 @@ private fun drawGlyphInstances(
         )
     )
     pass.draw(6, glyphCount)
+    vertexBuffer.close()
+    paramsBuffer.close()
 }

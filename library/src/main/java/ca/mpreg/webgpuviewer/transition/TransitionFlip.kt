@@ -40,6 +40,8 @@ import ca.mpreg.webgpuviewer.draw.Draw
 import ca.mpreg.webgpuviewer.draw.rect
 import ca.mpreg.webgpuviewer.renderer.FormatKeyed
 import ca.mpreg.webgpuviewer.renderer.TileRenderer
+import ca.mpreg.webgpuviewer.renderer.endAndRelease
+import ca.mpreg.webgpuviewer.renderer.setTransientBindGroup
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.blendBackgroundColor
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.blitCachedRegion
 import ca.mpreg.webgpuviewer.transition.TransitionFlip.LIT_ENDS
@@ -248,7 +250,7 @@ object TransitionFlip : Transition() {
                 spine2?.let { blitCachedRegion(pass, dst.format, cached2, 0f, 0f, it, 1f, fadeIn) }
             }
         } finally {
-            pass.end()
+            pass.endAndRelease()
         }
 
         val leaf = leaf(page1, page2, dst, t, forward, spine1, spine2, cached1, cached2) ?: return
@@ -256,11 +258,12 @@ object TransitionFlip : Transition() {
         val front = cached1 ?: cached2 ?: return
         val back = cached2 ?: cached1 ?: return
 
+        val targetView = dst.createView()
         val leafPass = encoder.beginRenderPass(
             GPURenderPassDescriptor(
                 colorAttachments = arrayOf(
                     GPURenderPassColorAttachment(
-                        view = dst.createView(),
+                        view = targetView,
                         loadOp = LoadOp.Load,
                         storeOp = StoreOp.Store,
                         clearValue = GPUColor(0.0, 0.0, 0.0, 0.0)
@@ -296,8 +299,9 @@ object TransitionFlip : Transition() {
                 attach(leafPass, pipelines[dst.format], uniforms, front, back)
                 leafPass.draw(SHEET_VERTICES, 1, SHEET_VERTICES)
             }
+            uniforms.close()
         } finally {
-            leafPass.end()
+            leafPass.endAndRelease(targetView)
         }
     }
 
@@ -428,7 +432,7 @@ object TransitionFlip : Transition() {
         back: GPUTextureView,
     ) {
         pass.setPipeline(pipeline)
-        pass.setBindGroup(
+        pass.setTransientBindGroup(
             0, device.createBindGroup(
                 GPUBindGroupDescriptor(
                     layout = pipeline.getBindGroupLayout(0), entries = arrayOf(
@@ -445,7 +449,7 @@ object TransitionFlip : Transition() {
     /** Cut the blank face out, over the leaf's own half of the grid - see [punchPipeline]. */
     private fun cut(pass: GPURenderPassEncoder, format: Int, uniforms: GPUBuffer) {
         pass.setPipeline(punchPipelines[format])
-        pass.setBindGroup(
+        pass.setTransientBindGroup(
             0, device.createBindGroup(
                 GPUBindGroupDescriptor(
                     layout = punchBindGroupLayout,
