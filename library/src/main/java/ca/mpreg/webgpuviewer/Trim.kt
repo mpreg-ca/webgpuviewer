@@ -19,6 +19,7 @@ import ca.mpreg.webgpuviewer.Trim.Companion.findInContext
 import ca.mpreg.webgpuviewer.renderer.Image
 import ca.mpreg.webgpuviewer.renderer.Mipmap
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
+import ca.mpreg.webgpuviewer.renderer.destroyAndRelease
 import ca.mpreg.webgpuviewer.renderer.endAndRelease
 import ca.mpreg.webgpuviewer.renderer.setTransientBindGroup
 import ca.mpreg.webgpuviewer.renderer.submitAndRelease
@@ -433,18 +434,18 @@ class Trim {
                             Log.e(TAG, "Error reading edge detect result", e)
                             res.complete(EdgeResult(false, 1, 0f, 0f, 0f))
                         } finally {
-                            uniformBuffer.destroy()
-                            resultBuffer.destroy()
-                            stagingBuffer.destroy()
+                            uniformBuffer.destroyAndRelease()
+                            resultBuffer.destroyAndRelease()
+                            stagingBuffer.destroyAndRelease()
                         }
                     }
 
                     override fun onError(exception: Exception) {
                         Log.e(TAG, "Error in edge detect mapAsync", exception)
                         res.complete(EdgeResult(false, 1, 0f, 0f, 0f))
-                        uniformBuffer.destroy()
-                        resultBuffer.destroy()
-                        stagingBuffer.destroy()
+                        uniformBuffer.destroyAndRelease()
+                        resultBuffer.destroyAndRelease()
+                        stagingBuffer.destroyAndRelease()
                     }
                 })
 
@@ -1007,18 +1008,18 @@ fn find_bottom(@builtin(global_invocation_id) global_id: vec3<u32>) {
                             Log.e(TAG, "Error reading trim result", e)
                             res.complete(Rect(0, 0, texture.width, texture.height))
                         } finally {
-                            uniformBuffer.destroy()
-                            resultBuffer.destroy()
-                            stagingBuffer.destroy()
+                            uniformBuffer.destroyAndRelease()
+                            resultBuffer.destroyAndRelease()
+                            stagingBuffer.destroyAndRelease()
                         }
                     }
 
                     override fun onError(exception: Exception) {
                         Log.e(TAG, "Error in trim mapAsync", exception)
                         res.complete(Rect(0, 0, texture.width, texture.height))
-                        uniformBuffer.destroy()
-                        resultBuffer.destroy()
-                        stagingBuffer.destroy()
+                        uniformBuffer.destroyAndRelease()
+                        resultBuffer.destroyAndRelease()
+                        stagingBuffer.destroyAndRelease()
                     }
                 })
 

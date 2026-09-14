@@ -194,11 +194,16 @@ class Mipmap(
         lastQuad = null
         lastQuadTX = -1
         lastQuadTY = -1
-        tileUniforms?.forEach { it?.destroy() }
+        // Every one of these is AutoCloseable over a Dawn handle with no finalizer behind it, so dropping the
+        // reference alone leaks the native object: destroy() frees the memory, close() releases the handle.
+        // tiles and tileViews only alias entries of textures and textureViews, so closing those twice would
+        // release a handle that is already gone - they are just cleared.
+        tileUniforms?.forEach { it?.destroyAndRelease() }
         tileUniforms = null
+        textureViews.forEach { view -> view.close() }
         textureViews.clear()
         tileViews.clear()
-        textures.forEach { tex -> tex.destroy() }
+        textures.forEach { tex -> tex.destroyAndRelease() }
         textures.clear()
         tiles.clear()
     }

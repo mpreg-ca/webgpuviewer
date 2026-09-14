@@ -1,10 +1,12 @@
 package ca.mpreg.webgpuviewer.renderer
 
 import androidx.webgpu.GPUBindGroup
+import androidx.webgpu.GPUBuffer
 import androidx.webgpu.GPUCommandEncoder
 import androidx.webgpu.GPUComputePassEncoder
 import androidx.webgpu.GPUQueue
 import androidx.webgpu.GPURenderPassEncoder
+import androidx.webgpu.GPUTexture
 
 /*
  * An androidx.webgpu wrapper holds a native reference that only close() drops - nothing releases it
@@ -43,6 +45,18 @@ internal fun GPURenderPassEncoder.setTransientBindGroup(index: Int, group: GPUBi
 internal fun GPUComputePassEncoder.setTransientBindGroup(index: Int, group: GPUBindGroup) {
     setBindGroup(index, group)
     group.close()
+}
+
+/** Frees the memory behind a buffer we own for good, then drops the handle to it. */
+internal fun GPUBuffer.destroyAndRelease() {
+    destroy()
+    close()
+}
+
+/** Frees the memory behind a texture we own for good, then drops the handle to it. */
+internal fun GPUTexture.destroyAndRelease() {
+    destroy()
+    close()
 }
 
 /** Finishes and submits [encoder], then drops it and its command buffer. */
