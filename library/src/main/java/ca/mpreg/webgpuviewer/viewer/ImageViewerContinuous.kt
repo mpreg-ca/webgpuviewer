@@ -50,6 +50,13 @@ fun ImageViewerContinuous(
     val flingX = remember { Animatable(0f) }
     val decay = remember(density) { splineBasedDecay<Float>(density) }
 
+    // What the platform considers a fling at all. A fixed figure here was three times this on a
+    // 420dpi screen, so an ordinary flick scrolled only as far as the finger dragged it and the
+    // strip stopped dead where a list would have carried on.
+    val minFlingVelocity = remember(view) {
+        android.view.ViewConfiguration.get(view.context).scaledMinimumFlingVelocity.toFloat()
+    }
+
     LaunchedEffect(density) {
         state.density = density
     }
@@ -394,8 +401,9 @@ fun ImageViewerContinuous(
                     if (!snapScaleIntoBounds(zoomOriginX, zoomOriginY)) {
                         val velocity = velocityTracker.calculateVelocity()
                         // Held still before lifting: no fling, however fast it got there.
+                        // Held still before lifting: no fling, however fast it got there.
                         if ((lastEventTime - lastMoveTime) < 100 &&
-                            (abs(velocity.y) > 400 || abs(velocity.x) > 400)
+                            (abs(velocity.y) > minFlingVelocity || abs(velocity.x) > minFlingVelocity)
                         ) {
                             state.animationJob = scope.launch(NormalMotionDurationScale) {
                                 state.isFlinging = true
