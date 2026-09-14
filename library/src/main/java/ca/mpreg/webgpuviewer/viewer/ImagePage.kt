@@ -118,9 +118,9 @@ open class ImagePage {
         // The rect [fillPage] fills, not all of [dst] - a page smaller than the surface would
         // otherwise warp stretched to a height it never asked for. Non-null, so transitions that
         // bail on a null pageRect still draw a Render page.
-        override fun pageRect(dst: GPUTexture): FloatArray {
-            val halfWidthFrac = scale * width / (2f * dst.width)
-            val halfHeightFrac = scale * height / (2f * dst.height)
+        override fun pageRect(width: Int, height: Int): FloatArray {
+            val halfWidthFrac = scale * this.width / (2f * width)
+            val halfHeightFrac = scale * this.height / (2f * height)
             val cx = 0.5f + scale * x
             val cy = 0.5f + scale * y
             return floatArrayOf(
@@ -480,7 +480,10 @@ open class ImagePage {
         }
 
         /** Opens a `LoadOp.Clear` pass on [tex], no stencil attachment - a transition's cache is never masked. */
-        private fun beginCachePass(encoder: GPUCommandEncoder, tex: GPUTexture): GPURenderPassEncoder {
+        private fun beginCachePass(
+            encoder: GPUCommandEncoder,
+            tex: GPUTexture
+        ): GPURenderPassEncoder {
             val targetView = tex.createView()
             return encoder.beginRenderPass(
                 GPURenderPassDescriptor(
@@ -641,10 +644,10 @@ open class ImagePage {
             }
         }
 
-        override fun pageRect(dst: GPUTexture): FloatArray? {
+        override fun pageRect(width: Int, height: Int): FloatArray? {
             val image = currentImage ?: return null
             if (image.mipmaps.isEmpty()) return null
-            return image.placement(dst, x, y, scale)
+            return image.placement(width, height, x, y, scale)
         }
 
         override val backgroundColor: Int?
@@ -1016,18 +1019,19 @@ open class ImagePage {
         }
 
         /** Via [leafRect], so a spread of two [Render] sides still has a rect. */
-        override fun pageRect(dst: GPUTexture): FloatArray? =
-            leafRect(dst, true) ?: leafRect(dst, false)
+        override fun pageRect(width: Int, height: Int): FloatArray? =
+            leafRect(width, height, true) ?: leafRect(width, height, false)
 
         /** That side's own rect, so a spread turns one real page rather than half of a sheet. */
-        override fun leafRect(dst: GPUTexture, left: Boolean): FloatArray? {
+        override fun leafRect(width: Int, height: Int, left: Boolean): FloatArray? {
             val side = (if (left) this.left else this.right) ?: return null
             val sideScale = sideScale(side)
-            val placeX = x + (if (left) -0.5f else 0.5f) * sideWidth(side) / dst.width
+            val placeX = x + (if (left) -0.5f else 0.5f) * sideWidth(side) / width
             (side as? ImageSingle)?.currentImage?.let { image ->
                 if (image.mipmaps.isNotEmpty()) {
                     return image.placement(
-                        dst,
+                        width,
+                        height,
                         (placeX + WebGpuRenderer.offsetX) / sideScale - WebGpuRenderer.offsetX,
                         (y + WebGpuRenderer.offsetY) / sideScale - WebGpuRenderer.offsetY,
                         scale * sideScale
@@ -1038,9 +1042,24 @@ open class ImagePage {
             if (side !is Render) return null
             val cx = 0.5f + scale * (placeX + WebGpuRenderer.offsetX)
             val cy = 0.5f + scale * (y + WebGpuRenderer.offsetY)
-            val hw = scale * 0.5f * sideWidth(side) / dst.width
-            val hh = scale * 0.5f * side.height * sideScale / dst.height
+            val hw = scale * 0.5f * sideWidth(side) / width
+            val hh = scale * 0.5f * side.height * sideScale / height
             return floatArrayOf(cx - hw, cy - hh, cx + hw, cy + hh)
+        }
+
+        /** Whichever side's own [leafRect] contains the point, or null off both. */
+        override fun pageAt(px: Float, py: Float, width: Int, height: Int): ImagePage? {
+            left?.let { side ->
+                leafRect(width, height, true)?.let { r ->
+                    if (px in r[0]..r[2] && py in r[1]..r[3]) return side
+                }
+            }
+            right?.let { side ->
+                leafRect(width, height, false)?.let { r ->
+                    if (px in r[0]..r[2] && py in r[1]..r[3]) return side
+                }
+            }
+            return null
         }
 
         /** The seam, not the midpoint - the two sides can be different widths. */
@@ -1274,7 +1293,10 @@ open class ImagePage {
      * flip) to map the page's actual rect rather than treating it as screen-shaped. Null if this
      * page has nothing to draw, which is always true for a non-[Images] page.
      */
-    open fun pageRect(dst: GPUTexture): FloatArray? = null
+    open fun pageRect(dst: GPUTexture): FloatArray? = pageRect(dst.width, dst.height)
+
+    /** As [pageRect], off just the dimensions a real [GPUTexture] would otherwise be read for. */
+    open fun pageRect(width: Int, height: Int): FloatArray? = null
 
     /**
      * One half of this page, normalised like [pageRect] - for
@@ -1282,11 +1304,25 @@ open class ImagePage {
      * own rect, null where it has no page; everything else splits [pageRect] down the middle, which
      * is what lets a single page turn like a spread.
      */
-    internal open fun leafRect(dst: GPUTexture, left: Boolean): FloatArray? {
-        val r = pageRect(dst) ?: return null
+    internal open fun leafRect(dst: GPUTexture, left: Boolean): FloatArray? =
+        leafRect(dst.width, dst.height, left)
+
+    /** As [leafRect], off just the dimensions a real [GPUTexture] would otherwise be read for. */
+    internal open fun leafRect(width: Int, height: Int, left: Boolean): FloatArray? {
+        val r = pageRect(width, height) ?: return null
         val mid = (r[0] + r[2]) * 0.5f
         return if (left) floatArrayOf(r[0], r[1], mid, r[3])
         else floatArrayOf(mid, r[1], r[2], r[3])
+    }
+
+    /**
+     * The page - this one, or (for an [ImageSpread]) whichever side - whose [pageRect]/[leafRect]
+     * contains normalised point ([px], [py]), or null if it lands on neither. [width]/[height] are
+     * the surface's own, matching what a real [GPUTexture] passed to [pageRect] would give.
+     */
+    internal open fun pageAt(px: Float, py: Float, width: Int, height: Int): ImagePage? {
+        val r = pageRect(width, height) ?: return null
+        return if (px in r[0]..r[2] && py in r[1]..r[3]) this else null
     }
 
     /** Where this page's two [leafRect] halves meet - the spine a page flip turns about. */

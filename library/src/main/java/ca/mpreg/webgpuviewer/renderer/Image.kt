@@ -368,13 +368,17 @@ class Image private constructor(
      * [ca.mpreg.webgpuviewer.viewer.ImagePage.ImageSingle.pageRect]) with no reason to touch mip/tile
      * selection.
      */
-    fun placement(dst: GPUTexture, x: Float, y: Float, scale: Float): FloatArray {
-        val adjustedX = x + this.x / dst.width + WebGpuRenderer.offsetX
-        val adjustedY = y + this.y / dst.height + WebGpuRenderer.offsetY
-        val x1 = 0.5f + scale * (adjustedX - 0.5f * width / dst.width)
-        val y1 = 0.5f + scale * (adjustedY - 0.5f * height / dst.height)
+    fun placement(dst: GPUTexture, x: Float, y: Float, scale: Float): FloatArray =
+        placement(dst.width, dst.height, x, y, scale)
+
+    /** As [placement], off just the dimensions a real [GPUTexture] would otherwise be read for. */
+    fun placement(dstWidth: Int, dstHeight: Int, x: Float, y: Float, scale: Float): FloatArray {
+        val adjustedX = x + this.x / dstWidth + WebGpuRenderer.offsetX
+        val adjustedY = y + this.y / dstHeight + WebGpuRenderer.offsetY
+        val x1 = 0.5f + scale * (adjustedX - 0.5f * width / dstWidth)
+        val y1 = 0.5f + scale * (adjustedY - 0.5f * height / dstHeight)
         return floatArrayOf(
-            x1, y1, x1 + scale * width / dst.width, y1 + scale * height / dst.height
+            x1, y1, x1 + scale * width / dstWidth, y1 + scale * height / dstHeight
         )
     }
 

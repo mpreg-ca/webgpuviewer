@@ -23,7 +23,6 @@ import androidx.webgpu.LoadOp
 import androidx.webgpu.StoreOp
 import ca.mpreg.webgpuviewer.filter.FilterChain
 import ca.mpreg.webgpuviewer.renderer.Downscaler
-import ca.mpreg.webgpuviewer.renderer.DownscalerBox
 import ca.mpreg.webgpuviewer.renderer.FrameResult
 import ca.mpreg.webgpuviewer.renderer.Hdr
 import ca.mpreg.webgpuviewer.renderer.Rescaler
@@ -219,6 +218,14 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
     protected var onScreenPages: List<ImagePage> = emptyList()
 
     internal fun isOnScreen(page: ImagePage): Boolean = onScreenPages.any { it.covers(page) }
+
+    /**
+     * The page at normalised viewport position ([x], [y]), both in `[0, 1]` - same coordinates as
+     * [ImagePage.pageRect]. For an [ImagePage.ImageSpread], resolves to whichever side the point
+     * falls in rather than the spread itself. Null if it misses every page currently shown, or if
+     * there's no current page at all.
+     */
+    fun pageAt(x: Float, y: Float): ImagePage? = getPage(0)?.pageAt(x, y, width, height)
 
     @Synchronized
     fun init(scope: CoroutineScope, surface: Surface, width: Int, height: Int) {
