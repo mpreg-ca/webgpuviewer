@@ -111,6 +111,36 @@ object ImageUtil {
         return ByteBuffer.allocateDirect(bytes.toInt())
     }
 
+    /**
+     * A quarter turn of a packed image buffer. A page too wide for the screen reads better on its
+     * side than shrunk to fit, and nothing between the decoded pixels and the screen can rotate,
+     * so it happens here.
+     */
+    external fun rotateQuarterNative(
+        pixels: ByteBuffer,
+        dstPixels: ByteBuffer,
+        width: Int,
+        height: Int,
+        bytesPerPixel: Int,
+        clockwise: Boolean,
+    )
+
+    /**
+     * [rotateQuarterNative] into a freshly allocated buffer. The result is [height] x [width], so
+     * the caller has to swap the two when it describes the image afterwards.
+     */
+    fun rotateQuarter(
+        source: ByteBuffer,
+        width: Int,
+        height: Int,
+        bytesPerPixel: Int = 4,
+        clockwise: Boolean = true,
+    ): ByteBuffer {
+        val output = directBuffer(width, height, bytesPerPixel)
+        rotateQuarterNative(source, output, width, height, bytesPerPixel, clockwise)
+        return output
+    }
+
     fun resize(source: ByteBuffer, width: Int, height: Int): ByteBuffer {
         // Half the width and half the height at 4 B/px, so one byte per source pixel.
         val output = directBuffer(width, height, 1)

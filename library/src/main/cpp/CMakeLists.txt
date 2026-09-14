@@ -9,6 +9,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_library(resize SHARED
     hdr.cpp
     resize.cpp
+    rotate.cpp
     trim.cpp
 )
 
