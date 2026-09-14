@@ -96,6 +96,9 @@ class FilterChain {
         var src: GPUTextureView = scene.view
         var width = surface.width
         var height = surface.height
+        // Views over the frame's swapchain texture, made here rather than pooled. The pass each one is
+        // attached to keeps its own reference, so ours goes once the chain has recorded everything.
+        val surfaceViews = ArrayList<GPUTextureView>(2)
 
         try {
             for (i in active.indices) {
@@ -112,7 +115,7 @@ class FilterChain {
 
                 val dstSlot = if (direct) null
                 else acquire(outWidth, outHeight, filter.outputFormat, filter.usesCompute)
-                val dst = dstSlot?.view ?: surface.createView()
+                val dst = dstSlot?.view ?: surface.createView().also { surfaceViews.add(it) }
 
                 filter.run(this, encoder, src, width, height, dst, outWidth, outHeight)
 
@@ -125,11 +128,12 @@ class FilterChain {
 
                 if (last && !direct) tailBlit.run(
                     this, encoder, src, width, height,
-                    surface.createView(), surface.width, surface.height
+                    surface.createView().also { surfaceViews.add(it) }, surface.width, surface.height
                 )
             }
         } finally {
             srcSlot?.let { it.inUse = false }
+            surfaceViews.forEach { it.close() }
             active.clear()
         }
     }
