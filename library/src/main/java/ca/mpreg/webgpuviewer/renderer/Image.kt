@@ -100,7 +100,14 @@ class Image private constructor(
             var keepHdr = false
             var headroom = hdrHeadroom
 
-            val canHdr = (hdr || gainmap != null) && Hdr.awaitSupportedByDevice()
+            // A ceiling of 1.0 is a host asking for no headroom at all, and there is then nothing
+            // to keep: the branches below fall through to the SDR ones, which is what makes that
+            // an exact base rendition for a gain map and a real tone map for PQ or HLG, rather
+            // than pixels scaled against a target they already sit above. Checked before the
+            // await, which otherwise waits up to two seconds for a surface it will not use.
+            val canHdr = (hdr || gainmap != null) &&
+                    Hdr.presentPeak > 1f &&
+                    Hdr.awaitSupportedByDevice()
 
             when {
                 // A gain map is applied here rather than by the decoder: how much of it to use
