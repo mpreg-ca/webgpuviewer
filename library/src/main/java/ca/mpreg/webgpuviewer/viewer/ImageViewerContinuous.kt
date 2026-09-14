@@ -401,7 +401,6 @@ fun ImageViewerContinuous(
                     if (!snapScaleIntoBounds(zoomOriginX, zoomOriginY)) {
                         val velocity = velocityTracker.calculateVelocity()
                         // Held still before lifting: no fling, however fast it got there.
-                        // Held still before lifting: no fling, however fast it got there.
                         if ((lastEventTime - lastMoveTime) < 100 &&
                             (abs(velocity.y) > minFlingVelocity || abs(velocity.x) > minFlingVelocity)
                         ) {

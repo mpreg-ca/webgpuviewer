@@ -53,6 +53,13 @@ fun ImageViewer(
 
     val view = LocalView.current
     val density = LocalDensity.current
+
+    // The platform's bar for "this gesture was a fling", the same one a scrolling list uses. A
+    // fixed figure here was several times it, so a gentle pan across a zoomed page stopped dead
+    // the moment the finger lifted.
+    val minFlingVelocity = remember(view) {
+        android.view.ViewConfiguration.get(view.context).scaledMinimumFlingVelocity.toFloat()
+    }
     // Get cutout top directly in px
     val cutoutPx = WindowInsets.displayCutout.getTop(density).let { px ->
         if (px == 0) {
@@ -465,7 +472,7 @@ fun ImageViewer(
                         // place like any other, and pans there like any other.
                         if ((page.scale >= page.minScale) && (page.scale <= page.maxScale) && (lastEventTime - lastMoveTime) < 100 && (abs(
                                 velocity.x
-                            ) > 400 || abs(velocity.y) > 400) && (page.x.fastCoerceIn(
+                            ) > minFlingVelocity || abs(velocity.y) > minFlingVelocity) && (page.x.fastCoerceIn(
                                 minX, maxX
                             ) == page.x || page.y.fastCoerceIn(minY, maxY) == page.y)
                         ) {
