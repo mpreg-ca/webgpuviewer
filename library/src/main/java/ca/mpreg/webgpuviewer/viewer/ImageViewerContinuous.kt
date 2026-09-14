@@ -170,6 +170,7 @@ fun ImageViewerContinuous(
                     }
 
                     if (waitForCleanUp(secondDown.id, doubleTapTimeout, touchSlop) != null) {
+                        if (!state.doubleTapZoomEnabled) return@awaitEachGesture
                         if (!state.atHomeScale) {
                             val py = secondDown.position.y / state.height
                             state.animationJob = scope.launch {
@@ -340,7 +341,8 @@ fun ImageViewerContinuous(
                                 velocityTracker.addPointerInputChange(change)
 
                                 val pan = event.calculatePan()
-                                val zoom = event.calculateZoom()
+                                // Off leaves two fingers panning without scaling.
+                                val zoom = if (state.pinchZoomEnabled) event.calculateZoom() else 1f
                                 // Any two fingers down: a quiet moment mid-pinch is still
                                 // a pinch, so generation stays held off.
                                 state.isScaleAnimating =

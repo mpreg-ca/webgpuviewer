@@ -92,6 +92,15 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
     var density: Density =
         Density(density = Resources.getSystem().displayMetrics.density, fontScale = 1f)
 
+    /**
+     * Whether a double tap zooms. Off leaves the gesture inert - the page neither zooms in nor
+     * returns home - for a reader that would rather double tap did nothing at all.
+     */
+    var doubleTapZoomEnabled: Boolean = true
+
+    /** Whether two fingers scale the page. Off leaves the page at whatever scale it is on. */
+    var pinchZoomEnabled: Boolean = true
+
     /** When true, images will be positioned/scaled to avoid the display cutout. */
     var avoidCutout: Boolean by mutableStateOf(false)
 

@@ -152,6 +152,7 @@ fun ImageViewer(
                     }
 
                     if (waitForCleanUp(secondDown.id, doubleTapTimeout, touchSlop) != null) {
+                        if (!state.doubleTapZoomEnabled) return@awaitEachGesture
                         // double tap — let any in-progress page turn finish committing first
                         val tapX = secondDown.position.x / state.width
                         val tapY = secondDown.position.y / state.height
@@ -362,7 +363,9 @@ fun ImageViewer(
                                     state.invalidate()
                                     event.changes.fastForEach { if (it.positionChanged()) it.consume() }
                                 } else {
-                                    val zoom = event.calculateZoom()
+                                    // Off leaves two fingers panning without scaling.
+                                    val zoom =
+                                        if (state.pinchZoomEnabled) event.calculateZoom() else 1f
 
                                     if (zoom != 1f || pan != Offset.Zero) {
                                         val newScale = page.scale * zoom
