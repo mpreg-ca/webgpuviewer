@@ -266,12 +266,22 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         )
 
         fun destroy() {
-            input.destroy()
-            yuvTex.destroy()
-            lumaTex.destroy()
-            f0Tex.destroy()
-            f1Tex.destroy()
-            f2Tex.destroy()
+            // The bind groups and views go first: each is a Dawn handle of its own, and only
+            // close() drops it - nothing releases one when it is garbage collected.
+            passes.forEach { it.bindGroup.close() }
+            resolveGroup.close()
+            inputView.close()
+            yuv.close()
+            luma.close()
+            f0.close()
+            f1.close()
+            f2.close()
+            input.destroyAndRelease()
+            yuvTex.destroyAndRelease()
+            lumaTex.destroyAndRelease()
+            f0Tex.destroyAndRelease()
+            f1Tex.destroyAndRelease()
+            f2Tex.destroyAndRelease()
         }
     }
 

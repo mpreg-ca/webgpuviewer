@@ -47,6 +47,7 @@ import ca.mpreg.webgpuviewer.draw.Font.Companion.forFamily
 import ca.mpreg.webgpuviewer.draw.Font.Companion.invoke
 import ca.mpreg.webgpuviewer.renderer.FormatKeyed
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
+import ca.mpreg.webgpuviewer.renderer.destroyAndRelease
 import ca.mpreg.webgpuviewer.renderer.setTransientBindGroup
 import org.json.JSONObject
 import java.nio.ByteBuffer
@@ -200,7 +201,8 @@ class Font private constructor(
         atlasWidth = newWidth
         atlasHeight = newHeight
 
-        atlasTexture.destroy()
+        atlasView.close()
+        atlasTexture.destroyAndRelease()
         atlasTexture = device.createTexture(
             GPUTextureDescriptor(
                 size = GPUExtent3D(newWidth, newHeight),
@@ -224,7 +226,10 @@ class Font private constructor(
     internal fun kerning(first: Int, second: Int): Float =
         kerningPairs[(first.toLong() shl 32) or (second.toLong() and 0xFFFFFFFFL)] ?: 0f
 
-    fun destroy() = atlasTexture.destroy()
+    fun destroy() {
+        atlasView.close()
+        atlasTexture.destroyAndRelease()
+    }
 
     companion object {
         /** Loads a font from an msdf-atlas-gen [json] layout and its already-decoded [bitmap] atlas. */

@@ -33,6 +33,7 @@ import ca.mpreg.webgpuviewer.renderer.FormatKeyed
 import ca.mpreg.webgpuviewer.renderer.Hdr
 import ca.mpreg.webgpuviewer.renderer.TileRenderer
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
+import ca.mpreg.webgpuviewer.renderer.destroyAndRelease
 import ca.mpreg.webgpuviewer.renderer.setTransientBindGroup
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.blitCached
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.blitCachedRegion
@@ -348,14 +349,21 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         private var cacheHeight = 0
         private var cacheFormat = 0
 
-        // Textures pending destruction (deferred to avoid use-after-free)
+        // Textures pending destruction (deferred to avoid use-after-free), with the views over them:
+        // a view is a Dawn handle of its own and only close() releases it.
         private var pendingDestroy1: GPUTexture? = null
         private var pendingDestroy2: GPUTexture? = null
+        private var pendingView1: GPUTextureView? = null
+        private var pendingView2: GPUTextureView? = null
 
         private fun ensureTexturesLocked(width: Int, height: Int) {
             // Destroy old pending textures (safe now - at least one frame has passed)
-            pendingDestroy1?.destroy()
-            pendingDestroy2?.destroy()
+            pendingView1?.close()
+            pendingView2?.close()
+            pendingDestroy1?.destroyAndRelease()
+            pendingDestroy2?.destroyAndRelease()
+            pendingView1 = null
+            pendingView2 = null
             pendingDestroy1 = null
             pendingDestroy2 = null
 
@@ -366,6 +374,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 // Defer destruction of old textures
                 pendingDestroy1 = texture1
                 pendingDestroy2 = texture2
+                pendingView1 = view1
+                pendingView2 = view2
 
                 // Create new textures
                 texture1 = WebGpuRenderer.device.createTexture(

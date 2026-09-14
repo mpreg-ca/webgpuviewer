@@ -19,6 +19,7 @@ import androidx.webgpu.TextureDimension
 import androidx.webgpu.TextureFormat
 import androidx.webgpu.TextureUsage
 import androidx.webgpu.TextureViewDimension
+import ca.mpreg.webgpuviewer.renderer.destroyAndRelease
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -136,7 +137,8 @@ class FilterLut3d(lut: Lut3d? = null) : FilterFullscreen() {
     )
 
     override fun cleanup() {
-        texture?.destroy()
+        view?.close()
+        texture?.destroyAndRelease()
         texture = null
         view = null
         // Not just the texture: upload() skips creating one when the size already matches.
@@ -146,7 +148,8 @@ class FilterLut3d(lut: Lut3d? = null) : FilterFullscreen() {
 
     private fun upload(lut: Lut3d) {
         if (lutSize != lut.size) {
-            texture?.destroy()
+            view?.close()
+            texture?.destroyAndRelease()
             texture = device.createTexture(
                 GPUTextureDescriptor(
                     label = label,
