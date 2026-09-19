@@ -1611,6 +1611,12 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
                                 recordTileOverhead((System.nanoTime() - started).toDouble())
                             }
                             generated++
+                            // Sustained staged work is what cooks a phone - see [Thermals]. Only
+                            // after a tile that submitted, and zero while nothing is throttled.
+                            if (staged) {
+                                val pause = Thermals.stagedTilePauseMs
+                                if (pause > 0L) delay(pause.milliseconds)
+                            }
                         } catch (e: CancellationException) {
                             throw e
                         } catch (e: Exception) {

@@ -5,6 +5,7 @@ import android.util.AttributeSet
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.platform.AbstractComposeView
 import ca.mpreg.webgpuviewer.renderer.Hdr
+import ca.mpreg.webgpuviewer.renderer.Thermals
 import ca.mpreg.webgpuviewer.viewer.ImageViewer
 import ca.mpreg.webgpuviewer.viewer.ImageViewerState
 
@@ -30,11 +31,13 @@ open class ImageView(
         // Registered, not requested: [Hdr] sets the colour mode with the first HDR image and
         // drops it with the last. Held all session, it ramps panel brightness on SDR reading.
         Hdr.attachColorModeHost(this)
+        Thermals.attachHost(this)
     }
 
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
         Hdr.attachColorModeHost(null)
+        Thermals.attachHost(null)
     }
 
     override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
