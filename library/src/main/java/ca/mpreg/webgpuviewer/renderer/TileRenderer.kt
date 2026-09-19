@@ -330,6 +330,15 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
 
     private var frame = 0L
     private var workerActive = false
+
+    /**
+     * Set while a gesture or animation is driving the viewport, so [schedule] gives up the rest of
+     * its batch instead of finishing tiles for a viewport that has already moved. Written from the
+     * frame that draws, read by the worker, hence [Volatile]: both run on the render thread but
+     * the worker suspends between tiles, so a frame can land in between.
+     */
+    @Volatile
+    private var abortWork = false
     // Tiles are an optimisation over drawing pages directly: a failure in the worker is logged, never
     // left to reach the thread's uncaught exception handler and end the process.
     private val workerScope = CoroutineScope(
@@ -924,6 +933,11 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     fun newFrame() {
         frame++
 
+        // Cleared once a frame and raised by any page that draws in it - see [drawCore]. The
+        // pages drawn in one frame settle independently, so one of them being still is no reason
+        // to keep generating for another that is moving.
+        abortWork = false
+
         // Every cached tile is at the old format, so an HDR change takes the whole atlas. Here
         // only: this is the one point in a frame where no caller holds a grid, and tearing one
         // down mid-draw leaves the caller writing a destroyed uniform buffer - a segfault.
@@ -1348,6 +1362,14 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             // gesture/animation is still actively driving it.
             st.stable = !suppressGeneration
         }
+        // Latched for the worker, which suspends between tiles: this is how a gesture reaches it
+        // mid-batch instead of at the next batch boundary. Raised only, never lowered, until
+        // [newFrame] clears it, since the pages drawn in a frame settle independently.
+        //
+        // Both terms are needed. The continuous viewer answers through [suppressGeneration],
+        // while the paged one passes that as false everywhere and drives scale through the page,
+        // so reading only the parameter would leave the paged viewer with no abort at all.
+        if (suppressGeneration || page.isScaleAnimating) abortWork = true
         // Recomputed every call regardless of whether it actually changed - see the field's own
         // doc for why that's safe. generate() has no other way to reach this value.
         st.centerYOffset = centerYOffset
@@ -1601,6 +1623,12 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
                     var generated = 0
                     val measurements = ArrayList<Job>(batchSize)
                     while (generated < batchSize) {
+                        // Between tiles, not just between batches. A batch is up to
+                        // [MAX_TILES_PER_BATCH] tiles and a staged one can cost tens of
+                        // milliseconds each, so a gesture landing mid-batch used to wait out
+                        // every remaining tile of a viewport it had already moved. The grids it
+                        // invalidated are re-planned on the next frame either way.
+                        if (abortWork) break
                         val req = nextRequest() ?: break
                         try {
                             val started = System.nanoTime()
