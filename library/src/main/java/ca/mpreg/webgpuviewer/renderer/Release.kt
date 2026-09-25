@@ -1,12 +1,16 @@
 package ca.mpreg.webgpuviewer.renderer
 
 import androidx.webgpu.GPUBindGroup
+import androidx.webgpu.GPUBindGroupLayout
 import androidx.webgpu.GPUBuffer
 import androidx.webgpu.GPUCommandEncoder
 import androidx.webgpu.GPUComputePassEncoder
+import androidx.webgpu.GPUComputePipeline
 import androidx.webgpu.GPUQueue
 import androidx.webgpu.GPURenderPassEncoder
+import androidx.webgpu.GPURenderPipeline
 import androidx.webgpu.GPUTexture
+import java.util.WeakHashMap
 
 /*
  * An androidx.webgpu wrapper holds a native reference that only close() drops - nothing releases it
@@ -66,3 +70,12 @@ internal fun GPUQueue.submitAndRelease(encoder: GPUCommandEncoder) {
     commands.close()
     encoder.close()
 }
+
+// Each getBindGroupLayout call returns a new native reference.
+private val groupLayouts = WeakHashMap<Any, GPUBindGroupLayout>()
+
+internal fun GPURenderPipeline.groupLayout(): GPUBindGroupLayout =
+    synchronized(groupLayouts) { groupLayouts.getOrPut(this) { getBindGroupLayout(0) } }
+
+internal fun GPUComputePipeline.groupLayout(): GPUBindGroupLayout =
+    synchronized(groupLayouts) { groupLayouts.getOrPut(this) { getBindGroupLayout(0) } }

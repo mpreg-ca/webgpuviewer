@@ -30,6 +30,7 @@ import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer.Companion.withContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -315,7 +316,9 @@ class WebGpuRenderer {
             return
         }
 
-        val initSurface = {
+        val initSurface = initSurface@{
+            // A cleanup queued first let [pending] go; a surface from it would leak.
+            if (surface != null || pendingSurface !== pending) return@initSurface
             this@WebGpuRenderer.surface = pending.let {
                 instance.createSurface(
                     GPUSurfaceDescriptor(
@@ -370,14 +373,19 @@ class WebGpuRenderer {
             // An HDR image arriving, or the last one leaving, changes what the swapchain should
             // be. Here rather than at the decode: the format can only change between frames, and
             // this is the one place guaranteed to be between them - hence the latch too.
-            Hdr.latchFrameFormat()
-            if (Hdr.frameFormat != configuredFormat) {
-                reconfigure(surface)
-                Hdr.syncPresentation()
-            } else if (Hdr.consumePresentationDirty()) {
-                // Same format, but a brighter image arrived (or the brightest was freed), so the
-                // headroom asked of the display has moved.
-                Hdr.syncPresentation()
+            try {
+                Hdr.latchFrameFormat()
+                if (Hdr.frameFormat != configuredFormat) {
+                    reconfigure(surface)
+                    Hdr.syncPresentation()
+                } else if (Hdr.consumePresentationDirty()) {
+                    // Same format, but a brighter image arrived (or the brightest was freed), so
+                    // the headroom asked of the display has moved.
+                    Hdr.syncPresentation()
+                }
+            } catch (e: Exception) {
+                // Escaping would end the frame loop.
+                Log.e("WebGpuRenderer", "HDR presentation update failed", e)
             }
 
             val current = try {
@@ -401,20 +409,26 @@ class WebGpuRenderer {
                 return FrameResult.Retry
             }
 
+            var encoder: GPUCommandEncoder? = null
             try {
-                val encoder = device.createCommandEncoder()
+                encoder = device.createCommandEncoder()
                 // Draws into an offscreen texture when filters are enabled; endFrame runs them
                 // over it and lands the result on the swapchain.
                 fn(encoder, filters.beginFrame(texture))
                 filters.endFrame(encoder, texture)
                 device.queue.submitAndRelease(encoder)
+                encoder = null
                 surface.present()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 Log.e("WebGpuRenderer", "Render error", e)
                 // Don't rethrow - allow the app to continue rendering next frame
+            } catch (e: OutOfMemoryError) {
+                Log.e("WebGpuRenderer", "Out of memory rendering", e)
             } finally {
+                // Unsubmitted if the frame threw.
+                encoder?.close()
                 // getCurrentTexture hands out a new reference every frame - see [endAndRelease].
                 texture.close()
             }
@@ -471,7 +485,10 @@ class WebGpuRenderer {
             }
         }
 
-        if (isOnDispatcherThread) {
+        if (isOnDispatcherThread && mutex.isLocked) {
+            // The mutex holder is on this thread: blocking would deadlock.
+            CoroutineScope(dispatcher).launch { doCleanup() }
+        } else if (isOnDispatcherThread) {
             // Already on dispatcher, run synchronously
             runBlocking {
                 doCleanup()

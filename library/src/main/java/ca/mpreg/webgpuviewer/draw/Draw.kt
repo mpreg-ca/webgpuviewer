@@ -13,14 +13,19 @@ object Draw {
 
     fun submit(block: Draw.(GPUCommandEncoder) -> Unit) {
         val buffers = tempBuffers.get()
-        val encoder = device.createCommandEncoder()
-        block.invoke(this, encoder)
-        device.queue.submitAndRelease(encoder)
-        buffers.forEach {
-            it.destroy()
-            it.close()
+        var encoder: GPUCommandEncoder? = device.createCommandEncoder()
+        try {
+            block.invoke(this, encoder!!)
+            device.queue.submitAndRelease(encoder)
+            encoder = null
+        } finally {
+            encoder?.close()
+            buffers.forEach {
+                it.destroy()
+                it.close()
+            }
+            buffers.clear()
         }
-        buffers.clear()
     }
 
     internal fun createBuffer(size: Long, usage: Int): GPUBuffer {

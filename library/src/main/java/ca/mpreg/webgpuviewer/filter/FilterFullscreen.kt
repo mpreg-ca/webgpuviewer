@@ -8,6 +8,7 @@ import androidx.webgpu.GPURenderPipeline
 import androidx.webgpu.GPUTextureView
 import ca.mpreg.webgpuviewer.renderer.Fullscreen
 import ca.mpreg.webgpuviewer.renderer.endAndRelease
+import ca.mpreg.webgpuviewer.renderer.groupLayout
 
 /**
  * A [Filter] that is one fragment pass over the whole frame - the shape every per-pixel filter
@@ -58,7 +59,7 @@ abstract class FilterFullscreen : Filter() {
 
         val group = device.createBindGroup(
             GPUBindGroupDescriptor(
-                layout = pipeline.getBindGroupLayout(0), label = label, entries = entries(src)
+                layout = pipeline.groupLayout(), label = label, entries = entries(src)
             )
         )
         boundHandles[nextBindGroup] = handle

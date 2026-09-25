@@ -14,6 +14,7 @@ import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
 import ca.mpreg.webgpuviewer.renderer.endAndRelease
 import ca.mpreg.webgpuviewer.renderer.setTransientBindGroup
 import ca.mpreg.webgpuviewer.renderer.wgslStorageFormat
+import ca.mpreg.webgpuviewer.renderer.groupLayout
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.ceil
@@ -118,7 +119,7 @@ fun Draw.line(
     pass.setTransientBindGroup(
         0, device.createBindGroup(
             GPUBindGroupDescriptor(
-                layout = pipeline.getBindGroupLayout(0), entries = arrayOf(
+                layout = pipeline.groupLayout(), entries = arrayOf(
                     GPUBindGroupEntry(0, textureView = targetView),
                     GPUBindGroupEntry(1, buffer = uniformBuffer),
                 )

@@ -42,6 +42,7 @@ import ca.mpreg.webgpuviewer.transition.Transition.Companion.getCachedTexture
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.invalidateCache
 import ca.mpreg.webgpuviewer.viewer.ImagePage
 import ca.mpreg.webgpuviewer.viewer.ImageViewerState
+import ca.mpreg.webgpuviewer.renderer.groupLayout
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.pow
@@ -299,7 +300,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             pass.setTransientBindGroup(
                 0, WebGpuRenderer.device.createBindGroup(
                     GPUBindGroupDescriptor(
-                        layout = regionPipeline.getBindGroupLayout(0), entries = arrayOf(
+                        layout = regionPipeline.groupLayout(), entries = arrayOf(
                             GPUBindGroupEntry(0, buffer = uniformBuffer),
                             GPUBindGroupEntry(1, textureView = cachedView),
                             GPUBindGroupEntry(2, sampler = blitSampler)
@@ -350,6 +351,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         private var cacheHeight = 0
         private var cacheFormat = 0
 
+        // Bumped on every swap or clear; a render records its metadata only if unchanged.
+        private var cacheGeneration = 0
+
         // Textures pending destruction (deferred to avoid use-after-free), with the views over them:
         // a view is a Dawn handle of its own and only close() releases it.
         private var pendingDestroy1: GPUTexture? = null
@@ -397,6 +401,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 view2 = texture2!!.createView()
 
                 // Invalidate cache
+                cacheGeneration++
                 cachedPage1 = null
                 cachedPage2 = null
                 blittedKeys1 = emptySet()
@@ -436,6 +441,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
          */
         fun invalidateCache() {
             synchronized(cacheLock) {
+                cacheGeneration++
                 cachedPage1 = null
                 cachedPage2 = null
                 blittedKeys1 = emptySet()
@@ -450,6 +456,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
          */
         internal fun releasePagesOf(state: ImageViewerState) {
             synchronized(cacheLock) {
+                cacheGeneration++
                 if (cachedPage1?.parent === state) {
                     cachedPage1 = null
                     blittedKeys1 = emptySet()
@@ -469,6 +476,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
          */
         fun rotateCacheOnPageChange(newCurrentPage: ImagePage) {
             synchronized(cacheLock) {
+                cacheGeneration++
                 when {
                     cacheHitLocked(newCurrentPage, true) -> {
                         cachedPage2 = null
@@ -534,8 +542,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
             // Lock only for metadata - GPU recording runs on the single GPU thread and doesn't
             // need it; cacheLock only guards against invalidateCache() from the UI thread.
+            var generation = 0
             val (texture, view, identityMatches, blittedKeys) = synchronized(cacheLock) {
                 ensureTexturesLocked(dstWidth, dstHeight)
+                generation = cacheGeneration
                 val texture = if (isPage1) texture1!! else texture2!!
                 val view = if (isPage1) view1!! else view2!!
                 val blitted = if (isPage1) blittedKeys1 else blittedKeys2
@@ -570,6 +580,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             val newBlitted = available ?: emptySet()
 
             synchronized(cacheLock) {
+                // Swapped mid-render: the view is still right, the metadata isn't.
+                if (generation != cacheGeneration) return view
                 if (isPage1) blittedKeys1 = newBlitted else blittedKeys2 = newBlitted
                 if (!identityMatches) {
                     // Update cache metadata - only needed on a real identity change; an unchanged
@@ -650,7 +662,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             pass.setTransientBindGroup(
                 0, WebGpuRenderer.device.createBindGroup(
                     GPUBindGroupDescriptor(
-                        layout = blitPipeline.getBindGroupLayout(0), entries = arrayOf(
+                        layout = blitPipeline.groupLayout(), entries = arrayOf(
                             GPUBindGroupEntry(0, buffer = uniformBuffer),
                             GPUBindGroupEntry(1, textureView = cachedView),
                             GPUBindGroupEntry(2, sampler = blitSampler)

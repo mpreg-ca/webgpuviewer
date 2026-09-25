@@ -49,6 +49,7 @@ import ca.mpreg.webgpuviewer.renderer.FormatKeyed
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
 import ca.mpreg.webgpuviewer.renderer.destroyAndRelease
 import ca.mpreg.webgpuviewer.renderer.setTransientBindGroup
+import ca.mpreg.webgpuviewer.renderer.groupLayout
 import org.json.JSONObject
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -201,8 +202,9 @@ class Font private constructor(
         atlasWidth = newWidth
         atlasHeight = newHeight
 
+        // Closed, not destroyed: this frame may have recorded it.
         atlasView.close()
-        atlasTexture.destroyAndRelease()
+        atlasTexture.close()
         atlasTexture = device.createTexture(
             GPUTextureDescriptor(
                 size = GPUExtent3D(newWidth, newHeight),
@@ -381,12 +383,12 @@ class Font private constructor(
             chars: String = DEFAULT_CHARS,
         ): Font {
             val key = FamilyKey(fontFamily, weight, style)
-            synchronized(familyCache) {
-                familyCache[key]?.let { return it }
-                val font = buildFromFamily(context, fontFamily, weight, style, chars)
-                familyCache[key] = font
-                return font
-            }
+            synchronized(familyCache) { familyCache[key]?.let { return it } }
+            // Built outside the lock; racing builds keep the first.
+            val font = buildFromFamily(context, fontFamily, weight, style, chars)
+            val kept = synchronized(familyCache) { familyCache.getOrPut(key) { font } }
+            if (kept !== font) font.destroy()
+            return kept
         }
 
         private fun buildFromFamily(
@@ -846,7 +848,7 @@ fun Draw.text(
 
     // 8 floats (dst_rect + uv_rect) per glyph - collected first so the whole string can go into
     // one storage buffer and one draw call instead of one of each per glyph.
-    val instances = ArrayList<Float>(text.length * 8)
+    val instances = GlyphInstances(text.length)
 
     var penY = y
     for (rawLine in text.split("\n")) for (line in wrapLine(font, rawLine, size, maxWidth)) {
@@ -874,7 +876,7 @@ fun Draw.text(
         penY += font.lineHeight * size
     }
 
-    if (instances.isEmpty()) return
+    if (instances.count == 0) return
     drawGlyphInstances(pass, dst.format, font, instances, color, screenPxRange)
 }
 
@@ -983,9 +985,25 @@ private fun wrapLine(font: Font, line: String, size: Float, maxWidth: Float): Li
     return result
 }
 
-/** Appends one glyph's `(dst_rect, uv_rect)` - 8 floats - to [instances]. */
+/**
+ * Per glyph, normalised `dst_rect` then `uv_rect` in atlas pixels: a later glyph can grow the
+ * atlas, so UVs are normalised at upload against the atlas bound.
+ */
+private class GlyphInstances(glyphs: Int) {
+    var data = FloatArray(maxOf(glyphs, 1) * 8)
+    var count = 0
+
+    fun add(x1: Float, y1: Float, x2: Float, y2: Float, u1: Float, v1: Float, u2: Float, v2: Float) {
+        if ((count + 1) * 8 > data.size) data = data.copyOf(data.size * 2)
+        val i = count * 8
+        data[i] = x1; data[i + 1] = y1; data[i + 2] = x2; data[i + 3] = y2
+        data[i + 4] = u1; data[i + 5] = v1; data[i + 6] = u2; data[i + 7] = v2
+        count++
+    }
+}
+
 private fun addGlyphInstance(
-    instances: ArrayList<Float>,
+    instances: GlyphInstances,
     font: Font,
     glyph: Font.Glyph,
     penX: Float,
@@ -1000,23 +1018,26 @@ private fun addGlyphInstance(
     val y1 = (baselineY - glyph.planeTop * size) / dstHeight
     val y2 = (baselineY - glyph.planeBottom * size) / dstHeight
 
-    // Normalised against the atlas's *current* size, not the glyph's own - growing the atlas
-    // (Font.growAtlas) never moves an existing glyph's pixels, so this always stays correct.
-    val atlasWidth = font.atlasWidth.toFloat()
-    val atlasHeight = font.atlasHeight.toFloat()
-    val u1 = glyph.atlasX / atlasWidth
-    val v1 = glyph.atlasY / atlasHeight
-    val u2 = (glyph.atlasX + glyph.atlasW) / atlasWidth
-    val v2 = (glyph.atlasY + glyph.atlasH) / atlasHeight
+    instances.add(
+        x1, y1, x2, y2,
+        glyph.atlasX.toFloat(), glyph.atlasY.toFloat(),
+        (glyph.atlasX + glyph.atlasW).toFloat(), (glyph.atlasY + glyph.atlasH).toFloat(),
+    )
+}
 
-    instances.add(x1)
-    instances.add(y1)
-    instances.add(x2)
-    instances.add(y2)
-    instances.add(u1)
-    instances.add(v1)
-    instances.add(u2)
-    instances.add(v2)
+// Reused per thread. writeBuffer sends the whole capacity: pass slice().
+private val textStaging = ThreadLocal.withInitial {
+    ByteBuffer.allocateDirect(4096).order(ByteOrder.nativeOrder())
+}
+
+private fun textStaging(size: Int): ByteBuffer {
+    var b = textStaging.get()
+    if (b.capacity() < size) {
+        b = ByteBuffer.allocateDirect(Integer.highestOneBit(size - 1) shl 1).order(ByteOrder.nativeOrder())
+        textStaging.set(b)
+    }
+    b.clear()
+    return b
 }
 
 /**
@@ -1029,29 +1050,54 @@ private fun drawGlyphInstances(
     /** Format of [pass]'s colour attachment - see [FormatKeyed]. */
     format: Int,
     font: Font,
-    instances: List<Float>,
+    instances: GlyphInstances,
     color: Int,
     screenPxRange: Float,
 ) {
-    val glyphCount = instances.size / 8
+    val glyphCount = instances.count
+    val vertexSize = glyphCount * 8 * 4
 
-    val vertexBytes = ByteBuffer.allocateDirect(instances.size * 4).order(ByteOrder.nativeOrder())
-    instances.forEach { vertexBytes.putFloat(it) }
-    vertexBytes.rewind()
+    // Under ensureGlyph's lock, so another thread can't swap the atlas mid-bind.
+    synchronized(font) {
+        val atlasWidth = font.atlasWidth.toFloat()
+        val atlasHeight = font.atlasHeight.toFloat()
+        val vertexBytes = textStaging(vertexSize)
+        val data = instances.data
+        for (g in 0 until glyphCount) {
+            val i = g * 8
+            vertexBytes.putFloat(data[i]).putFloat(data[i + 1]).putFloat(data[i + 2]).putFloat(data[i + 3])
+            vertexBytes.putFloat(data[i + 4] / atlasWidth).putFloat(data[i + 5] / atlasHeight)
+            vertexBytes.putFloat(data[i + 6] / atlasWidth).putFloat(data[i + 7] / atlasHeight)
+        }
+        vertexBytes.flip()
+        drawGlyphBatch(pass, format, font.atlasView, vertexBytes, vertexSize, glyphCount, color, screenPxRange)
+    }
+}
+
+private fun drawGlyphBatch(
+    pass: GPURenderPassEncoder,
+    format: Int,
+    atlasView: GPUTextureView,
+    vertexBytes: ByteBuffer,
+    vertexSize: Int,
+    glyphCount: Int,
+    color: Int,
+    screenPxRange: Float,
+) {
     val vertexBuffer = device.createBuffer(
         GPUBufferDescriptor(
-            size = vertexBytes.capacity().toLong(),
+            size = vertexSize.toLong(),
             usage = BufferUsage.Vertex or BufferUsage.CopyDst
         )
     )
-    device.queue.writeBuffer(vertexBuffer, 0, vertexBytes)
+    device.queue.writeBuffer(vertexBuffer, 0, vertexBytes.slice())
 
     val r = ((color shr 16) and 0xFF) / 255f
     val g = ((color shr 8) and 0xFF) / 255f
     val b = (color and 0xFF) / 255f
     val a = ((color ushr 24) and 0xFF) / 255f
 
-    val paramsBytes = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder())
+    val paramsBytes = textStaging(32)
     paramsBytes.putFloat(r)
     paramsBytes.putFloat(g)
     paramsBytes.putFloat(b)
@@ -1060,11 +1106,11 @@ private fun drawGlyphInstances(
     paramsBytes.putFloat(0f)
     paramsBytes.putFloat(0f)
     paramsBytes.putFloat(0f)
-    paramsBytes.rewind()
+    paramsBytes.flip()
     val paramsBuffer = device.createBuffer(
         GPUBufferDescriptor(size = 32L, usage = BufferUsage.Uniform or BufferUsage.CopyDst)
     )
-    device.queue.writeBuffer(paramsBuffer, 0, paramsBytes)
+    device.queue.writeBuffer(paramsBuffer, 0, paramsBytes.slice())
 
     val pipeline = pipelines[format]
     pass.setPipeline(pipeline)
@@ -1072,9 +1118,9 @@ private fun drawGlyphInstances(
     pass.setTransientBindGroup(
         0, device.createBindGroup(
             GPUBindGroupDescriptor(
-                layout = pipeline.getBindGroupLayout(0), entries = arrayOf(
+                layout = pipeline.groupLayout(), entries = arrayOf(
                     GPUBindGroupEntry(0, buffer = paramsBuffer),
-                    GPUBindGroupEntry(1, textureView = font.atlasView),
+                    GPUBindGroupEntry(1, textureView = atlasView),
                     GPUBindGroupEntry(2, sampler = sampler),
                 )
             )

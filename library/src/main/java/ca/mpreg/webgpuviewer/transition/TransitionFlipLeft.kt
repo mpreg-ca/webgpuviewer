@@ -23,6 +23,7 @@ import ca.mpreg.webgpuviewer.renderer.endAndRelease
 import ca.mpreg.webgpuviewer.renderer.setTransientBindGroup
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.getCachedTexture
 import ca.mpreg.webgpuviewer.viewer.ImagePage
+import ca.mpreg.webgpuviewer.renderer.groupLayout
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.abs
@@ -245,7 +246,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         pass.setTransientBindGroup(
             0, device.createBindGroup(
                 GPUBindGroupDescriptor(
-                    layout = pipeline.getBindGroupLayout(0), entries = arrayOf(
+                    layout = pipeline.groupLayout(), entries = arrayOf(
                         GPUBindGroupEntry(0, buffer = uniformBuffer),
                         GPUBindGroupEntry(1, textureView = cachedView),
                         GPUBindGroupEntry(2, sampler = foldSampler),

@@ -224,7 +224,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             )
             resolveGroup = device.createBindGroup(
                 GPUBindGroupDescriptor(
-                    layout = resolvePipelines[format].getBindGroupLayout(0), label = LABEL,
+                    layout = resolvePipelines[format].groupLayout(), label = LABEL,
                     entries = arrayOf(GPUBindGroupEntry(0, textureView = f1))
                 )
             )
@@ -243,7 +243,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             return Pass(
                 pipeline, device.createBindGroup(
                     GPUBindGroupDescriptor(
-                        layout = pipeline.getBindGroupLayout(0), label = LABEL, entries = entries
+                        layout = pipeline.groupLayout(), label = LABEL, entries = entries
                     )
                 ), groups
             )

@@ -296,7 +296,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         pass.setTransientBindGroup(
             0, device.createBindGroup(
                 GPUBindGroupDescriptor(
-                    layout = maskedRectPipeline.getBindGroupLayout(0), entries = arrayOf(
+                    layout = maskedRectPipeline.groupLayout(), entries = arrayOf(
                         GPUBindGroupEntry(0, buffer = uniformBuffer)
                     )
                 )
@@ -649,7 +649,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         pass.setPipeline(pipeline)
         pass.setTransientBindGroup(
             0, device.createBindGroup(
-                GPUBindGroupDescriptor(layout = pipeline.getBindGroupLayout(0), entries = entries)
+                GPUBindGroupDescriptor(layout = pipeline.groupLayout(), entries = entries)
             )
         )
 
@@ -682,7 +682,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         pass.setTransientBindGroup(
             0, device.createBindGroup(
                 GPUBindGroupDescriptor(
-                    layout = pipeline.getBindGroupLayout(0), entries = arrayOf(
+                    layout = pipeline.groupLayout(), entries = arrayOf(
                         GPUBindGroupEntry(0, buffer = tile.uniform),
                         GPUBindGroupEntry(1, textureView = tile.view),
                     )

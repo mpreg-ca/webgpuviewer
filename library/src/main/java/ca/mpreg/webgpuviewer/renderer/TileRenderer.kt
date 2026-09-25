@@ -289,8 +289,13 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
      */
     private fun replaceRescaler(previous: Rescaler) {
         workerScope.launch {
-            pages.values.forEach { releaseTiles(it) }
-            previous.cleanup()
+            // Nothing to free on a lost device, and withContext would throw.
+            if (!WebGpuRenderer.isAvailable) return@launch
+            // A frame may be recording with the outgoing textures.
+            WebGpuRenderer.withContext {
+                pages.values.forEach { releaseTiles(it) }
+                previous.cleanup()
+            }
             tileCostNs.fill(0.0)
             tileSamples.fill(0)
             tileOverheadNs = 0.0
@@ -1460,12 +1465,13 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         st: PageTiles,
         keys: List<Long>
     ) {
-        val present = keys.mapNotNull { tkey -> st.tiles[tkey]?.let { tkey to it } }
-        if (present.isEmpty()) return
+        var count = 0
+        for (tkey in keys) if (st.tiles.containsKey(tkey)) count++
+        if (count == 0) return
 
-        val bytes = ByteBuffer.allocateDirect(present.size * INSTANCE_BYTES.toInt())
-            .order(ByteOrder.nativeOrder())
-        present.forEach { (tkey, tile) ->
+        val bytes = scratch(count * INSTANCE_BYTES.toInt())
+        for (tkey in keys) {
+            val tile = st.tiles[tkey] ?: continue
             tile.lastUsed = frame
             bytes.putFloat((tkey shr 32).toInt().toFloat())
             bytes.putFloat(tkey.toInt().toFloat())
@@ -1476,17 +1482,29 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
 
         val instances = device.createBuffer(
             GPUBufferDescriptor(
-                size = present.size * INSTANCE_BYTES,
+                size = count * INSTANCE_BYTES,
                 usage = BufferUsage.Vertex or BufferUsage.CopyDst
             )
         )
-        device.queue.writeBuffer(instances, 0, bytes)
+        device.queue.writeBuffer(instances, 0, bytes.slice())
 
         pass.setPipeline(blitPipelines[format])
         pass.setBindGroup(0, st.bindGroup ?: gridBindGroup(st).also { st.bindGroup = it })
         pass.setVertexBuffer(0, instances)
-        pass.draw(6, present.size)
+        pass.draw(6, count)
         instances.destroyAndRelease()
+    }
+
+    // Reused staging, render thread only. writeBuffer sends the whole capacity: pass slice().
+    private var scratchBytes: ByteBuffer = ByteBuffer.allocateDirect(4096).order(ByteOrder.nativeOrder())
+
+    private fun scratch(size: Int): ByteBuffer {
+        if (scratchBytes.capacity() < size) {
+            scratchBytes = ByteBuffer.allocateDirect(Integer.highestOneBit(size - 1) shl 1)
+                .order(ByteOrder.nativeOrder())
+        }
+        scratchBytes.clear()
+        return scratchBytes
     }
 
     /** One bind group per grid: its own uniform, the shared atlas, the shared sampler. */
@@ -1522,8 +1540,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             st.instanceCapacity = capacity
         }
 
-        val bytes = ByteBuffer.allocateDirect(st.instanceCount * INSTANCE_BYTES.toInt())
-            .order(ByteOrder.nativeOrder())
+        val bytes = scratch(st.instanceCount * INSTANCE_BYTES.toInt())
         for ((tkey, tile) in st.tiles) {
             bytes.putFloat((tkey shr 32).toInt().toFloat())
             bytes.putFloat(tkey.toInt().toFloat())
@@ -1531,7 +1548,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             bytes.putFloat(unpackY(tile.atlasOrigin).toFloat())
         }
         bytes.flip()
-        device.queue.writeBuffer(st.instances!!, 0, bytes)
+        device.queue.writeBuffer(st.instances!!, 0, bytes.slice())
     }
 
     /**
@@ -2129,15 +2146,17 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
                 return@launch
             }
             // On the worker with everything else it owns: a rescaler's textures can be mid-tile
-            // when the view is torn down.
-            upscaler.cleanup()
-            downscaler.cleanup()
-            pages.values.forEach { it.destroyAll(atlasOrNull) }
-            pages.clear()
-            atlasOrNull?.destroy()
-            atlasOrNull = null
-            timestampPool.forEach { it.resolve.destroyAndRelease(); it.result.destroyAndRelease() }
-            timestampPool.clear()
+            // when the view is torn down. Under the mutex, so no frame is recording with it.
+            WebGpuRenderer.withContext {
+                upscaler.cleanup()
+                downscaler.cleanup()
+                pages.values.forEach { it.destroyAll(atlasOrNull) }
+                pages.clear()
+                atlasOrNull?.destroy()
+                atlasOrNull = null
+                timestampPool.forEach { it.resolve.destroyAndRelease(); it.result.destroyAndRelease() }
+                timestampPool.clear()
+            }
         }
     }
 }
