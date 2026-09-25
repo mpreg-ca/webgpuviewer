@@ -1,5 +1,6 @@
 package ca.mpreg.webgpuviewer.renderer
 
+import android.graphics.Rect
 import android.util.Log
 import androidx.webgpu.BufferUsage
 import androidx.webgpu.GPUBuffer
@@ -208,32 +209,53 @@ class Mipmap(
         tiles.clear()
     }
 
-    fun update(pixels: ByteBuffer) {
-        var i = 0
+    /**
+     * Rewrites [rect] (default: all) from [pixels], a full image of this level, in yielding chunks
+     * like [upload]; run via [WebGpuRenderer.onDispatcher]. False if cleaned up part way.
+     */
+    suspend fun update(pixels: ByteBuffer, rect: Rect? = null): Boolean {
+        val left = (rect?.left ?: 0).coerceIn(0, width)
+        val top = (rect?.top ?: 0).coerceIn(0, height)
+        val right = (rect?.right ?: width).coerceIn(left, width)
+        val bottom = (rect?.bottom ?: height).coerceIn(top, height)
+        val rowsPerChunk = (UPLOAD_CHUNK_BYTES / (width * bytesPerPixel)).coerceAtLeast(1)
+        val tileCount = tilesRows * tilesCols
 
-        for (r in 0 until tilesRows) {
-            val tileHeight = min((r + 1) * tilesize, height) - (r * tilesize)
-            val y = r * tilesize
-            for (c in 0 until tilesCols) {
-                val x = c * tilesize
-                val tileWidth = min((c + 1) * tilesize, width) - (c * tilesize)
-
-                Log.d("Renderer", "Update tile $c $r")
-                val size = GPUExtent3D(tileWidth, tileHeight)
-
-                device.queue.writeTexture(
-                    dataLayout = GPUTexelCopyBufferLayout(
-                        offset = (y.toLong() * width + x) * bytesPerPixel,
-                        bytesPerRow = width * bytesPerPixel,
-                        rowsPerImage = height,
-                    ),
-                    data = pixels,
-                    destination = GPUTexelCopyTextureInfo(texture = textures[i++]),
-                    writeSize = size,
-                )
+        for (r in top / tilesize until ceilDiv(bottom, tilesize)) {
+            val tileY = r * tilesize
+            val y0 = maxOf(top, tileY)
+            val y1 = minOf(bottom, tileY + tilesize, height)
+            for (c in left / tilesize until ceilDiv(right, tilesize)) {
+                val tileX = c * tilesize
+                val x0 = maxOf(left, tileX)
+                val x1 = minOf(right, tileX + tilesize, width)
+                var y = y0
+                while (y < y1) {
+                    // Cleanup can only land between chunks.
+                    if (textures.size != tileCount) return false
+                    val rows = min(rowsPerChunk, y1 - y)
+                    device.queue.writeTexture(
+                        dataLayout = GPUTexelCopyBufferLayout(
+                            offset = (y.toLong() * width + x0) * bytesPerPixel,
+                            bytesPerRow = width * bytesPerPixel,
+                            rowsPerImage = height,
+                        ),
+                        data = pixels,
+                        destination = GPUTexelCopyTextureInfo(
+                            texture = textures[r * tilesCols + c],
+                            origin = GPUOrigin3D(x = x0 - tileX, y = y - tileY),
+                        ),
+                        writeSize = GPUExtent3D(x1 - x0, rows),
+                    )
+                    y += rows
+                    yield()
+                }
             }
         }
+        return textures.size == tileCount
     }
+
+    private fun ceilDiv(a: Int, b: Int) = (a + b - 1) / b
 
     class Quad(
         val tiles: List<GPUTexture>, val tileViews: List<GPUTextureView>, val x: Int, val y: Int

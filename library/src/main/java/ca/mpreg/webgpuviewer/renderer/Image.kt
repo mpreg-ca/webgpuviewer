@@ -10,6 +10,7 @@ import androidx.webgpu.GPUTextureView
 import androidx.webgpu.TextureFormat
 import ca.mpreg.webgpuviewer.ImageUtil
 import ca.mpreg.webgpuviewer.Trim
+import ca.mpreg.webgpuviewer.renderer.Image.Companion.invoke
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
@@ -211,92 +212,33 @@ class Image private constructor(
             // Runs on a background dispatcher rather than as compute shaders - the GPU versions
             // would park on a buffer readback while holding the render thread, stalling every
             // queued frame (a stutter each time a page decodes).
-            withContext(Dispatchers.Default) {
-                var backgroundFromTrim = false
-
-                val trimWith = trimColors?.takeIf { it.isNotEmpty() }
-                val wantsBackgroundProbe = backgroundColor == null
-
-                // Both passes read 8-bit sRGB, so an HDR image being kept as float needs an SDR
-                // rendition to measure. Only worth making when something actually asks.
-                val sdrPixels = when {
-                    !keepHdr -> pixels
-                    trimWith != null || wantsBackgroundProbe ->
-                        ImageUtil.toneMapToSdr(pixels, width, height)
-
-                    else -> null
-                }
-
-                if (trimWith != null && sdrPixels != null) {
-                    // Find trim for each color and pick the smallest rect
-                    val rects = Trim.findAllCpu(sdrPixels, width, height, trimWith, trimThreshold)
-                    val best =
-                        trimWith.zip(rects).minByOrNull { it.second.width() * it.second.height() }
-
-                    if (best != null) {
-                        image.trim = best.second
-                        // Set background color from the winning trim color
-                        if (backgroundColor == null) {
-                            val c = best.first
-                            image.backgroundColor =
-                                0xFF000000.toInt() or ((c[0] * 255).toInt() shl 16) or ((c[1] * 255).toInt() shl 8) or (c[2] * 255).toInt()
-                            backgroundFromTrim = true
-                        }
-                    }
-                }
-
-                // Probing the edges is only worth a pass when neither the caller nor trim has
-                // already named a background colour.
-                if (backgroundColor != null) {
-                    image.backgroundColor = backgroundColor
-                } else if (!backgroundFromTrim && sdrPixels != null) {
-                    image.backgroundColor =
-                        Trim.detectBackgroundCpu(sdrPixels, width, height, trimThreshold)
-                }
+            val (trim, background) = withContext(Dispatchers.Default) {
+                measurePixels(
+                    pixels,
+                    width,
+                    height,
+                    keepHdr,
+                    trimColors,
+                    trimThreshold,
+                    backgroundColor
+                )
             }
+            image.trim = trim
+            background?.let { image.backgroundColor = it }
 
-            val tilesize = 2048
-
-            data class MipmapData(
-                val pixels: ByteBuffer, val w: Int, val h: Int, val scale: Float
-            )
-
-            val mipmapDataList = mutableListOf<MipmapData>()
-            mipmapDataList.add(MipmapData(pixels, width, height, 1f))
-
-            if (createMipMaps) {
-                var currentPixels = pixels
-                var textureWidth = width
-                var textureHeight = height
-                var scale = 1f
-
-                while (width * scale > tilesize || height * scale > tilesize) {
-                    scale /= 2
-                    val newWidth = floor(width * scale).toInt()
-                    val newHeight = floor(height * scale).toInt()
-                    Log.d("Renderer", "Create mipmap using CPU ${scale} ${newWidth} ${newHeight}")
-
-                    currentPixels = withContext(Dispatchers.Default) {
-                        if (keepHdr) ImageUtil.resizeF16(currentPixels, textureWidth, textureHeight)
-                        else ImageUtil.resize(currentPixels, textureWidth, textureHeight)
-                    }
-                    mipmapDataList.add(MipmapData(currentPixels, newWidth, newHeight, scale))
-                    textureWidth = newWidth
-                    textureHeight = newHeight
-                }
-            }
+            val levels = listOf(Level(pixels, width, height, 1f)) +
+                    if (createMipMaps) smallerLevels(
+                        pixels,
+                        width,
+                        height,
+                        keepHdr
+                    ) else emptyList()
 
             // No render mutex: Mipmap.create yields between upload chunks so queued frames get
             // the thread back. Safe since the image isn't reachable from any page yet.
-            WebGpuRenderer.onDispatcher { device ->
+            WebGpuRenderer.onDispatcher { _ ->
                 try {
-                    for (data in mipmapDataList) {
-                        image.mipmaps.add(
-                            Mipmap.create(
-                                data.pixels, data.w, data.h, data.scale, tilesize, tileFormat
-                            )
-                        )
-                    }
+                    for (level in levels) image.mipmaps.add(level.upload(tileFormat))
                 } catch (e: Exception) {
                     Log.e("Renderer", "Error creating image", e)
                     image.mipmaps.forEach { it.cleanup() }
@@ -308,6 +250,88 @@ class Image private constructor(
             if (keepHdr) Hdr.retainHdrImage(image, headroom)
 
             return image
+        }
+
+        /**
+         * Trim and background colour for [pixels], null where none. Both read 8-bit sRGB, so kept
+         * HDR is tone mapped first, only when needed.
+         */
+        private fun measurePixels(
+            pixels: ByteBuffer,
+            width: Int,
+            height: Int,
+            keepHdr: Boolean,
+            trimColors: List<FloatArray>?,
+            trimThreshold: Float,
+            backgroundColor: Int?,
+        ): Pair<Rect?, Int?> {
+            var trim: Rect? = null
+            var background = backgroundColor
+
+            val trimWith = trimColors?.takeIf { it.isNotEmpty() }
+            val sdrPixels = when {
+                !keepHdr -> pixels
+                trimWith != null || backgroundColor == null ->
+                    ImageUtil.toneMapToSdr(pixels, width, height)
+
+                else -> null
+            }
+
+            if (trimWith != null && sdrPixels != null) {
+                // Find trim for each color and pick the smallest rect
+                val rects = Trim.findAllCpu(sdrPixels, width, height, trimWith, trimThreshold)
+                val best =
+                    trimWith.zip(rects).minByOrNull { it.second.width() * it.second.height() }
+
+                if (best != null) {
+                    trim = best.second
+                    // The winning trim colour, unless the caller named one.
+                    if (background == null) {
+                        val c = best.first
+                        background =
+                            0xFF000000.toInt() or ((c[0] * 255).toInt() shl 16) or ((c[1] * 255).toInt() shl 8) or (c[2] * 255).toInt()
+                    }
+                }
+            }
+
+            // Probing the edges is only worth a pass when neither the caller nor trim has
+            // already named a background colour.
+            if (background == null && sdrPixels != null) {
+                background = Trim.detectBackgroundCpu(sdrPixels, width, height, trimThreshold)
+            }
+            return trim to background
+        }
+
+        private const val TILESIZE = 2048
+
+        private class Level(val pixels: ByteBuffer, val w: Int, val h: Int, val scale: Float) {
+            suspend fun upload(format: Int) = Mipmap.create(pixels, w, h, scale, TILESIZE, format)
+        }
+
+        private suspend fun smallerLevels(
+            pixels: ByteBuffer, width: Int, height: Int, keepHdr: Boolean,
+        ): List<Level> {
+            val levels = mutableListOf<Level>()
+            var currentPixels = pixels
+            var textureWidth = width
+            var textureHeight = height
+            var scale = 1f
+
+            while (width * scale > TILESIZE || height * scale > TILESIZE) {
+                scale /= 2
+                val newWidth = floor(width * scale).toInt()
+                val newHeight = floor(height * scale).toInt()
+                Log.d("Renderer", "Create mipmap using CPU ${scale} ${newWidth} ${newHeight}")
+
+                currentPixels = withContext(Dispatchers.Default) {
+                    if (keepHdr) ImageUtil.resizeF16(currentPixels, textureWidth, textureHeight)
+                    else ImageUtil.resize(currentPixels, textureWidth, textureHeight)
+                }
+                levels.add(Level(currentPixels, newWidth, newHeight, scale))
+                textureWidth = newWidth
+                textureHeight = newHeight
+            }
+            return levels
         }
 
         suspend operator fun invoke(width: Int, height: Int): Image {
@@ -326,6 +350,63 @@ class Image private constructor(
                 image.cleanup()
                 throw e
             }
+        }
+    }
+
+    /**
+     * Rewrites this image in its own textures from [pixels], a full image of this size in its
+     * texel format (half-float if [isHdr]) of which only [rect] changed. Smaller levels are
+     * rebuilt whole. Chunked and yielding, so frames keep drawing. False if cleaned up part way.
+     */
+    suspend fun update(pixels: ByteBuffer, rect: Rect? = null): Boolean {
+        val levels = mipmaps.toList()
+        val base = levels.firstOrNull() ?: return false
+        val smaller =
+            if (levels.size > 1) smallerLevels(pixels, width, height, isHdr) else emptyList()
+        return WebGpuRenderer.onDispatcher { _ ->
+            base.update(pixels, rect) &&
+                    levels.drop(1).zip(smaller).all { (level, data) -> level.update(data.pixels) }
+        }
+    }
+
+    /** Adds the smaller levels [invoke]'s createMipMaps makes, from [pixels] as in [update]. */
+    suspend fun createMipMaps(pixels: ByteBuffer) {
+        val base = mipmaps.firstOrNull() ?: error("Image has no textures")
+        if (mipmaps.size > 1) return
+        val levels = smallerLevels(pixels, width, height, isHdr)
+        if (levels.isEmpty()) return
+
+        // Off the mutex: unreachable until added.
+        val extra = mutableListOf<Mipmap>()
+        try {
+            WebGpuRenderer.onDispatcher { _ ->
+                for (level in levels) extra.add(level.upload(base.format))
+            }
+            WebGpuRenderer.withContext { _ ->
+                check(mipmaps.size == 1 && mipmaps[0] === base) { "Image was cleaned up" }
+                mipmaps.addAll(extra)
+            }
+        } catch (e: Throwable) {
+            if (extra.isNotEmpty() && mipmaps.none { it in extra }) {
+                WebGpuRenderer.onDispatcher { _ -> extra.forEach { it.cleanup() } }
+            }
+            throw e
+        }
+    }
+
+    /** Sets [trim] and [backgroundColor] from [pixels] as [invoke] would. */
+    suspend fun measure(
+        pixels: ByteBuffer,
+        trimColors: List<FloatArray>? = null,
+        trimThreshold: Float = 0.05f,
+        backgroundColor: Int? = null,
+    ) {
+        val (newTrim, background) = withContext(Dispatchers.Default) {
+            measurePixels(pixels, width, height, isHdr, trimColors, trimThreshold, backgroundColor)
+        }
+        WebGpuRenderer.withContext { _ ->
+            trim = newTrim
+            background?.let { this@Image.backgroundColor = it }
         }
     }
 
