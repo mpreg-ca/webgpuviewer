@@ -284,12 +284,16 @@ object Hdr {
      */
     private const val HDR_IDLE_FRAMES = 120
 
+    // Idle until an HDR image is drawn.
     @Volatile
-    private var framesWithoutHdr = 0
+    private var framesWithoutHdr = HDR_IDLE_FRAMES
 
     /** Whether the past frame drew HDR, so [latchFrameFormat] knows if it has to poll. */
     @Volatile
     private var hdrDrawn = false
+
+    // While cutting tiles: drawn, not shown. Render thread only.
+    internal var cuttingTiles = false
 
     private val hdrRecentlyDrawn: Boolean get() = framesWithoutHdr < HDR_IDLE_FRAMES
 
@@ -302,9 +306,14 @@ object Hdr {
      * going through [retainHdrImage] again.
      */
     internal fun noteHdrDrawn(image: Image? = null, headroomStops: Float = 0f) {
+        if (image != null) reclaimIfMissing(image, headroomStops)
+        if (cuttingTiles) return
         hdrDrawn = true
         framesWithoutHdr = 0
-        if (image != null) reclaimIfMissing(image, headroomStops)
+        // Drawn into an SDR frame: the next latches HDR.
+        if (frameFormat != TextureFormat.RGBA16Float && presentFormat == TextureFormat.RGBA16Float) {
+            requestFrame?.invoke()
+        }
     }
 
     private fun reclaimIfMissing(image: Image, headroomStops: Float) {
@@ -389,10 +398,8 @@ object Hdr {
             liveHdrClaims.add(Claim(image, headroomStops))
             liveHdrClaims.size to desiredHeadroomRatio
         }
-        // Loaded is not drawn, but it is about to be, and its first frame would otherwise land in
-        // an 8-bit target.
-        framesWithoutHdr = 0
-        markPresentationDirty()
+        // Loaded isn't drawn: a prefetch mustn't switch (and wipe every target). See noteHdrDrawn.
+        if (presenting) markPresentationDirty() else presentationDirty = true
         if (count == 1) {
             Log.i(TAG, "First HDR image loaded - HDR present, headroom ratio $ratio")
         }
@@ -417,7 +424,7 @@ object Hdr {
      * starts, the one point where the true count is known to be zero.
      */
     internal fun resetContent() {
-        framesWithoutHdr = 0
+        framesWithoutHdr = HDR_IDLE_FRAMES
         hdrDrawn = false
         val stranded = synchronized(hdrLock) {
             val n = liveHdrClaims.size

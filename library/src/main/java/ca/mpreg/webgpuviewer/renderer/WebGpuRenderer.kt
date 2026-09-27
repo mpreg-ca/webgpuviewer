@@ -414,9 +414,12 @@ class WebGpuRenderer {
                     "WebGpuRenderer",
                     "No surface texture: ${SurfaceGetCurrentTextureStatus.toString(current.status)}"
                 )
-                // Lost needs a whole new surface, which only the app can hand over.
+                // Lost needs a new surface: park until one arrives.
                 if (texture.handle != 0L) texture.close()
-                if (current.status != SurfaceGetCurrentTextureStatus.Lost) reconfigure(surface)
+                if (current.status == SurfaceGetCurrentTextureStatus.Lost) {
+                    return FrameResult.Unavailable
+                }
+                reconfigure(surface)
                 return FrameResult.Retry
             }
 

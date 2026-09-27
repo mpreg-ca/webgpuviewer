@@ -306,6 +306,9 @@ fun ImageViewerContinuous(
                                                 state.minScale, state.maxScale
                                             )
                                         val diff = 1f / newScale - 1f / originalScale
+                                        if (value != 0f && newScale == state.scale) {
+                                            throw FlingStalled()
+                                        }
                                         val maxOffsetX =
                                             max(0f, (newScale - 1f) / (2f * newScale))
                                         state.scale = newScale
@@ -316,6 +319,7 @@ fun ImageViewerContinuous(
                                         anchorScroll(-py * diff * state.height)
                                         state.invalidate()
                                     }
+                                } catch (_: FlingStalled) {
                                 } finally {
                                     state.isScaleAnimating = false
                                     state.invalidate()

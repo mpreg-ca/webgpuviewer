@@ -254,6 +254,9 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
     @Volatile
     private var reportedUnavailable = false
 
+    @Volatile
+    private var retries = 0
+
     // Wakes [collect] when there is nothing to draw. Buffered, so no send races [dirty]'s check.
     private val renderWake = Channel<Unit>(Channel.CONFLATED)
 
@@ -294,9 +297,13 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
                 when (renderer.render { encoder, texture ->
                     renderSnapshot(encoder, texture, snapshot)
                 }) {
-                    FrameResult.Drawn -> reportedUnavailable = false
+                    FrameResult.Drawn -> {
+                        reportedUnavailable = false
+                        retries = 0
+                    }
 
-                    FrameResult.Retry -> invalidate()
+                    // Past the cap, park until something else invalidates.
+                    FrameResult.Retry -> if (++retries <= MAX_RETRIES) invalidate()
 
                     // No invalidate: leaving [dirty] clear parks the loop on [renderWake] rather
                     // than spinning the frame clock, and a later resize still wakes it.
@@ -333,6 +340,10 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
     }
 
     private object EmptySnapshot
+
+    private companion object {
+        const val MAX_RETRIES = 10
+    }
 
     private class RenderSnapshot(
         val currentPage: ImagePage,

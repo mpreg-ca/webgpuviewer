@@ -427,6 +427,7 @@ open class ImagePage {
                         // Keeps running off screen - frames stay in step with their durations,
                         // and invalidate() asks for a redraw only while there is one to ask for.
                         invalidate()
+                        if ((this@ImageSingle.frames?.size ?: 0) <= 1) return@launch
                         delay(duration.coerceAtLeast(MIN_FRAME_MILLIS).milliseconds)
                     } ?: break
                     frameIndex = (frameIndex + 1) % (this@ImageSingle.frames?.size ?: 1)
@@ -1739,6 +1740,11 @@ open class ImagePage {
 
             origin != null -> y.fastCoerceIn(minY, maxY)
             else -> targetY
+        }
+
+        if (!scaleChanging && endX == startX && endY == startY) {
+            animationJob = null
+            return
         }
 
         animationJob = scope?.launch {

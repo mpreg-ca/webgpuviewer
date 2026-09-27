@@ -266,12 +266,15 @@ fun ImageViewer(
                                         val minY = page.minY(scale)
                                         val maxY = page.maxY(scale)
 
+                                        val prevScale = page.scale
                                         page.setPos(
                                             x.fastCoerceIn(minX, maxX),
                                             y.fastCoerceIn(minY, maxY),
                                             scale
                                         )
+                                        if (value != 0f && scale == prevScale) throw FlingStalled()
                                     }
+                                } catch (_: FlingStalled) {
                                 } finally {
                                     page.isScaleAnimating = false
                                     page.invalidate()

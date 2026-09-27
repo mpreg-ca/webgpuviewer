@@ -44,6 +44,7 @@ class FilterLut3d(lut: Lut3d? = null) : FilterFullscreen() {
     @Volatile
     var lut: Lut3d? = null
         set(value) {
+            if (field === value) return
             field = value
             pending = value
             limitedRange = value?.limitedRange ?: false
@@ -58,6 +59,7 @@ class FilterLut3d(lut: Lut3d? = null) : FilterFullscreen() {
     @Volatile
     var intensity: Float = 1f
         set(value) {
+            if (field == value) return
             field = value
             uniformsDirty = true
             invalidate()
@@ -70,6 +72,7 @@ class FilterLut3d(lut: Lut3d? = null) : FilterFullscreen() {
     @Volatile
     var limitedRange: Boolean = false
         set(value) {
+            if (field == value) return
             field = value
             uniformsDirty = true
             invalidate()
