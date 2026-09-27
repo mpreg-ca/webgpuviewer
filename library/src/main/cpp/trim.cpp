@@ -279,7 +279,7 @@ Java_ca_mpreg_webgpuviewer_TrimNative_findTrim(JNIEnv *env, jobject thiz,
   if (!env || !pixelBuffer || !colors || !outBounds) {
     return JNI_FALSE;
   }
-  if (width <= 0 || height <= 0 || width > 16384 || height > 16384) {
+  if (width <= 0 || height <= 0) {
     return JNI_FALSE;
   }
   if (!std::isfinite(threshold)) {
@@ -405,7 +405,7 @@ Java_ca_mpreg_webgpuviewer_TrimNative_detectBackground(JNIEnv *env,
   if (!env || !pixelBuffer) {
     return kWhite;
   }
-  if (width <= 0 || height <= 0 || width > 16384 || height > 16384) {
+  if (width <= 0 || height <= 0) {
     return kWhite;
   }
 

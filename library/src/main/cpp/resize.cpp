@@ -55,7 +55,7 @@ Java_ca_mpreg_webgpuviewer_ImageUtil_resizeLinearAreaNative(
 
   if (!env || !src_buffer || !dst_buffer)
     return;
-  if (srcWidth <= 0 || srcHeight <= 0 || srcWidth > 16384 || srcHeight > 16384)
+  if (srcWidth <= 0 || srcHeight <= 0)
     return;
 
   uint32_t *src = (uint32_t *)env->GetDirectBufferAddress(src_buffer);
@@ -132,7 +132,7 @@ Java_ca_mpreg_webgpuviewer_ImageUtil_resizeLinearAreaNative(
             weights[i] = (xWeight > 0) ? (float)(xWeight * yWeight) : 0.0f;
             totalWeight += weights[i];
 
-            uint32_t pixel = src[sy * srcWidth + (sx + i)];
+            uint32_t pixel = src[(size_t)sy * srcWidth + (sx + i)];
             float aVal = ((pixel >> 24) & 0xFF) / 255.0f;
 
             linearA[i] = aVal;
@@ -162,7 +162,7 @@ Java_ca_mpreg_webgpuviewer_ImageUtil_resizeLinearAreaNative(
           float pWeight = (float)(xWeight * yWeight);
           totalWeight += pWeight;
 
-          uint32_t pixel = src[sy * srcWidth + sx];
+          uint32_t pixel = src[(size_t)sy * srcWidth + sx];
           float aVal = ((pixel >> 24) & 0xFF) / 255.0f;
           float rVal = srgbToLinearLUT[(pixel >> 16) & 0xFF] * aVal;
           float gVal = srgbToLinearLUT[(pixel >> 8) & 0xFF] * aVal;
@@ -235,7 +235,7 @@ Java_ca_mpreg_webgpuviewer_ImageUtil_resizeLinearAreaNative(
           continue;
 
         float yWeightF = (float)yWeight;
-        int srcRowOffset = sy * srcWidth;
+        size_t srcRowOffset = (size_t)sy * srcWidth;
 
         for (int sx = xMin; sx <= xMax; ++sx) {
           int cacheIdx = sx - xMin;
@@ -287,7 +287,7 @@ Java_ca_mpreg_webgpuviewer_ImageUtil_resizeLinearAreaNative(
       }
 #endif
 
-      dst[y * dstWidth + x] =
+      dst[(size_t)y * dstWidth + x] =
           (finalA << 24) | (finalR << 16) | (finalG << 8) | finalB;
     }
   }
