@@ -216,12 +216,12 @@ fun ImageViewer(
                                         val newScale =
                                             originalScale * 10f.pow(2 * totalDeltaY / state.height)
 
-                                        page.scale = newScale
-                                        val diff = 1 / page.scale - 1 / originalScale
+                                        val diff = 1 / newScale - 1 / originalScale
 
                                         page.setPos(
                                             (originalX + px * diff).orZero(),
-                                            (originalY + py * diff).orZero()
+                                            (originalY + py * diff).orZero(),
+                                            newScale
                                         )
 
                                         change.consume()
@@ -254,21 +254,22 @@ fun ImageViewer(
                                         val newScale =
                                             originalScale * 10f.pow(2 * (totalDeltaY + value) / state.height)
 
-                                        page.scale =
+                                        val scale =
                                             newScale.fastCoerceIn(page.homeScale, page.maxScale)
-                                        val diff = 1 / page.scale - 1 / originalScale
+                                        val diff = 1 / scale - 1 / originalScale
 
                                         val x = (originalX + px * diff).orZero()
                                         val y = (originalY + py * diff).orZero()
 
-                                        val minX = page.minX(page.scale)
-                                        val maxX = page.maxX(page.scale)
-                                        val minY = page.minY(page.scale)
-                                        val maxY = page.maxY(page.scale)
+                                        val minX = page.minX(scale)
+                                        val maxX = page.maxX(scale)
+                                        val minY = page.minY(scale)
+                                        val maxY = page.maxY(scale)
 
                                         page.setPos(
                                             x.fastCoerceIn(minX, maxX),
-                                            y.fastCoerceIn(minY, maxY)
+                                            y.fastCoerceIn(minY, maxY),
+                                            scale
                                         )
                                     }
                                 } finally {
@@ -418,8 +419,7 @@ fun ImageViewer(
                                             y = clampedY
                                         }
 
-                                        page.scale = newScale
-                                        page.setPos(x.orZero(), y.orZero())
+                                        page.setPos(x.orZero(), y.orZero(), newScale)
 
                                         event.changes.fastForEach { if (it.positionChanged()) it.consume() }
                                     }
