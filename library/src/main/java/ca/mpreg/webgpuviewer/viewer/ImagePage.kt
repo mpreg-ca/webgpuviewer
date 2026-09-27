@@ -42,6 +42,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.yield
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -139,12 +140,11 @@ open class ImagePage {
         /** Draws this page's content. Use [rect]/[circle]/[text] to draw into the open pass. */
         open fun render(dst: GPUTexture, x: Float, y: Float, scale: Float) {}
 
-        @Volatile
-        private var _renderVersion: Int = 0
+        private val _renderVersion = AtomicInteger()
 
         /** Bumped by [invalidate], so a page turn sees the drawn content change. */
         override val frameVersion: Int
-            get() = _renderVersion
+            get() = _renderVersion.get()
 
         /**
          * As [ImagePage.invalidate], bumping [frameVersion] so a page turn in flight re-seeds its
@@ -152,7 +152,7 @@ open class ImagePage {
          * otherwise freeze for the length of the turn.
          */
         override fun invalidate() {
-            _renderVersion++
+            _renderVersion.incrementAndGet()
             super.invalidate()
         }
 
@@ -356,12 +356,15 @@ open class ImagePage {
         override val isAnimated: Boolean
             get() = frames != null
 
-        @Volatile
-        private var _frameVersion: Int = 0
+        private val _frameVersion = AtomicInteger()
 
         /** Incremented each time the animation frame changes. Used by the render cache to detect stale frames. */
         override val frameVersion: Int
-            get() = _frameVersion
+            get() = _frameVersion.get() + contentVersion
+
+        /** Uploads into the image(s) so far; unlike [frameVersion], a fade or redraw leaves it. */
+        open val contentVersion: Int
+            get() = image?.contentVersion ?: 0
 
         /** Current image for rendering (may change during animation) */
         open val currentImage: Image?
@@ -398,7 +401,7 @@ open class ImagePage {
 
         /** As [ImagePage.invalidate], over the same [frameVersion] the animation loop drives. */
         override fun invalidate() {
-            _frameVersion++
+            _frameVersion.incrementAndGet()
             super.invalidate()
         }
 
@@ -416,8 +419,11 @@ open class ImagePage {
             animationLoop = loopScope.launch {
                 var frameIndex = 0
                 while (true) {
-                    this@ImageSingle.frames?.getOrNull(frameIndex)?.let { (img, duration) ->
-                        currentFrameImage = img
+                    synchronized(this@ImageSingle) {
+                        if (destroyed) null
+                        else this@ImageSingle.frames?.getOrNull(frameIndex)
+                            ?.also { currentFrameImage = it.first }
+                    }?.let { (_, duration) ->
                         // Keeps running off screen - frames stay in step with their durations,
                         // and invalidate() asks for a redraw only while there is one to ask for.
                         invalidate()
@@ -480,7 +486,10 @@ open class ImagePage {
         }
 
         /** Opens a `LoadOp.Clear` pass on [tex], no stencil attachment - a transition's cache is never masked. */
-        private fun beginCachePass(encoder: GPUCommandEncoder, tex: GPUTexture): GPURenderPassEncoder {
+        private fun beginCachePass(
+            encoder: GPUCommandEncoder,
+            tex: GPUTexture
+        ): GPURenderPassEncoder {
             val targetView = tex.createView()
             return encoder.beginRenderPass(
                 GPURenderPassDescriptor(
@@ -917,6 +926,9 @@ open class ImagePage {
         override val frameVersion: Int
             get() = (left?.frameVersion ?: 0) + (right?.frameVersion ?: 0)
 
+        override val contentVersion: Int
+            get() = (leftSingle?.contentVersion ?: 0) + (rightSingle?.contentVersion ?: 0)
+
         /** No image of its own - [left]/[right] hold them, and [forEachImage] walks both. */
         override val currentImage: Image?
             get() = null
@@ -1196,6 +1208,7 @@ open class ImagePage {
     var y: Float = 0f
 
     fun setPos(x: Float = this.x, y: Float = this.y, scale: Float = this.scale) {
+        if (!x.isFinite() || !y.isFinite() || !scale.isFinite() || scale <= 0f) return
         if (this.x == x && this.y == y && this.scale == scale) return
         this.x = x
         this.y = y
@@ -1757,6 +1770,8 @@ open class ImagePage {
                 animationTargetY = null
                 animationTargetScale = null
                 isScaleAnimating = false
+                // The last step drew with generation held off; settled, the tiles need a frame.
+                if (scaleChanging) onInvalidate?.invoke()
             }
         }
     }

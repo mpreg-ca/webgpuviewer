@@ -653,7 +653,8 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
      */
     private fun freeColdestGrid(keep: PageTiles) {
         val victim = pages.values.firstOrNull {
-            it !== keep && it.tiles.isNotEmpty() && !it.page.isOnScreen
+            it !== keep && it.tiles.isNotEmpty() && !it.page.isOnScreen &&
+                    it.tiles.values.none { t -> t.lastUsed >= frame - 1 }
         } ?: return
         releaseTiles(victim)
         victim.pending.clear()
@@ -683,6 +684,9 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         /** Cut at this size until the grid is wiped, which is when it adopts a new preferred one. */
         var tileSize: Int,
     ) {
+        /** [ImagePage.ImageSingle.contentVersion] the tiles were cut from. */
+        var contentVersion = page.contentVersion
+
         val tiles = HashMap<Long, Tile>()
         val pending = HashSet<Long>()
 
@@ -1134,6 +1138,9 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
 
         val st = pages[page] ?: return null
         val a = pagedAnchor(page, dst, 0f, 0f, 1f)
+        if (st.contentVersion != page.contentVersion || st.scale != a.pageScale ||
+            st.tileSize != preferredTileSize
+        ) return emptySet()
         val gp =
             gridPlacement(page, dst, a.anchorX, a.anchorY, 0f, a.pageScale, st.tileSize)
                 ?: return null
@@ -1169,11 +1176,15 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         val a = pagedAnchor(page, dst, 0f, 0f, 1f)
         val st = pages.getOrPut(page) { newGrid(page, a.pageScale) }
 
-        if (st.scale != a.pageScale || st.tileSize != preferredTileSize) {
+        val version = page.contentVersion
+        if (st.scale != a.pageScale || st.tileSize != preferredTileSize ||
+            st.contentVersion != version
+        ) {
             releaseTiles(st)
             st.pending.clear()
             st.scale = a.pageScale
             st.tileSize = preferredTileSize
+            st.contentVersion = version
             st.stable = false
             invalidate()
         } else {
@@ -1336,8 +1347,9 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             }
         }
 
+        val version = page.contentVersion
         if (st.scale != pageScale || st.centerYOffset != centerYOffset ||
-            st.tileSize != preferredTileSize
+            st.tileSize != preferredTileSize || st.contentVersion != version
         ) {
             // A changed centerYOffset at fixed scale means a placeholder corrected its guessed
             // height - invalidate the same way a scale change does. A changed preferred size
@@ -1346,6 +1358,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             st.pending.clear()
             st.scale = pageScale
             st.tileSize = preferredTileSize
+            st.contentVersion = version
             st.stable = false
             invalidate()
         } else {
@@ -1711,6 +1724,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     private fun generate(req: Request, measurementScope: CoroutineScope): Job? {
         val st = req.state
         if (st.destroyed || !st.stable) return null
+        if (st.contentVersion != st.page.contentVersion) return null
         return generateTileNow(st, req.tx, req.ty, measurementScope, req.onScreen)
     }
 

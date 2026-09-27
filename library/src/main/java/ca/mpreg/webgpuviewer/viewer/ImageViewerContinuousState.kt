@@ -584,6 +584,8 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
         val cameraDocY = anchorDocY - y0 + 0.5f * screenH / s
 
         val pages = mutableListOf<VisiblePage>()
+        // Undecoded ones too: [pages] skips them, and their decode's invalidate must still land.
+        val visible = mutableListOf<ImagePage>()
 
         // Visible band in unscaled page space, from page 0's top - see cameraDocY.
         val visTop = 0f
@@ -618,6 +620,7 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
             if (scrolledThrough == null && isScrolledThrough(yTop, contentHeight)) {
                 scrolledThrough = page
             }
+            visible.add(page)
             // Walked upward, so each goes in front of the last - top to bottom, as the
             // forward walk appends.
             if (page.isDecoded) {
@@ -649,8 +652,9 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
             // Walking down, so a later match replaces whatever the backward walk found.
             if (isScrolledThrough(y, contentHeight)) scrolledThrough = page
 
-            if (y + pageHeight > visTop && page.isDecoded) {
-                pages.add(VisiblePage(page, docTop, pageHeight, contentHeight))
+            if (y + pageHeight > visTop) {
+                visible.add(page)
+                if (page.isDecoded) pages.add(VisiblePage(page, docTop, pageHeight, contentHeight))
             }
 
             // A zero-height page never advances y, so stop.
@@ -661,7 +665,7 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
             i++
         }
 
-        onScreenPages = pages.map { it.page }
+        onScreenPages = visible
         pagesBelow = below
         pagesAbove = above
 

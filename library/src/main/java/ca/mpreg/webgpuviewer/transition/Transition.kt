@@ -34,6 +34,7 @@ import ca.mpreg.webgpuviewer.renderer.Hdr
 import ca.mpreg.webgpuviewer.renderer.TileRenderer
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
 import ca.mpreg.webgpuviewer.renderer.destroyAndRelease
+import ca.mpreg.webgpuviewer.renderer.groupLayout
 import ca.mpreg.webgpuviewer.renderer.setTransientBindGroup
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.blitCached
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.blitCachedRegion
@@ -42,7 +43,6 @@ import ca.mpreg.webgpuviewer.transition.Transition.Companion.getCachedTexture
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.invalidateCache
 import ca.mpreg.webgpuviewer.viewer.ImagePage
 import ca.mpreg.webgpuviewer.viewer.ImageViewerState
-import ca.mpreg.webgpuviewer.renderer.groupLayout
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.pow
@@ -539,6 +539,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             tiles: TileRenderer,
         ): GPUTextureView? {
             if (page.destroyed || !page.isDecoded) return null
+            if (dstWidth <= 0 || dstHeight <= 0) return null
 
             // Lock only for metadata - GPU recording runs on the single GPU thread and doesn't
             // need it; cacheLock only guards against invalidateCache() from the UI thread.
@@ -573,11 +574,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             // own pass (Load or Clear, matching identityMatches) rather than sharing one from here.
             page.renderIntoCache(encoder, texture, tiles, identityMatches)
 
-            // [available] is still accurate after the render: renderIntoCache
-            // only blit what's already cached and queue what's missing for the background worker
-            // - generation itself is async, so st.tiles can't have gained anything in between.
-            // Reusing it here instead of re-walking the grid halves this call's cost.
-            val newBlitted = available ?: emptySet()
+            val newBlitted =
+                if (available == null) emptySet()
+                else page.newlyAvailableTileKeys(tiles, texture) ?: emptySet()
 
             synchronized(cacheLock) {
                 // Swapped mid-render: the view is still right, the metadata isn't.

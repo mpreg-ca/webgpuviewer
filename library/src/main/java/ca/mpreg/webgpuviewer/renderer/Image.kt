@@ -359,18 +359,30 @@ class Image private constructor(
      * rebuilt whole. Chunked and yielding, so frames keep drawing. False if cleaned up part way.
      */
     suspend fun update(pixels: ByteBuffer, rect: Rect? = null): Boolean {
+        requireFullImage(pixels)
         val levels = mipmaps.toList()
         val base = levels.firstOrNull() ?: return false
         val smaller =
             if (levels.size > 1) smallerLevels(pixels, width, height, isHdr) else emptyList()
         return WebGpuRenderer.onDispatcher { _ ->
-            base.update(pixels, rect) &&
-                    levels.drop(1).zip(smaller).all { (level, data) -> level.update(data.pixels) }
+            try {
+                base.update(pixels, rect) &&
+                        levels.drop(1).zip(smaller)
+                            .all { (level, data) -> level.update(data.pixels) }
+            } finally {
+                contentVersion++
+            }
         }
     }
 
+    /** Bumped by [update]; part of the page's frameVersion, so a transition's cached copy re-seeds. */
+    @Volatile
+    var contentVersion: Int = 0
+        private set
+
     /** Adds the smaller levels [invoke]'s createMipMaps makes, from [pixels] as in [update]. */
     suspend fun createMipMaps(pixels: ByteBuffer) {
+        requireFullImage(pixels)
         val base = mipmaps.firstOrNull() ?: error("Image has no textures")
         if (mipmaps.size > 1) return
         val levels = smallerLevels(pixels, width, height, isHdr)
@@ -391,6 +403,14 @@ class Image private constructor(
                 WebGpuRenderer.onDispatcher { _ -> extra.forEach { it.cleanup() } }
             }
             throw e
+        }
+    }
+
+    /** A short buffer would have writeTexture read past it, and the native resize silently skip. */
+    private fun requireFullImage(pixels: ByteBuffer) {
+        val need = width.toLong() * height * (if (isHdr) 8 else 4)
+        require(pixels.isDirect && pixels.capacity() >= need) {
+            "pixels hold ${pixels.capacity()} B, ${width}x$height needs $need"
         }
     }
 
