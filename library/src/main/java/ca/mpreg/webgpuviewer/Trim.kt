@@ -21,9 +21,9 @@ import ca.mpreg.webgpuviewer.renderer.Mipmap
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
 import ca.mpreg.webgpuviewer.renderer.destroyAndRelease
 import ca.mpreg.webgpuviewer.renderer.endAndRelease
+import ca.mpreg.webgpuviewer.renderer.groupLayout
 import ca.mpreg.webgpuviewer.renderer.setTransientBindGroup
 import ca.mpreg.webgpuviewer.renderer.submitAndRelease
-import ca.mpreg.webgpuviewer.renderer.groupLayout
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.awaitAll
@@ -94,7 +94,7 @@ class Trim {
             colors: List<FloatArray>,
             threshold: Float
         ): Rect = findAllCpu(pixels, width, height, colors, threshold)
-            .minByOrNull { it.width() * it.height() } ?: Rect(0, 0, width, height)
+            .minByOrNull { it.width().toLong() * it.height() } ?: Rect(0, 0, width, height)
 
         /**
          * CPU counterpart of [detectBackgroundInContext]: the background colour implied by the
@@ -766,7 +766,7 @@ fn find_bottom(@builtin(global_invocation_id) global_id: vec3<u32>) {
             }
 
             // Return the smallest rect (tightest trim)
-            return results.minByOrNull { it.width() * it.height() }
+            return results.minByOrNull { it.width().toLong() * it.height() }
                 ?: Rect(0, 0, image.width, image.height)
         }
 

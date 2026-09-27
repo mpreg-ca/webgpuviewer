@@ -513,6 +513,11 @@ object Hdr {
         syncColorMode()
     }
 
+    /** As attachColorModeHost(null), unless a newer view has since taken over. */
+    internal fun detachColorModeHost(view: View) {
+        if (colorModeHost?.get() === view) attachColorModeHost(null)
+    }
+
     private fun syncColorMode() {
         if (presenting != colorModeApplied) setColorMode(presenting)
     }

@@ -281,15 +281,17 @@ class Image private constructor(
                 // Find trim for each color and pick the smallest rect
                 val rects = Trim.findAllCpu(sdrPixels, width, height, trimWith, trimThreshold)
                 val best =
-                    trimWith.zip(rects).minByOrNull { it.second.width() * it.second.height() }
+                    trimWith.zip(rects)
+                        .minByOrNull { it.second.width().toLong() * it.second.height() }
 
                 if (best != null) {
                     trim = best.second
                     // The winning trim colour, unless the caller named one.
                     if (background == null) {
                         val c = best.first
+                        fun ch(v: Float) = (v * 255).toInt().coerceIn(0, 255)
                         background =
-                            0xFF000000.toInt() or ((c[0] * 255).toInt() shl 16) or ((c[1] * 255).toInt() shl 8) or (c[2] * 255).toInt()
+                            0xFF000000.toInt() or (ch(c[0]) shl 16) or (ch(c[1]) shl 8) or ch(c[2])
                     }
                 }
             }

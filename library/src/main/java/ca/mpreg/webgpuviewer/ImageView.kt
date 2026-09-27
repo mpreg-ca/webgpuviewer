@@ -23,7 +23,7 @@ open class ImageView(
             orientation == 1
         })
 
-    open val state: ImageViewerState = ImageViewerState(isVertical, isReversed)
+    open val state: ImageViewerState by lazy { ImageViewerState(isVertical, isReversed) }
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
@@ -34,7 +34,7 @@ open class ImageView(
 
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
-        Hdr.attachColorModeHost(null)
+        Hdr.detachColorModeHost(this)
     }
 
     override fun onWindowFocusChanged(hasWindowFocus: Boolean) {

@@ -3,6 +3,7 @@ package ca.mpreg.webgpuviewer
 import ca.mpreg.webgpuviewer.ImageUtil.applyGainmapNative
 import ca.mpreg.webgpuviewer.ImageUtil.resize
 import ca.mpreg.webgpuviewer.ImageUtil.resizeLinearAreaNative
+import ca.mpreg.webgpuviewer.ImageUtil.rotateQuarterNative
 import ca.mpreg.webgpuviewer.ImageUtil.toneMapToSdrNative
 import java.nio.ByteBuffer
 

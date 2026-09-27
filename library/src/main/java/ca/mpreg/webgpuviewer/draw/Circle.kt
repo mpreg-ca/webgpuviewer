@@ -19,8 +19,8 @@ import androidx.webgpu.GPUVertexState
 import androidx.webgpu.PrimitiveTopology
 import ca.mpreg.webgpuviewer.renderer.FormatKeyed
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
-import ca.mpreg.webgpuviewer.renderer.setTransientBindGroup
 import ca.mpreg.webgpuviewer.renderer.groupLayout
+import ca.mpreg.webgpuviewer.renderer.setTransientBindGroup
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 

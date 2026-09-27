@@ -127,8 +127,14 @@ class FilterChain {
                 height = outHeight
 
                 if (last && !direct) tailBlit.run(
-                    this, encoder, src, width, height,
-                    surface.createView().also { surfaceViews.add(it) }, surface.width, surface.height
+                    this,
+                    encoder,
+                    src,
+                    width,
+                    height,
+                    surface.createView().also { surfaceViews.add(it) },
+                    surface.width,
+                    surface.height
                 )
             }
         } finally {
@@ -160,6 +166,7 @@ class FilterChain {
 
     fun cleanup() {
         filters.forEach { it.cleanup() }
+        tailBlit.cleanup()
         destroyPool()
     }
 

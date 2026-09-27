@@ -22,6 +22,7 @@ import androidx.webgpu.TextureViewDimension
 import ca.mpreg.webgpuviewer.renderer.destroyAndRelease
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Applies a 3D colour lookup table to the finished frame - a display profile, a film look, or
@@ -79,8 +80,11 @@ class FilterLut3d(lut: Lut3d? = null) : FilterFullscreen() {
 
     override val code: String get() = FRAGMENT
 
-    @Volatile
-    private var pending: Lut3d? = null
+    private val pendingRef = AtomicReference<Lut3d?>(null)
+
+    private var pending: Lut3d?
+        get() = pendingRef.get()
+        set(value) = pendingRef.set(value)
 
     private var texture: GPUTexture? = null
     private var view: GPUTextureView? = null
@@ -118,11 +122,8 @@ class FilterLut3d(lut: Lut3d? = null) : FilterFullscreen() {
     override fun prepare(srcWidth: Int, srcHeight: Int) {
         // [active] keeps this filter out of the chain until a table is set, but bind something
         // real regardless rather than leave the pass unbindable.
-        val next = pending ?: if (texture == null) Lut3d.identity() else null
-        if (next != null) {
-            pending = null
-            upload(next)
-        }
+        val next = pendingRef.getAndSet(null) ?: if (texture == null) Lut3d.identity() else null
+        if (next != null) upload(next)
         if (uniformsDirty) {
             uniformsDirty = false
             writeUniforms()
@@ -143,6 +144,8 @@ class FilterLut3d(lut: Lut3d? = null) : FilterFullscreen() {
         view = null
         // Not just the texture: upload() skips creating one when the size already matches.
         lutSize = 0
+        pending = lut
+        uniformsDirty = true
         rebind()
     }
 

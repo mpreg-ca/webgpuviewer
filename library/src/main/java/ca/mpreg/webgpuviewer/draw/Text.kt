@@ -48,8 +48,8 @@ import ca.mpreg.webgpuviewer.draw.Font.Companion.invoke
 import ca.mpreg.webgpuviewer.renderer.FormatKeyed
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
 import ca.mpreg.webgpuviewer.renderer.destroyAndRelease
-import ca.mpreg.webgpuviewer.renderer.setTransientBindGroup
 import ca.mpreg.webgpuviewer.renderer.groupLayout
+import ca.mpreg.webgpuviewer.renderer.setTransientBindGroup
 import org.json.JSONObject
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -993,7 +993,16 @@ private class GlyphInstances(glyphs: Int) {
     var data = FloatArray(maxOf(glyphs, 1) * 8)
     var count = 0
 
-    fun add(x1: Float, y1: Float, x2: Float, y2: Float, u1: Float, v1: Float, u2: Float, v2: Float) {
+    fun add(
+        x1: Float,
+        y1: Float,
+        x2: Float,
+        y2: Float,
+        u1: Float,
+        v1: Float,
+        u2: Float,
+        v2: Float
+    ) {
         if ((count + 1) * 8 > data.size) data = data.copyOf(data.size * 2)
         val i = count * 8
         data[i] = x1; data[i + 1] = y1; data[i + 2] = x2; data[i + 3] = y2
@@ -1033,7 +1042,8 @@ private val textStaging = ThreadLocal.withInitial {
 private fun textStaging(size: Int): ByteBuffer {
     var b = textStaging.get()
     if (b.capacity() < size) {
-        b = ByteBuffer.allocateDirect(Integer.highestOneBit(size - 1) shl 1).order(ByteOrder.nativeOrder())
+        b = ByteBuffer.allocateDirect(Integer.highestOneBit(size - 1) shl 1)
+            .order(ByteOrder.nativeOrder())
         textStaging.set(b)
     }
     b.clear()
@@ -1065,12 +1075,22 @@ private fun drawGlyphInstances(
         val data = instances.data
         for (g in 0 until glyphCount) {
             val i = g * 8
-            vertexBytes.putFloat(data[i]).putFloat(data[i + 1]).putFloat(data[i + 2]).putFloat(data[i + 3])
+            vertexBytes.putFloat(data[i]).putFloat(data[i + 1]).putFloat(data[i + 2])
+                .putFloat(data[i + 3])
             vertexBytes.putFloat(data[i + 4] / atlasWidth).putFloat(data[i + 5] / atlasHeight)
             vertexBytes.putFloat(data[i + 6] / atlasWidth).putFloat(data[i + 7] / atlasHeight)
         }
         vertexBytes.flip()
-        drawGlyphBatch(pass, format, font.atlasView, vertexBytes, vertexSize, glyphCount, color, screenPxRange)
+        drawGlyphBatch(
+            pass,
+            format,
+            font.atlasView,
+            vertexBytes,
+            vertexSize,
+            glyphCount,
+            color,
+            screenPxRange
+        )
     }
 }
 

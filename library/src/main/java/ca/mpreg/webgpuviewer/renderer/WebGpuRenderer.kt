@@ -319,14 +319,15 @@ class WebGpuRenderer {
         val initSurface = initSurface@{
             // A cleanup queued first let [pending] go; a surface from it would leak.
             if (surface != null || pendingSurface !== pending) return@initSurface
-            this@WebGpuRenderer.surface = pending.let {
-                instance.createSurface(
-                    GPUSurfaceDescriptor(
-                        surfaceSourceAndroidNativeWindow = GPUSurfaceSourceAndroidNativeWindow(
-                            windowFromSurface(it).also { acquired -> window = acquired }
-                        )
+            val created = instance.createSurface(
+                GPUSurfaceDescriptor(
+                    surfaceSourceAndroidNativeWindow = GPUSurfaceSourceAndroidNativeWindow(
+                        windowFromSurface(pending).also { acquired -> window = acquired }
                     )
-                ).apply {
+                )
+            )
+            try {
+                created.apply {
                     // Before the first latch, so the swapchain is configured knowing
                     // whether float is even available.
                     Hdr.resolve(this, adapter)
@@ -345,7 +346,16 @@ class WebGpuRenderer {
                     )
                     this@WebGpuRenderer.configuredFormat = Hdr.frameFormat
                 }
+            } catch (e: Throwable) {
+                // Unassigned, so cleanup would never free either.
+                created.close()
+                if (window != 0L) {
+                    NativeWindow.release(window)
+                    window = 0L
+                }
+                throw e
             }
+            this@WebGpuRenderer.surface = created
         }
 
         onRenderThread(initSurface)
@@ -405,6 +415,7 @@ class WebGpuRenderer {
                     "No surface texture: ${SurfaceGetCurrentTextureStatus.toString(current.status)}"
                 )
                 // Lost needs a whole new surface, which only the app can hand over.
+                if (texture.handle != 0L) texture.close()
                 if (current.status != SurfaceGetCurrentTextureStatus.Lost) reconfigure(surface)
                 return FrameResult.Retry
             }

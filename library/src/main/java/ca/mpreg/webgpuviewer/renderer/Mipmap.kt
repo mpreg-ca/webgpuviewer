@@ -84,6 +84,8 @@ class Mipmap(
 
     /** Allocate the tile textures and copy [pixels] into them a chunk at a time. */
     private suspend fun upload(pixels: ByteBuffer) {
+        val need = width.toLong() * height * bytesPerPixel
+        require(pixels.capacity() >= need) { "pixels hold ${pixels.capacity()} B, ${width}x$height needs $need" }
         val rowsPerChunk = (UPLOAD_CHUNK_BYTES / (width * bytesPerPixel)).coerceAtLeast(1)
 
         for (r in 0 until tilesRows) {
@@ -104,6 +106,8 @@ class Mipmap(
                         usage = TextureUsage.TextureBinding or TextureUsage.CopyDst or TextureUsage.RenderAttachment,
                     )
                 )
+                textures.add(texture)
+                textureViews.add(texture.createView())
 
                 var row = 0
                 while (row < tileHeight) {
@@ -127,9 +131,6 @@ class Mipmap(
                     row += rows
                     yield()
                 }
-
-                textures.add(texture)
-                textureViews.add(texture.createView())
             }
         }
 
@@ -214,6 +215,8 @@ class Mipmap(
      * like [upload]; run via [WebGpuRenderer.onDispatcher]. False if cleaned up part way.
      */
     suspend fun update(pixels: ByteBuffer, rect: Rect? = null): Boolean {
+        val need = width.toLong() * height * bytesPerPixel
+        require(pixels.capacity() >= need) { "pixels hold ${pixels.capacity()} B, ${width}x$height needs $need" }
         val left = (rect?.left ?: 0).coerceIn(0, width)
         val top = (rect?.top ?: 0).coerceIn(0, height)
         val right = (rect?.right ?: width).coerceIn(left, width)
