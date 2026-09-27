@@ -298,6 +298,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             }
             tileCostNs.fill(0.0)
             tileSamples.fill(0)
+            probeAttempts.fill(0)
             tileOverheadNs = 0.0
             preferredTileSize = TILE_SIZE
             invalidate()
@@ -395,6 +396,9 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     // [TILE_SIZES], in nanoseconds - 0 until that size's first measurement lands.
     private val tileCostNs = DoubleArray(TILE_SIZES.size)
     private val tileSamples = IntArray(TILE_SIZES.size)
+
+    /** Probes per size: one whose timing never lands would otherwise repeat forever. */
+    private val probeAttempts = IntArray(TILE_SIZES.size)
 
     private fun sizeIndex(tileSize: Int) = TILE_SIZES.indexOf(tileSize)
 
@@ -1186,12 +1190,8 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             st.scale = a.pageScale
             st.tileSize = preferredTileSize
             st.contentVersion = version
-            st.stable = false
-            invalidate()
-        } else {
-            st.stable = true
         }
-        if (!st.stable) return
+        st.stable = true
 
         val gp = gridPlacement(page, dst, a.anchorX, a.anchorY, 0f, a.pageScale, st.tileSize)
             ?: return
@@ -1216,6 +1216,19 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         // work actually starts for this grid - every later call while it's still filling in finds
         // pending already non-empty and stays quiet.
         val alreadyPrewarming = st.pending.isNotEmpty()
+
+        var missing = 0
+        for (tyi in ty0..ty1) {
+            for (txi in tx0..tx1) {
+                val tile = st.tiles[key(txi, tyi)]
+                if (tile != null) tile.lastUsed = frame else missing++
+            }
+        }
+        if (missing == 0) return
+
+        var total = 0L
+        for (other in pages.values) total += other.tiles.size * tileBytes(other)
+        if (total + missing * tileBytes(st) > maxTileBytes) return
 
         var added = false
         for (tyi in ty0..ty1) {
@@ -1577,7 +1590,8 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         if (staged) return null
         val queries = timestampQuerySet ?: return null
         val index = TILE_SIZES.indices.firstOrNull {
-            TILE_SIZES[it] != preferredTileSize && tileSamples[it] < TILE_SIZE_SAMPLES
+            TILE_SIZES[it] != preferredTileSize && tileSamples[it] < TILE_SIZE_SAMPLES &&
+                    probeAttempts[it] < 2 * TILE_SIZE_SAMPLES
         } ?: return null
         val tileSize = TILE_SIZES[index]
 
@@ -1586,6 +1600,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             it.stable && !it.destroyed && it.page.hasUploadedImage
         } ?: return null
 
+        probeAttempts[index]++
         val pool = atlas
         val timing = acquireTimestampBuffers()
         val encoder = device.createCommandEncoder()
@@ -1631,6 +1646,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
                 while (true) {
                     val batchSize = nextBatchSize()
                     var generated = 0
+                    var visible = false
                     val measurements = ArrayList<Job>(batchSize)
                     while (generated < batchSize) {
                         val req = nextRequest() ?: break
@@ -1643,6 +1659,11 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
                                 recordTileOverhead((System.nanoTime() - started).toDouble())
                             }
                             generated++
+                            // A turn blits prewarmed tiles, so its pages count. Only if it landed:
+                            // a full atlas drops it, and a frame would requeue it.
+                            if ((req.onScreen || req.state.page.isOnScreen) &&
+                                req.state.tiles.containsKey(key(req.tx, req.ty))
+                            ) visible = true
                         } catch (e: CancellationException) {
                             throw e
                         } catch (e: Exception) {
@@ -1654,7 +1675,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
                         (probeTileSize(this) ?: break).join()
                         continue
                     }
-                    invalidate()
+                    if (visible) invalidate()
                     if (timestampsSupported) measurements.joinAll() else delay(5.milliseconds)
                 }
             } finally {
@@ -1814,14 +1835,19 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         val centerY = st.centerYOffset * (scale / st.scale)
         val dst = ts + 2f * inset
         val filtered = filtered()
-        st.page.forEachImage { image, srcOffsetX, imageScale ->
-            if (image.mipmaps.isNotEmpty()) {
-                val si = s * imageScale
-                val targetX = -tx * ts + inset + s * srcOffsetX + si * image.x
-                val targetY = centerY - ty * ts + inset + si * image.y
-                val (x, y) = solveImagePlacement(targetX, targetY, si, image, dst, dst)
-                RenderPage.render(pass, image, texture, x, y, si, filtered)
+        Hdr.cuttingTiles = true
+        try {
+            st.page.forEachImage { image, srcOffsetX, imageScale ->
+                if (image.mipmaps.isNotEmpty()) {
+                    val si = s * imageScale
+                    val targetX = -tx * ts + inset + s * srcOffsetX + si * image.x
+                    val targetY = centerY - ty * ts + inset + si * image.y
+                    val (x, y) = solveImagePlacement(targetX, targetY, si, image, dst, dst)
+                    RenderPage.render(pass, image, texture, x, y, si, filtered)
+                }
             }
+        } finally {
+            Hdr.cuttingTiles = false
         }
     }
 
