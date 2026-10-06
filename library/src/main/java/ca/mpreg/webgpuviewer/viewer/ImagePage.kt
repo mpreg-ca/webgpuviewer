@@ -354,6 +354,7 @@ open class ImagePage {
         private val shown = Channel<Unit>(Channel.CONFLATED)
 
         override fun cameOnScreen() {
+            super.cameOnScreen()
             shown.trySend(Unit)
         }
 
@@ -1535,8 +1536,13 @@ open class ImagePage {
      * viewer never fetches itself but which still need a scope to animate in and a way back to
      * the screen.
      */
-    /** Called as this page joins the drawn ones. */
-    internal open fun cameOnScreen() {}
+    /**
+     * Called as this page joins the drawn ones. Redraws, as any [invalidate] before this was
+     * dropped for not being on screen yet.
+     */
+    internal open fun cameOnScreen() {
+        onInvalidate?.invoke()
+    }
 
     internal open fun attach(
         parent: ImageViewerState, scope: CoroutineScope?, onInvalidate: () -> Unit
