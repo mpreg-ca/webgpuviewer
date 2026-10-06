@@ -326,6 +326,7 @@ fun ImageViewer(
                         do {
                             val event = awaitPointerEvent(pass = PointerEventPass.Initial)
                             canceled = event.changes.any { it.isConsumed }
+                            if (longPressed) break
                             if (canceled) {
                                 longPressJob?.cancel()
                             } else {

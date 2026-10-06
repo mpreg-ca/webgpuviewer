@@ -346,6 +346,7 @@ fun ImageViewerContinuous(
                         do {
                             val event = awaitPointerEvent()
                             canceled = event.changes.any { it.isConsumed }
+                            if (longPressed) break
                             if (!canceled) {
                                 val change = event.changes[0]
 
