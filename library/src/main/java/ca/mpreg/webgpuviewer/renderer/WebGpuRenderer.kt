@@ -75,6 +75,16 @@ class WebGpuRenderer {
         private var deviceLost = false
 
         /**
+         * Why the device was lost, plus the last uncaptured error before it. Carried in every
+         * later "device lost" message, since the log line from the loss itself is easily pruned.
+         */
+        @Volatile
+        private var deviceLostDetail = ""
+
+        @Volatile
+        private var lastUncapturedError: String? = null
+
+        /**
          * Called once, on whichever thread the driver reports it from, when the device is lost.
          * Nothing renders after that for the life of the process, so a host should move to a
          * viewer that does not need WebGPU.
@@ -89,7 +99,7 @@ class WebGpuRenderer {
         val unavailableReason: String?
             get() = when {
                 initError != null -> "WebGPU failed to initialize: ${initError?.message}"
-                deviceLost -> "WebGPU device lost"
+                deviceLost -> "WebGPU device lost$deviceLostDetail"
                 !::instance.isInitialized || !::adapter.isInitialized ||
                         !::device.isInitialized -> "WebGPU never initialized"
 
@@ -99,7 +109,7 @@ class WebGpuRenderer {
         fun requireAvailable() {
             check(isAvailable) {
                 "WebGPU not available" + (initError?.let { ": ${it.message}" }
-                    ?: if (deviceLost) ": device lost" else "")
+                    ?: if (deviceLost) ": device lost$deviceLostDetail" else "")
             }
         }
 
@@ -191,6 +201,10 @@ class WebGpuRenderer {
                         GPUDeviceDescriptor(
                             deviceLostCallback = DeviceLostCallback { lost, reason, message ->
                                 val first = !deviceLost
+                                if (first) {
+                                    deviceLostDetail = " (reason=$reason: $message" +
+                                            (lastUncapturedError?.let { "; last error: $it" } ?: "") + ")"
+                                }
                                 deviceLost = true
                                 Log.e(
                                     "WebGpuRenderer",
@@ -200,6 +214,7 @@ class WebGpuRenderer {
                             },
                             deviceLostCallbackExecutor = Executor(Runnable::run),
                             uncapturedErrorCallback = UncapturedErrorCallback { _, type, message ->
+                                lastUncapturedError = "type=$type: $message"
                                 Log.e(
                                     "WebGpuRenderer",
                                     "Uncaptured WebGPU error type=$type: $message"
