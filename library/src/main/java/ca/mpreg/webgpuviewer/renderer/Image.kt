@@ -332,7 +332,22 @@ class Image private constructor(
         private const val TILESIZE = 2048
 
         private class Level(val pixels: ByteBuffer, val w: Int, val h: Int, val scale: Float) {
-            suspend fun upload(format: Int) = Mipmap.create(pixels, w, h, scale, TILESIZE, format)
+            /**
+             * [TILESIZE] bounds the smallest level, for shader speed. A larger level is only split
+             * where the device forces it, falling back to [TILESIZE] tiles if one that big cannot
+             * be allocated.
+             */
+            suspend fun upload(format: Int): Mipmap {
+                val single = WebGpuRenderer.maxTextureDimension2D
+                if ((w > TILESIZE || h > TILESIZE) && single > TILESIZE) {
+                    try {
+                        return Mipmap.create(pixels, w, h, scale, single, format, checkOom = true)
+                    } catch (e: Mipmap.TextureOutOfMemory) {
+                        Log.w("Renderer", "${e.message} out of memory, splitting ${w}x$h at $TILESIZE")
+                    }
+                }
+                return Mipmap.create(pixels, w, h, scale, TILESIZE, format)
+            }
         }
 
         private suspend fun smallerLevels(

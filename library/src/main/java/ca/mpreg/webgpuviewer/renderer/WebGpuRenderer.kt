@@ -13,6 +13,7 @@ import androidx.webgpu.GPUDevice
 import androidx.webgpu.GPUDeviceDescriptor
 import androidx.webgpu.GPUInstance
 import androidx.webgpu.GPUInstanceDescriptor
+import androidx.webgpu.GPULimits
 import androidx.webgpu.GPURequestAdapterOptions
 import androidx.webgpu.GPUSurface
 import androidx.webgpu.GPUSurfaceConfiguration
@@ -53,6 +54,13 @@ class WebGpuRenderer {
         lateinit var instance: GPUInstance
         lateinit var adapter: GPUAdapter
         lateinit var device: GPUDevice
+
+        /**
+         * The device's real texture size ceiling - requested at creation, since Compatibility mode
+         * otherwise caps it at 4096 whatever the hardware can do.
+         */
+        var maxTextureDimension2D = 4096
+            private set
         private val mutex = Mutex()
 
         var offsetX: Float = 0f
@@ -177,6 +185,8 @@ class WebGpuRenderer {
                             intArrayOf()
                         }
 
+                    val adapterLimits = adapter.getLimits()
+
                     device = adapter.requestDevice(
                         GPUDeviceDescriptor(
                             deviceLostCallback = DeviceLostCallback { lost, reason, message ->
@@ -197,7 +207,15 @@ class WebGpuRenderer {
                             },
                             uncapturedErrorCallbackExecutor = Executor(Runnable::run),
                             requiredFeatures = @SuppressLint("WrongConstant") requiredFeatures,
+                            requiredLimits = GPULimits(
+                                maxTextureDimension2D = adapterLimits.maxTextureDimension2D,
+                            ),
                         )
+                    )
+                    maxTextureDimension2D = device.getLimits().maxTextureDimension2D
+                    Log.i(
+                        "WebGpuRenderer",
+                        "maxTextureDimension2D adapter=${adapterLimits.maxTextureDimension2D} device=$maxTextureDimension2D"
                     )
                 } catch (e: Throwable) {
                     // Fails soft via initError - a driver init failure shouldn't poison the whole class.
