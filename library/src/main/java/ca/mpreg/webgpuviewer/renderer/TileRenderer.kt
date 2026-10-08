@@ -1687,6 +1687,12 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
                             if ((req.onScreen || req.state.page.isOnScreen) &&
                                 req.state.tiles.containsKey(key(req.tx, req.ty))
                             ) visible = true
+                            // Sustained staged work is what cooks a phone - see [Thermals]. Only
+                            // after a tile that submitted, and zero while nothing is throttled.
+                            if (staged) {
+                                val pause = Thermals.stagedTilePauseMs
+                                if (pause > 0L) delay(pause.milliseconds)
+                            }
                         } catch (e: CancellationException) {
                             throw e
                         } catch (e: Exception) {
