@@ -1,6 +1,7 @@
 package ca.mpreg.webgpuviewer.renderer
 
 import android.graphics.Rect
+import android.graphics.RectF
 import android.util.Log
 import androidx.webgpu.BufferUsage
 import androidx.webgpu.GPUBuffer
@@ -17,6 +18,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.floor
 import kotlin.math.log2
+import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.round
 
@@ -660,9 +662,12 @@ class Image private constructor(
      * - the fast/plain paths' answer to [prepareForRender]'s fixed one-window quad, which can
      * silently drop content once the viewport needs more than that window covers. No coarse-level
      * guard is needed here since any viewport is just whichever tiles it happens to overlap.
+     *
+     * [src], in this image's pixels, crops the draw: each tile draws only its part inside, in
+     * place.
      */
     fun prepareTilesForRender(
-        dst: GPUTexture, x: Float, y: Float, scale: Float
+        dst: GPUTexture, x: Float, y: Float, scale: Float, src: RectF? = null
     ): List<TileForDraw> {
         if (isHdr) Hdr.noteHdrDrawn(this, hdrHeadroom)
         if (mipmaps.isEmpty()) return emptyList()
@@ -680,21 +685,40 @@ class Image private constructor(
         val halfW = dst.width * mipmap.scale / (2f * scale)
         val halfH = dst.height * mipmap.scale / (2f * scale)
 
-        return mipmap.tilesInRect(cx - halfW, cy - halfH, cx + halfW, cy + halfH).map { tile ->
-            // Same reconstruction prepareForRender uses for quad.x/quad.y, evaluated at this
-            // tile's own offset instead - the formula was already general, it just happened to
-            // only ever be evaluated at one window's offset before.
+        // Crop in level texels; the whole level if none.
+        val s = mipmap.scale
+        val srcL = src?.let { it.left * s } ?: 0f
+        val srcT = src?.let { it.top * s } ?: 0f
+        val srcR = src?.let { it.right * s } ?: mipmap.width.toFloat()
+        val srcB = src?.let { it.bottom * s } ?: mipmap.height.toFloat()
+
+        val levelScale = scale / mipmap.scale
+        val tiles = mipmap.tilesInRect(
+            max(cx - halfW, srcL), max(cy - halfH, srcT), min(cx + halfW, srcR), min(cy + halfH, srcB)
+        )
+        return tiles.mapNotNull { tile ->
+            // Crop within this tile, in tile texels.
+            val l = max(srcL - tile.x, 0f)
+            val t = max(srcT - tile.y, 0f)
+            val r = min(srcR - tile.x, tile.width.toFloat())
+            val b = min(srcB - tile.y, tile.height.toFloat())
+            if (l >= r || t >= b) return@mapNotNull null
+
+            // The tile's origin in target pixels: prepareForRender's quad.x/quad.y reconstruction,
+            // evaluated at this tile's offset.
+            val tileLeft = levelScale * ((0.5f / scale + adjustedX) * mipmap.scale * dst.width +
+                    tile.x - 0.5f * mipmap.width)
+            val tileTop = levelScale * ((0.5f / scale + adjustedY) * mipmap.scale * dst.height +
+                    tile.y - 0.5f * mipmap.height)
             TileForDraw(
                 tile.texture,
                 tile.view,
                 tile.uniform,
-                Placement.whole(
-                    dst,
-                    (0.5f / scale + adjustedX) * mipmap.scale + (tile.x - 0.5f * mipmap.width) / dst.width,
-                    (0.5f / scale + adjustedY) * mipmap.scale + (tile.y - 0.5f * mipmap.height) / dst.height,
-                    scale / mipmap.scale,
-                    tile.width,
-                    tile.height,
+                Placement(
+                    tileLeft + levelScale * l, tileTop + levelScale * t,
+                    levelScale * (r - l), levelScale * (b - t),
+                    l, t, r - l, b - t,
+                    tile.width.toFloat(), tile.height.toFloat(),
                 ),
             )
         }

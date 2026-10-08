@@ -1008,7 +1008,8 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     /**
      * Shared placement math for a page's tile grid at [anchorX]/[anchorY], scaled by [pageScale]:
      * the tile region the viewport (plus a one-tile margin) wants, clipped to the page's own
-     * extent, and the snapped clip rect the shader clamps blits to.
+     * extent, and the snapped clip rect the shader clamps blits to. A [crop], in the page's
+     * pixels, narrows both to it: nothing outside is generated or drawn.
      *
      * One definition shared by [drawCore], [availableTileKeys] and [prewarm] - each used to carry
      * its own copy, which is how [prewarm] ended up silently missing a step the others had.
@@ -1034,24 +1035,33 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         anchorY: Float,
         centerYOffset: Float,
         pageScale: Float,
-        tileSize: Int
+        tileSize: Int,
+        crop: Rect? = null,
     ): GridPlacement? {
         val ts = tileSize.toFloat()
-        val (leftHalf, rightHalf) = pageHorizontalExtent(page, pageScale)
-        val halfH = pageScale * page.height / 2f
-        if (leftHalf + rightHalf <= 0f || halfH <= 0f) return null
+        // Drawn extent from the page's centre, narrowed to [crop].
+        var (left, right) = pageHorizontalExtent(page, pageScale)
+        var top = pageScale * page.height / 2f
+        var bottom = top
+        if (crop != null) {
+            left = min(left, pageScale * (page.width / 2f - crop.left))
+            right = min(right, pageScale * (crop.right - page.width / 2f))
+            top = min(top, pageScale * (page.height / 2f - crop.top))
+            bottom = min(bottom, pageScale * (crop.bottom - page.height / 2f))
+        }
+        if (left + right <= 0f || top + bottom <= 0f) return null
 
-        val wantL = max(-anchorX - ts, -leftHalf)
-        val wantR = min(dst.width - anchorX + ts, rightHalf)
-        val wantT = max(-anchorY - ts, centerYOffset - halfH)
-        val wantB = min(dst.height - anchorY + ts, centerYOffset + halfH)
+        val wantL = max(-anchorX - ts, -left)
+        val wantR = min(dst.width - anchorX + ts, right)
+        val wantT = max(-anchorY - ts, centerYOffset - top)
+        val wantB = min(dst.height - anchorY + ts, centerYOffset + bottom)
 
         val snapX = round(anchorX)
         val snapY = round(anchorY)
-        val clipL = snapX - leftHalf
-        val clipT = snapY + centerYOffset - halfH
-        val clipR = snapX + rightHalf
-        val clipB = snapY + centerYOffset + halfH
+        val clipL = snapX - left
+        val clipT = snapY + centerYOffset - top
+        val clipR = snapX + right
+        val clipB = snapY + centerYOffset + bottom
 
         return GridPlacement(
             ts, snapX, snapY, clipL, clipT, clipR, clipB, wantL, wantR, wantT, wantB
@@ -1326,7 +1336,8 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             a.pageScale,
             suppressGeneration,
             applyRetainWindow = false,
-            useStencilMask = true
+            useStencilMask = true,
+            crop = crop,
         )
     }
 
@@ -1347,7 +1358,8 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         pageScale: Float,
         suppressGeneration: Boolean,
         applyRetainWindow: Boolean,
-        useStencilMask: Boolean = false
+        useStencilMask: Boolean = false,
+        crop: Rect? = null,
     ): Boolean {
         if (page.destroyed || !page.highQuality) return false
         if (!page.hasUploadedImage) return false
@@ -1396,7 +1408,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         st.centerYOffset = centerYOffset
 
         val gp =
-            gridPlacement(page, dst, anchorX, anchorY, centerYOffset, pageScale, st.tileSize)
+            gridPlacement(page, dst, anchorX, anchorY, centerYOffset, pageScale, st.tileSize, crop)
         if (gp == null) {
             st.pending.clear()
             return false

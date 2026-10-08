@@ -1,5 +1,6 @@
 package ca.mpreg.webgpuviewer.renderer
 
+import android.graphics.RectF
 import androidx.webgpu.BlendFactor
 import androidx.webgpu.BlendOperation
 import androidx.webgpu.BufferUsage
@@ -613,8 +614,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         y: Float,
         scale: Float,
         linear: Boolean = true,
-        masked: Boolean = true
-    ) = renderImageTiled(pass, image, dst, x, y, scale, variantFor(linear, masked))
+        masked: Boolean = true,
+        /** Only this part of [image], in its pixels, in place - see [Image.prepareTilesForRender]. */
+        src: RectF? = null,
+    ) = renderImageTiled(pass, image, dst, x, y, scale, variantFor(linear, masked), src)
 
     /** As [render], for [renderFast]/[ImagePage.ImageSingle.renderPage] - draws every tile separately. */
     private fun renderImageTiled(
@@ -624,9 +627,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         x: Float,
         y: Float,
         scale: Float,
-        variant: Variant
+        variant: Variant,
+        src: RectF? = null,
     ) {
-        for (tile in image.prepareTilesForRender(dst, x, y, scale)) {
+        for (tile in image.prepareTilesForRender(dst, x, y, scale, src)) {
             drawTile(pass, dst, tile, variant)
         }
     }

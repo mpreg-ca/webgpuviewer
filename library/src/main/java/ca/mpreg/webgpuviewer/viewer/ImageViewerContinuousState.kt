@@ -1,16 +1,17 @@
 package ca.mpreg.webgpuviewer.viewer
 
 import android.graphics.Rect
+import android.graphics.RectF
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.spring
 import androidx.compose.ui.util.fastCoerceIn
 import androidx.webgpu.GPUCommandEncoder
-import androidx.webgpu.GPURenderPassEncoder
 import androidx.webgpu.GPUTexture
 import ca.mpreg.webgpuviewer.closeTo
 import ca.mpreg.webgpuviewer.draw.Draw
 import ca.mpreg.webgpuviewer.draw.clear
+import ca.mpreg.webgpuviewer.renderer.Image
 import ca.mpreg.webgpuviewer.renderer.RenderPage
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
 import ca.mpreg.webgpuviewer.renderer.solveImagePlacement
@@ -19,7 +20,6 @@ import ca.mpreg.webgpuviewer.viewer.ImageViewerContinuousState.Companion.MAX_VIS
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlin.math.max
-import kotlin.math.roundToInt
 
 class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
     companion object {
@@ -161,6 +161,18 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
             currentPageHeight = null
             invalidate()
         }
+
+    /**
+     * [crop], in [page]'s pixels, in [image]'s - placed [offsetX] from the page's centre and
+     * [imageScale] times over, as [ImagePage.ImageSingle.forEachImage] gives it.
+     */
+    private fun cropInImage(
+        crop: Rect, page: ImagePage.ImageSingle, image: Image, offsetX: Float, imageScale: Float,
+    ): RectF {
+        fun x(px: Int) = (px - page.width / 2f - offsetX) / imageScale - image.x + image.width / 2f
+        fun y(py: Int) = (py - page.height / 2f) / imageScale - image.y + image.height / 2f
+        return RectF(x(crop.left), y(crop.top), x(crop.right), y(crop.bottom))
+    }
 
     /** The part of [page] drawn, in its own pixels; null for all of it. */
     private fun cropOf(page: ImagePage.ImageSingle): Rect? {
@@ -710,29 +722,6 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
         )
     }
 
-    /**
-     * Limits [pass] to [vp]'s content band, where a cropped page's margins would otherwise land
-     * on its neighbours. False when none of it is on screen.
-     */
-    private fun scissorToSlot(
-        pass: GPURenderPassEncoder,
-        anchorX: Float,
-        anchorY: Float,
-        vp: VisiblePage,
-        scale: Float,
-        dstW: Float,
-        dstH: Float,
-    ): Boolean {
-        val l = (anchorX - scale * dstW / 2f).roundToInt().coerceIn(0, dstW.toInt())
-        val r = (anchorX + scale * dstW / 2f).roundToInt().coerceIn(0, dstW.toInt())
-        val t = (anchorY + scale * vp.docTop).roundToInt().coerceIn(0, dstH.toInt())
-        val b = (anchorY + scale * (vp.docTop + vp.contentHeight)).roundToInt()
-            .coerceIn(0, dstH.toInt())
-        if (r <= l || b <= t) return false
-        pass.setScissorRect(l, t, r - l, b - t)
-        return true
-    }
-
     override suspend fun renderSnapshot(
         encoder: GPUCommandEncoder, texture: GPUTexture, snapshot: Any
     ) {
@@ -772,9 +761,6 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
                         ?: 0f
                     val shiftY = crop?.let { pageScale * (page.height / 2f - it.exactCenterY()) }
                         ?: 0f
-                    if (crop != null &&
-                        !scissorToSlot(pass, anchorX, anchorY, vp, s.scale, dstW, dstH)
-                    ) return@forEach
 
                     // Tiles first, marking the stencil; the sampler below shades only what is
                     // left, and nothing once the draw reports full coverage.
@@ -803,7 +789,10 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
                             val (x, y) = solveImagePlacement(
                                 targetX, targetY, imageScale, image, dstW, dstH
                             )
-                            RenderPage.renderFast(pass, image, texture, x, y, imageScale)
+                            RenderPage.renderFast(
+                                pass, image, texture, x, y, imageScale,
+                                src = crop?.let { cropInImage(it, page, image, srcOffsetX, sideScale) },
+                            )
                         }
                     }
 
@@ -820,7 +809,6 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
                             (top + s.scale * vp.contentHeight) / dstH
                         )
                     }
-                    if (crop != null) pass.setScissorRect(0, 0, texture.width, texture.height)
                 }
             }
         } else {
