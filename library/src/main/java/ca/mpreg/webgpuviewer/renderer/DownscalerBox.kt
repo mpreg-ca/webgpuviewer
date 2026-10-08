@@ -61,7 +61,7 @@ fn loop_over_tile(
 }
 
 fn resolve_minify(src_start: vec2<f32>, scale: vec2<f32>) -> vec4<f32> {
-    let src_size_f = vec2<f32>(totalDimensions());
+    let src_size_f = vec2<f32>(contentSize());
     let src_end = src_start + scale;
 
     let start_i = vec2<i32>(clamp(floor(src_start), vec2<f32>(0.0), src_size_f));

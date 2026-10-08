@@ -85,10 +85,9 @@ fn catmull_rom_slow_unrolled(
     return r0 * wy[0] + r1 * wy[1] + r2 * wy[2] + r3 * wy[3];
 }
 
-fn resolve_magnify(uv: vec2<f32>) -> vec4<f32> {
-    let tex_size_u = totalDimensions();
-    let tex_size = vec2<f32>(tex_size_u);
-    let pixel_coord = uv * tex_size - 0.5;
+fn resolve_magnify(src_pos: vec2<f32>) -> vec4<f32> {
+    let tex_size_u = contentSize();
+    let pixel_coord = src_pos - 0.5;
     let base_coord = vec2<i32>(floor(pixel_coord));
     let f = fract(pixel_coord);
 

@@ -61,9 +61,31 @@ import java.nio.ByteOrder
 object RenderPage {
     private val device get() = WebGpuRenderer.device
 
-    // Thread-local ByteBuffer to avoid per-frame allocation
-    private val byteBufferLocal = ThreadLocal.withInitial {
-        ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder())
+    // Per thread, to avoid per-frame allocation. Each exactly its uniform's size: writeBuffer
+    // uploads a ByteBuffer's whole capacity, whatever its limit.
+    private val quadBytes = ThreadLocal.withInitial {
+        ByteBuffer.allocateDirect(PLACEMENT_BYTES + 16).order(ByteOrder.nativeOrder())
+    }
+    private val tileBytes = ThreadLocal.withInitial {
+        ByteBuffer.allocateDirect(PLACEMENT_BYTES).order(ByteOrder.nativeOrder())
+    }
+
+    /** dst_rect, src_rect, content, dst_size - the part [HEADER] and [TILE_HEADER] share. */
+    internal const val PLACEMENT_BYTES = 48
+
+    private fun putPlacement(buffer: ByteBuffer, p: Image.Placement, dst: GPUTexture) {
+        buffer.putFloat(p.dstLeft)
+        buffer.putFloat(p.dstTop)
+        buffer.putFloat(p.dstLeft + p.dstWidth)
+        buffer.putFloat(p.dstTop + p.dstHeight)
+        buffer.putFloat(p.srcLeft)
+        buffer.putFloat(p.srcTop)
+        buffer.putFloat(p.srcLeft + p.srcWidth)
+        buffer.putFloat(p.srcTop + p.srcHeight)
+        buffer.putFloat(p.contentWidth)
+        buffer.putFloat(p.contentHeight)
+        buffer.putFloat(dst.width.toFloat())
+        buffer.putFloat(dst.height.toFloat())
     }
 
     /**
@@ -306,16 +328,19 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         uniformBuffer.close()
     }
 
-    /** Uniforms, texture bindings and the vertex stage's view of the source, shared by both. */
+    /**
+     * Uniforms, bindings and source helpers shared by both resolves. Geometry comes from the CPU:
+     * [dst_rect] in target pixels, [src_rect] the window texels mapped onto it, [content] the
+     * window's image texels. Texture sizes never enter in - tiles may be padded (see [Mipmap]),
+     * and reads clamp to [content].
+     */
     private const val HEADER = """
 struct Uniforms {
-    offset: vec2<f32>,
-    scale: f32,
+    dst_rect: vec4<f32>,
+    src_rect: vec4<f32>,
+    content: vec2<f32>,
+    dst_size: vec2<f32>,
     tile_size: f32,
-    tiles_width: f32,
-    tiles_height: f32,
-    dst_width: f32,
-    dst_height: f32,
 }
 
 @group(0) @binding(0) var<uniform> transform: Uniforms;
@@ -329,21 +354,20 @@ struct VertexOutput {
     @location(0) uv: vec2<f32>,
 };
 
-fn totalDimensions() -> vec2<u32> {
-    let w = i32(transform.tiles_width);
-    let h = i32(transform.tiles_height);
-    if (w <= 0 || h <= 0) {
-        return vec2<u32>(0u);
-    }
+/** Image texels in the 2x2 window, padding excluded - what every read is clamped to. */
+fn contentSize() -> vec2<u32> {
+    return vec2<u32>(transform.content);
+}
 
-    let dim0 = textureDimensions(src_tex0);
-    var width = dim0.x;
-    if (w > 1) { width += textureDimensions(src_tex1).x; }
+/** The window position, in texels, that [uv] across the destination maps to. */
+fn src_at(uv: vec2<f32>) -> vec2<f32> {
+    return mix(transform.src_rect.xy, transform.src_rect.zw, uv);
+}
 
-    var height = dim0.y;
-    if (h > 1) { height += textureDimensions(src_tex2).y; }
-
-    return vec2<u32>(width, height);
+/** Source texels one destination pixel spans. */
+fn src_per_dst() -> vec2<f32> {
+    return (transform.src_rect.zw - transform.src_rect.xy) /
+        (transform.dst_rect.zw - transform.dst_rect.xy);
 }
 
 // Shared by both fragment variants: the fast path also filters in linear light now, so both need
@@ -399,21 +423,15 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     );
 
     let uv = uvs[vertex_index];
+    let pixel_pos = mix(transform.dst_rect.xy, transform.dst_rect.zw, uv);
 
-    let dst_size_f = vec2<f32>(transform.dst_width, transform.dst_height);
-    let src_size_f = vec2<f32>(totalDimensions());
-
-    // Calculate destination canvas pixel position
-    let pixel_pos = transform.scale * (transform.offset * dst_size_f + uv * src_size_f);
-
-    // Convert pixel coordinate to WebGPU NDC Space:
-    // X goes from [-1.0, 1.0] (left to right)
-    // Y goes from [1.0, -1.0] (top to bottom)
-    let ndc_x = (pixel_pos.x / dst_size_f.x) * 2.0 - 1.0;
-    let ndc_y = 1.0 - (pixel_pos.y / dst_size_f.y) * 2.0;
-
+    // Target pixels to NDC, y flipped.
     var out: VertexOutput;
-    out.position = vec4<f32>(ndc_x, ndc_y, 0.0, 1.0);
+    out.position = vec4<f32>(
+        (pixel_pos.x / transform.dst_size.x) * 2.0 - 1.0,
+        1.0 - (pixel_pos.y / transform.dst_size.y) * 2.0,
+        0.0, 1.0
+    );
     out.uv = uv;
     return out;
 }
@@ -421,15 +439,15 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 
     /**
      * Uniforms, single-texture binding and vertex stage shared by [renderFast]/[ImagePage.ImageSingle.renderPage]'s
-     * per-tile draws - no [tile_size]/[tiles_width]/[tiles_height] bookkeeping, since a draw
-     * through here is always exactly one tile.
+     * per-tile draws - one tile a draw, so no window bookkeeping. As [HEADER], [dst_rect] and
+     * [src_rect] place it and [content] is the tile's image texels, padding excluded.
      */
     private const val TILE_HEADER = """
 struct TileUniforms {
-    offset: vec2<f32>,
-    scale: f32,
-    dst_width: f32,
-    dst_height: f32,
+    dst_rect: vec4<f32>,
+    src_rect: vec4<f32>,
+    content: vec2<f32>,
+    dst_size: vec2<f32>,
 }
 
 @group(0) @binding(0) var<uniform> transform: TileUniforms;
@@ -462,14 +480,12 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> TileVertexOutput {
     );
 
     let uv = uvs[vertex_index];
-    let dst_size_f = vec2<f32>(transform.dst_width, transform.dst_height);
-    let src_size_f = vec2<f32>(textureDimensions(src_tex));
-    let pixel_pos = transform.scale * (transform.offset * dst_size_f + uv * src_size_f);
+    let pixel_pos = mix(transform.dst_rect.xy, transform.dst_rect.zw, uv);
 
     var out: TileVertexOutput;
     out.position = vec4<f32>(
-        (pixel_pos.x / dst_size_f.x) * 2.0 - 1.0,
-        1.0 - (pixel_pos.y / dst_size_f.y) * 2.0,
+        (pixel_pos.x / transform.dst_size.x) * 2.0 - 1.0,
+        1.0 - (pixel_pos.y / transform.dst_size.y) * 2.0,
         0.0, 1.0
     );
     out.uv = uv;
@@ -484,12 +500,11 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> TileVertexOutput {
     private const val TILE_SAMPLER_FS = """
 @fragment
 fn fs_main(in: TileVertexOutput) -> @location(0) vec4<f32> {
-    let size = vec2<f32>(textureDimensions(src_tex));
-    let pos = in.uv * size;
+    let pos = mix(transform.src_rect.xy, transform.src_rect.zw, in.uv);
     let p = pos - 0.5;
     let base = floor(p);
 
-    let max_coord = vec2<i32>(size) - 1;
+    let max_coord = vec2<i32>(transform.content) - 1;
     let i0 = clamp(vec2<i32>(base), vec2<i32>(0), max_coord);
     let i1 = clamp(vec2<i32>(base) + 1, vec2<i32>(0), max_coord);
     let f = p - base;
@@ -512,12 +527,11 @@ fn fs_main(in: TileVertexOutput) -> @location(0) vec4<f32> {
     private const val TILE_PLAIN_FS = """
 @fragment
 fn fs_main(in: TileVertexOutput) -> @location(0) vec4<f32> {
-    let size = vec2<f32>(textureDimensions(src_tex));
-    let pos = in.uv * size;
+    let pos = mix(transform.src_rect.xy, transform.src_rect.zw, in.uv);
     let p = pos - 0.5;
     let base = floor(p);
 
-    let max_coord = vec2<i32>(size) - 1;
+    let max_coord = vec2<i32>(transform.content) - 1;
     let i0 = clamp(vec2<i32>(base), vec2<i32>(0), max_coord);
     let i1 = clamp(vec2<i32>(base) + 1, vec2<i32>(0), max_coord);
     let f = p - base;
@@ -539,7 +553,7 @@ fn fs_main(in: TileVertexOutput) -> @location(0) vec4<f32> {
     private const val MAGNIFY_MAIN = """
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let col = resolve_magnify(in.uv);
+    let col = resolve_magnify(src_at(in.uv));
     return vec4<f32>(col.rgb * col.a, col.a);
 }
 """
@@ -550,8 +564,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // resolve_minify takes src_start, the footprint's position in source pixels, and the
     // footprint's own size - which is how many source pixels one destination pixel covers.
-    let src_start = in.uv * vec2<f32>(totalDimensions());
-    let col = resolve_minify(src_start, vec2<f32>(1.0 / transform.scale));
+    let col = resolve_minify(src_at(in.uv), src_per_dst());
     return vec4<f32>(col.rgb * col.a, col.a);
 }
 """
@@ -625,16 +638,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         res: Image.MipMapForDraw,
         variant: Variant
     ) {
-        val byteBuffer = byteBufferLocal.get()
+        val byteBuffer = quadBytes.get()
         byteBuffer.clear()
-        byteBuffer.putFloat(res.x)
-        byteBuffer.putFloat(res.y)
-        byteBuffer.putFloat(res.scale)
+        putPlacement(byteBuffer, res.placement, dst)
         byteBuffer.putFloat(res.mipmap.tilesize.toFloat())
-        byteBuffer.putFloat(res.mipmap.tilesCols.toFloat())
-        byteBuffer.putFloat(res.mipmap.tilesRows.toFloat())
-        byteBuffer.putFloat(dst.width.toFloat())
-        byteBuffer.putFloat(dst.height.toFloat())
         byteBuffer.flip()
 
         device.queue.writeBuffer(image.buffer, 0, byteBuffer)
@@ -663,13 +670,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     internal fun drawTile(
         pass: GPURenderPassEncoder, dst: GPUTexture, tile: Image.TileForDraw, variant: Variant
     ) {
-        val byteBuffer = byteBufferLocal.get()
+        val byteBuffer = tileBytes.get()
         byteBuffer.clear()
-        byteBuffer.putFloat(tile.x)
-        byteBuffer.putFloat(tile.y)
-        byteBuffer.putFloat(tile.scale)
-        byteBuffer.putFloat(dst.width.toFloat())
-        byteBuffer.putFloat(dst.height.toFloat())
+        putPlacement(byteBuffer, tile.placement, dst)
         byteBuffer.flip()
 
         device.queue.writeBuffer(tile.uniform, 0, byteBuffer)

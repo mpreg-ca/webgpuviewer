@@ -17,6 +17,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.floor
 import kotlin.math.log2
+import kotlin.math.min
 import kotlin.math.round
 
 const val BUFFER_SIZE = 96L
@@ -572,8 +573,28 @@ class Image private constructor(
         )
     }
 
+    /**
+     * Where a draw lands ([dstLeft].., target pixels), the bound texels mapped onto it
+     * ([srcLeft]..), and how many of those are image ([contentWidth]..) - reads clamp there.
+     */
+    class Placement(
+        val dstLeft: Float, val dstTop: Float, val dstWidth: Float, val dstHeight: Float,
+        val srcLeft: Float, val srcTop: Float, val srcWidth: Float, val srcHeight: Float,
+        val contentWidth: Float, val contentHeight: Float,
+    ) {
+        companion object {
+            /** All [width] x [height] texels, [scale] times over at normalised ([x], [y]). */
+            fun whole(dst: GPUTexture, x: Float, y: Float, scale: Float, width: Int, height: Int) =
+                Placement(
+                    scale * x * dst.width, scale * y * dst.height, scale * width, scale * height,
+                    0f, 0f, width.toFloat(), height.toFloat(),
+                    width.toFloat(), height.toFloat(),
+                )
+        }
+    }
+
     class MipMapForDraw(
-        val mipmap: Mipmap, val quad: Mipmap.Quad, val x: Float, val y: Float, val scale: Float
+        val mipmap: Mipmap, val quad: Mipmap.Quad, val placement: Placement, val scale: Float
     )
 
     fun prepareForRender(dst: GPUTexture, x: Float, y: Float, scale: Float): MipMapForDraw? {
@@ -608,13 +629,21 @@ class Image private constructor(
         val vy = round(-adjustedY * dst.height * mipmap.scale + mipmap.height / 2).toInt()
 
         val quad = mipmap.getQuad(vx, vy)
+        val levelScale = scale / mipmap.scale
 
         return MipMapForDraw(
             mipmap,
             quad,
-            (0.5f / scale + adjustedX) * mipmap.scale + (quad.x - 0.5f * mipmap.width) / dst.width,
-            (0.5f / scale + adjustedY) * mipmap.scale + (quad.y - 0.5f * mipmap.height) / dst.height,
-            scale / mipmap.scale
+            Placement.whole(
+                dst,
+                (0.5f / scale + adjustedX) * mipmap.scale + (quad.x - 0.5f * mipmap.width) / dst.width,
+                (0.5f / scale + adjustedY) * mipmap.scale + (quad.y - 0.5f * mipmap.height) / dst.height,
+                levelScale,
+                // Image texels in the window: two tiles, or the rest of the level.
+                min(mipmap.width - quad.x, 2 * mipmap.tilesize),
+                min(mipmap.height - quad.y, 2 * mipmap.tilesize),
+            ),
+            levelScale,
         )
     }
 
@@ -623,9 +652,7 @@ class Image private constructor(
         val texture: GPUTexture,
         val view: GPUTextureView,
         val uniform: GPUBuffer,
-        val x: Float,
-        val y: Float,
-        val scale: Float
+        val placement: Placement,
     )
 
     /**
@@ -661,9 +688,14 @@ class Image private constructor(
                 tile.texture,
                 tile.view,
                 tile.uniform,
-                (0.5f / scale + adjustedX) * mipmap.scale + (tile.x - 0.5f * mipmap.width) / dst.width,
-                (0.5f / scale + adjustedY) * mipmap.scale + (tile.y - 0.5f * mipmap.height) / dst.height,
-                scale / mipmap.scale
+                Placement.whole(
+                    dst,
+                    (0.5f / scale + adjustedX) * mipmap.scale + (tile.x - 0.5f * mipmap.width) / dst.width,
+                    (0.5f / scale + adjustedY) * mipmap.scale + (tile.y - 0.5f * mipmap.height) / dst.height,
+                    scale / mipmap.scale,
+                    tile.width,
+                    tile.height,
+                ),
             )
         }
     }

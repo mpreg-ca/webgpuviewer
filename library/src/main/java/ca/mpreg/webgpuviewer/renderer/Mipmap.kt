@@ -120,7 +120,7 @@ class Mipmap(
                 if (checkOom) device.pushErrorScope(ErrorFilter.OutOfMemory)
                 val texture = device.createTexture(
                     GPUTextureDescriptor(
-                        // Aligned, for [writeSpan]: up to three padding columns.
+                        // Aligned, for [writeSpan]: up to three padding columns, never read.
                         size = GPUExtent3D(alignedWidth(tileWidth), tileHeight),
                         format = format,
                         usage = TextureUsage.TextureBinding or TextureUsage.CopyDst or TextureUsage.RenderAttachment,
@@ -281,13 +281,10 @@ class Mipmap(
      * Copies columns [x0, x1) of rows [y, y + rows) of [pixels], a full image of this level, into
      * [texture] - the tile at column [tileX], [tileWidth] wide - from its row [dstY].
      *
-     * Every copy is a multiple of [COPY_ALIGNMENT] texels wide: a PowerVR Rogue driver lost the
-     * device, as out-of-memory, on pages 1125 pixels wide with almost nothing allocated - and
-     * still did padded to an even width, but not to a multiple of four. Padding only the texture,
-     * or only the source rows' stride, with the copy at the real width, lost it too: the copy's
-     * own width is what has to be aligned. So the span is widened to aligned columns,
-     * and where that runs off the tile into its padding, the last real column is repeated there
-     * from a packed copy of the rows.
+     * Copies are a multiple of [COPY_ALIGNMENT] texels wide: a PowerVR Rogue driver loses the
+     * device, reported as out-of-memory, on other widths, and padding only the texture or the
+     * source stride doesn't help. Past the image's columns the rows are packed with zeros, never
+     * read - draws clamp to [Image.Placement]'s content.
      */
     private fun writeSpan(
         texture: GPUTexture, pixels: ByteBuffer, tileX: Int, tileWidth: Int,
@@ -321,11 +318,7 @@ class Mipmap(
                 val rowStart = (((y + r).toLong() * width + tileX + start) * bytesPerPixel).toInt()
                 src.limit(rowStart + realBytes).position(rowStart)
                 data.put(src)
-                // The padding columns: the last real pixel again.
-                repeat(end - real) {
-                    src.limit(rowStart + realBytes).position(rowStart + realBytes - bytesPerPixel)
-                    data.put(src)
-                }
+                repeat((end - real) * bytesPerPixel) { data.put(0) }
             }
             data.flip()
             layout = GPUTexelCopyBufferLayout(offset = 0, bytesPerRow = spanBytes, rowsPerImage = rows)
@@ -352,6 +345,9 @@ class Mipmap(
         val view: GPUTextureView,
         val x: Int,
         val y: Int,
+        /** Image texels in the tile - the texture may be wider, see [writeSpan]. */
+        val width: Int,
+        val height: Int,
         val uniform: GPUBuffer
     )
 
@@ -366,7 +362,10 @@ class Mipmap(
     private fun tileUniformFor(index: Int): GPUBuffer {
         val arr = tileUniforms ?: arrayOfNulls<GPUBuffer>(textures.size).also { tileUniforms = it }
         return arr[index] ?: device.createBuffer(
-            GPUBufferDescriptor(size = 32, usage = BufferUsage.Uniform or BufferUsage.CopyDst)
+            GPUBufferDescriptor(
+                size = RenderPage.PLACEMENT_BYTES.toLong(),
+                usage = BufferUsage.Uniform or BufferUsage.CopyDst,
+            )
         ).also { arr[index] = it }
     }
 
@@ -397,6 +396,8 @@ class Mipmap(
                         textureViews[idx],
                         col * tilesize,
                         row * tilesize,
+                        min(tilesize, width - col * tilesize),
+                        min(tilesize, height - row * tilesize),
                         tileUniformFor(idx)
                     )
                 )

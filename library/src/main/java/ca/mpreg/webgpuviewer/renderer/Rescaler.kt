@@ -27,9 +27,10 @@ abstract class Rescaler {
 
     /**
      * The WGSL the first step resolves with, composed into [RenderPage.filtered]'s pipeline. An
-     * [Upscaler] defines `resolve_magnify(uv) -> vec4<f32>`, a [Downscaler]
-     * `resolve_minify(src_start, scale) -> vec4<f32>`, both against [RenderPage]'s header -
-     * `transform`, `src_tex0..3`, `totalLoad`, `to_linear_exact`.
+     * [Upscaler] defines `resolve_magnify(src_pos) -> vec4<f32>`, a [Downscaler]
+     * `resolve_minify(src_start, scale) -> vec4<f32>`, positions in window texels, both against
+     * [RenderPage]'s header - `transform`, `src_tex0..3`, `contentSize`, `totalLoad`,
+     * `to_linear_exact`. Reads stay within `contentSize()`: past it is padding.
      */
     abstract val code: String
 
