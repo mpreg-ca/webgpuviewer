@@ -236,6 +236,7 @@ internal class ComposePageHost(context: Context) : FrameLayout(context) {
             }
             // Only tells the capture pass which pages the window has; both are drawn either way.
             page.presenting = renderer.placement == null
+            if (renderer.hasView) renderer.placeView()
 
             // Before the page moves on its own, so the surface draws the frame that takes it over.
             if (!covers(state, page, renderer) && state.coveredBy === page) state.coveredBy = null
@@ -375,14 +376,18 @@ internal class ComposePageHost(context: Context) : FrameLayout(context) {
                 covering = renderer.page
             }
             val saved = canvas.save()
-            canvas.translate(placement.left, placement.top)
-            canvas.scale(placement.scale, placement.scale)
             // Opaque like the snapshot under it, or antialiased edges blend over their own copy and the
             // page looks heavier still than moving.
             renderer.page.backgroundColor?.let { background ->
-                canvas.clipRect(0, 0, renderer.page.width, renderer.page.height)
+                canvas.clipRect(
+                    placement.left,
+                    placement.top,
+                    placement.left + renderer.page.width * placement.scale,
+                    placement.top + renderer.page.height * placement.scale,
+                )
                 canvas.drawColor(background)
             }
+            // Placed by its own transform - see [PageRenderer.placeView].
             drawChild(canvas, renderer.view, drawingTime)
             canvas.restoreToCount(saved)
         }
@@ -402,9 +407,14 @@ internal class ComposePageHost(context: Context) : FrameLayout(context) {
         state !is ImageViewerContinuousState && renderer.placement != null && !page.destroyed &&
                 page.backgroundColor != null && page === state.getPage(0)
 
+    /** Set while [PageRenderer.placeView] moves a view, which invalidates it without changing its content. */
+    private var placingView = false
+
     /** Compose invalidations mark a page dirty; without this every page would re-upload every frame. */
     override fun onDescendantInvalidated(child: View, target: View) {
         super.onDescendantInvalidated(child, target)
+        // A placement moved the view; its content is unchanged.
+        if (placingView) return
         val renderer = renderers.values.firstOrNull { it.hasView && it.view === child } ?: return
         renderer.markDirty()
         // Drawn by the window while it is placed, so the window has to be told as well.
@@ -618,6 +628,7 @@ internal class ComposePageHost(context: Context) : FrameLayout(context) {
             if (view.parent == null) {
                 warmup = WARMUP_FRAMES
                 addView(view)
+                placeView()
             }
 
             // Every pass: rotation, dual-page switches and content changes all resize it.
@@ -815,6 +826,31 @@ internal class ComposePageHost(context: Context) : FrameLayout(context) {
         fun acceptsInput(): Boolean {
             if (released || page.destroyed) return false
             return placement != null
+        }
+
+        /**
+         * Puts [placement] on the view as its transform, so the window draws it there and accessibility
+         * reports the content where it's drawn rather than at the origin. Touches are mapped by hand and
+         * skip it. A page the window isn't carrying is left out of accessibility.
+         */
+        fun placeView() {
+            val placement = placement
+            placingView = true
+            try {
+                if (placement == null) {
+                    view.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+                    return
+                }
+                view.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_AUTO
+                view.pivotX = 0f
+                view.pivotY = 0f
+                view.translationX = placement.left
+                view.translationY = placement.top
+                view.scaleX = placement.scale
+                view.scaleY = placement.scale
+            } finally {
+                placingView = false
+            }
         }
 
         /** Through [placement], which the window draws the content through too. */
