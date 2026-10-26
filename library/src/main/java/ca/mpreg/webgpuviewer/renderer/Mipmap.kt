@@ -58,6 +58,12 @@ class Mipmap(
          */
         private const val UPLOAD_CHUNK_BYTES = 1 shl 20
 
+        /**
+         * Render thread time [upload] takes before yielding. A yield per chunk waits out a frame
+         * each, which held a large page's upload to about a chunk per frame.
+         */
+        private const val UPLOAD_SLICE_NANOS = 6_000_000L
+
         /** Texel multiple every tile copy is widened to - see [writeSpan]. Two isn't enough. */
         private const val COPY_ALIGNMENT = 4
 
@@ -243,12 +249,16 @@ class Mipmap(
                 textureViews.add(texture.createView())
 
                 var row = 0
+                var sliceStart = System.nanoTime()
                 while (row < tileHeight) {
                     val rows = min(rowsPerChunk, tileHeight - row)
                     writeSpan(texture, pixels, x, tileWidth, x, x + tileWidth, y + row, row, rows)
 
                     row += rows
-                    yield()
+                    if (System.nanoTime() - sliceStart >= UPLOAD_SLICE_NANOS) {
+                        yield()
+                        sliceStart = System.nanoTime()
+                    }
                 }
             }
         }

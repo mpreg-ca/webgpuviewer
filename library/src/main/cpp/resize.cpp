@@ -2,6 +2,7 @@
 #include <cmath>
 #include <jni.h>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 #ifdef __ARM_NEON
@@ -10,6 +11,13 @@
 
 float srgbToLinearLUT[256];
 std::once_flag lutsOnceFlag;
+
+/* linearToSRGBExact sampled finely enough that it differs only at rounding
+ * edges - pow per channel was most of a halving's time. */
+constexpr int LINEAR_STEPS = 1 << 16;
+uint8_t linearToSrgbLUT[LINEAR_STEPS + 1];
+
+inline uint8_t linearToSRGBExact(float linearVal);
 
 /* A bare bool flag races: two mipmap levels can resize concurrently on first
  * use. */
@@ -20,6 +28,9 @@ void initLUTs() {
       srgbToLinearLUT[i] = (val01 <= 0.04045f)
                                ? (val01 / 12.92f)
                                : std::pow((val01 + 0.055f) / 1.055f, 2.4f);
+    }
+    for (int i = 0; i <= LINEAR_STEPS; i++) {
+      linearToSrgbLUT[i] = linearToSRGBExact(i / (float)LINEAR_STEPS);
     }
   });
 }
@@ -37,12 +48,47 @@ inline uint8_t linearToSRGBExact(float linearVal) {
   return static_cast<uint8_t>(std::roundf(srgb01 * 255.0f));
 }
 
+inline uint8_t linearToSRGBFast(float linearVal) {
+  if (linearVal <= 0.0f)
+    return 0;
+  if (linearVal >= 1.0f)
+    return 255;
+  return linearToSrgbLUT[(int)(linearVal * LINEAR_STEPS + 0.5f)];
+}
+
 inline uint8_t exactLinearToAlpha(float linearAlpha) {
   if (linearAlpha <= 0.0f)
     return 0;
   if (linearAlpha >= 1.0f)
     return 255;
   return static_cast<uint8_t>(std::roundf(linearAlpha * 255.0f));
+}
+
+static void halveRows(const uint32_t *src, uint32_t *dst, int srcWidth,
+                      int dstWidth, int yStart, int yEnd);
+static void areaRows(const uint32_t *src, uint32_t *dst, int srcWidth,
+                     int srcHeight, int dstWidth, int dstHeight, int yStart,
+                     int yEnd);
+
+/* Splits [0, rows) into bands, one per core up to 4, run concurrently. */
+template <typename F> static void parallelRows(int rows, F work) {
+  int threads = (int)std::min(4u, std::max(1u, std::thread::hardware_concurrency()));
+  threads = std::min(threads, std::max(1, rows / 64));
+  if (threads == 1) {
+    work(0, rows);
+    return;
+  }
+  std::vector<std::thread> pool;
+  int band = (rows + threads - 1) / threads;
+  for (int t = 1; t < threads; ++t) {
+    int start = t * band;
+    if (start >= rows)
+      break;
+    pool.emplace_back(work, start, std::min(rows, start + band));
+  }
+  work(0, std::min(rows, band));
+  for (auto &th : pool)
+    th.join();
 }
 
 /* Box filter in linear light to any size; a larger one repeats pixels. A
@@ -83,10 +129,56 @@ static void resizeArea(JNIEnv *env, jobject src_buffer, jobject dst_buffer,
   if (dstCapacity < 0 || dstCapacity < dstNeeded)
     return;
 
+  parallelRows(dstHeight, [=](int yStart, int yEnd) {
+    if (dstWidth == srcWidth / 2 && dstHeight == srcHeight / 2) {
+      halveRows(src, dst, srcWidth, dstWidth, yStart, yEnd);
+    } else {
+      areaRows(src, dst, srcWidth, srcHeight, dstWidth, dstHeight, yStart,
+               yEnd);
+    }
+  });
+}
+
+/* Each 2x2 block in linear light, the common mipmap case without the general
+ * filter's fractional weights. */
+static void halveRows(const uint32_t *src, uint32_t *dst, int srcWidth,
+                      int dstWidth, int yStart, int yEnd) {
+  for (int y = yStart; y < yEnd; ++y) {
+    const uint32_t *row0 = src + (size_t)(y * 2) * srcWidth;
+    const uint32_t *row1 = row0 + srcWidth;
+    for (int x = 0; x < dstWidth; ++x) {
+      const uint32_t px[4] = {row0[x * 2], row0[x * 2 + 1], row1[x * 2],
+                              row1[x * 2 + 1]};
+      float sumA = 0.0f, sumR = 0.0f, sumG = 0.0f, sumB = 0.0f;
+      for (uint32_t pixel : px) {
+        float aVal = ((pixel >> 24) & 0xFF) / 255.0f;
+        sumA += aVal;
+        sumR += srgbToLinearLUT[(pixel >> 16) & 0xFF] * aVal;
+        sumG += srgbToLinearLUT[(pixel >> 8) & 0xFF] * aVal;
+        sumB += srgbToLinearLUT[pixel & 0xFF] * aVal;
+      }
+      uint32_t finalA = 0, finalR = 0, finalG = 0, finalB = 0;
+      float a = sumA * 0.25f;
+      if (a > 0.00001f) {
+        float invAlpha = 1.0f / sumA;
+        finalR = linearToSRGBFast(std::min(1.0f, sumR * invAlpha));
+        finalG = linearToSRGBFast(std::min(1.0f, sumG * invAlpha));
+        finalB = linearToSRGBFast(std::min(1.0f, sumB * invAlpha));
+      }
+      finalA = exactLinearToAlpha(a);
+      dst[(size_t)y * dstWidth + x] =
+          (finalA << 24) | (finalR << 16) | (finalG << 8) | finalB;
+    }
+  }
+}
+
+static void areaRows(const uint32_t *src, uint32_t *dst, int srcWidth,
+                     int srcHeight, int dstWidth, int dstHeight, int yStart,
+                     int yEnd) {
   double scaleX = (double)srcWidth / dstWidth;
   double scaleY = (double)srcHeight / dstHeight;
 
-  for (int y = 0; y < dstHeight; ++y) {
+  for (int y = yStart; y < yEnd; ++y) {
     double srcYStart = y * scaleY;
     double srcYEnd = srcYStart + scaleY;
     int yMin = std::max(0, (int)srcYStart);
@@ -205,9 +297,9 @@ static void resizeArea(JNIEnv *env, jobject src_buffer, jobject dst_buffer,
         }
 
         finalA = exactLinearToAlpha(finalLinearA);
-        finalR = linearToSRGBExact(finalLinearR);
-        finalG = linearToSRGBExact(finalLinearG);
-        finalB = linearToSRGBExact(finalLinearB);
+        finalR = linearToSRGBFast(finalLinearR);
+        finalG = linearToSRGBFast(finalLinearG);
+        finalB = linearToSRGBFast(finalLinearB);
       }
 #else
       float sumA = 0.0f, sumR = 0.0f, sumG = 0.0f, sumB = 0.0f;
@@ -279,9 +371,9 @@ static void resizeArea(JNIEnv *env, jobject src_buffer, jobject dst_buffer,
         }
 
         finalA = exactLinearToAlpha(finalLinearA);
-        finalR = linearToSRGBExact(finalLinearR);
-        finalG = linearToSRGBExact(finalLinearG);
-        finalB = linearToSRGBExact(finalLinearB);
+        finalR = linearToSRGBFast(finalLinearR);
+        finalG = linearToSRGBFast(finalLinearG);
+        finalB = linearToSRGBFast(finalLinearB);
       }
 #endif
 
