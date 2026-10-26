@@ -446,6 +446,7 @@ internal class ComposePageHost(context: Context) : FrameLayout(context) {
             }
             // After the walk, so a refusal can't reach a page before the one above it saw the down.
             refused.forEach { (renderer, map) -> cancel(renderer, map, ev) }
+            state?.contentClaimedTouch = owner != null
             return owner != null
         }
 

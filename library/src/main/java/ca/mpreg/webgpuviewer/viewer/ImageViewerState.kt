@@ -222,6 +222,9 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
 
     var onPageChange: ((Int) -> Unit)? = null
     var onTap: ((Offset) -> Unit)? = null
+
+    /** A page's own content took the last touch down, as a button: not a tap for [onTap]. */
+    internal var contentClaimedTouch = false
     var onLongTap: ((Offset) -> Unit)? = null
 
     /**

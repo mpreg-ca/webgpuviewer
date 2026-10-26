@@ -5,6 +5,7 @@ import kotlinx.coroutines.sync.Mutex
 import android.content.Context
 import android.os.SystemClock
 import android.util.Log
+import androidx.compose.animation.core.AnimationSpec
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.spring
@@ -1978,11 +1979,13 @@ open class ImagePage {
         animateTo(targetScale = homeScale)
     }
 
+    /** [animationSpec] runs 0 to 1 over the move; the default springs. */
     fun animateTo(
         origin: Offset? = null,
         targetX: Float = homeX,
         targetY: Float = homeY,
         targetScale: Float = scale,
+        animationSpec: AnimationSpec<Float> = spring(stiffness = Spring.StiffnessMediumLow, visibilityThreshold = 0.002f),
     ) {
         animationJob?.cancel()
 
@@ -2028,11 +2031,7 @@ open class ImagePage {
             animationTargetScale = targetScale
             if (scaleChanging) isScaleAnimating = true
             try {
-                animate(
-                    0f, 1f, animationSpec = spring(
-                        stiffness = Spring.StiffnessMediumLow, visibilityThreshold = 0.002f
-                    )
-                ) { value, _ ->
+                animate(0f, 1f, animationSpec = animationSpec) { value, _ ->
                     val currentScale = startScale + (targetScale - startScale) * value
                     val c = if (scaleChanging) {
                         ((1 / currentScale - 1 / startScale) / diffEnd).fastCoerceIn(0f, 1f)

@@ -170,7 +170,7 @@ fun ImageViewerContinuous(
                     val secondDown =
                         if (state.doubleTapGesturesEnabled) waitForDown(doubleTapTimeout) else null
                     if (secondDown == null) {
-                        if (!stoppedMotion) {
+                        if (!stoppedMotion && !state.contentClaimedTouch) {
                             state.onTap?.invoke(
                                 Offset(
                                     firstDown.position.x / state.width,
@@ -354,15 +354,20 @@ fun ImageViewerContinuous(
                             if (!canceled) {
                                 val change = event.changes[0]
 
-                                if (event.changes.size > 1 && event.changes.all { it.pressed }) {
+                                val twoFingers = event.changes.size > 1 && event.changes.all { it.pressed }
+                                if (twoFingers) {
                                     if (single) {
                                         longPressJob?.cancel()
                                         velocityTracker.resetTracking()
                                     }
                                     single = false
+                                    // The fingers' midpoint: one finger's own speed would fling a
+                                    // still pinch on release.
+                                    velocityTracker.addPosition(change.uptimeMillis, event.calculateCentroid(useCurrent = true))
+                                } else if (single && change.pressed) {
+                                    // Not the lift: it repeats the last position - see ImageViewer.
+                                    velocityTracker.addPointerInputChange(change)
                                 }
-
-                                velocityTracker.addPointerInputChange(change)
 
                                 val pan = event.calculatePan()
                                 // Off leaves two fingers panning without scaling.
