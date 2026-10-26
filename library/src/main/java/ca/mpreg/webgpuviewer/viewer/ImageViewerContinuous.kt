@@ -1,7 +1,10 @@
 package ca.mpreg.webgpuviewer.viewer
 
+import android.view.animation.AnimationUtils
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.DecayAnimation
 import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.VectorConverter
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.exponentialDecay
 import androidx.compose.animation.core.spring
@@ -17,6 +20,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.PointerEventPass
@@ -48,7 +52,6 @@ fun ImageViewerContinuous(
     val scope = rememberCoroutineScope()
     val view = LocalView.current
     val density = LocalDensity.current
-    val flingX = remember { Animatable(0f) }
     val decay = remember(density) { splineBasedDecay<Float>(density) }
 
     // What the platform considers a fling at all. A fixed figure here was three times this on a
@@ -430,15 +433,21 @@ fun ImageViewerContinuous(
                         if ((lastEventTime - lastMoveTime) < 100 &&
                             (abs(velocity.y) > minFlingVelocity || abs(velocity.x) > minFlingVelocity)
                         ) {
-                            state.animationJob = scope.launch(NormalMotionDurationScale) {
+                            // Timed from the lift, as RecyclerView's is: a decay timed from its own
+                            // first frame holds the strip still for a frame or two after the finger
+                            // leaves, then jumps.
+                            val liftNanos = AnimationUtils.currentAnimationTimeMillis() * 1_000_000
+                            state.animationJob = scope.launch {
                                 state.isFlinging = true
                                 try {
                                     val speed = hypot(velocity.x, velocity.y)
                                     val dirX = velocity.x / speed
                                     val dirY = velocity.y / speed
-                                    flingX.snapTo(0f)
+                                    val fling = DecayAnimation(decay, Float.VectorConverter, 0f, speed)
                                     var last = 0f
-                                    flingX.animateDecay(speed, decay) {
+                                    do {
+                                        val playNanos = (withFrameNanos { it } - liftNanos).coerceAtLeast(0)
+                                        val value = fling.getValueFromNanos(playNanos)
                                         val delta = value - last
                                         last = value
                                         val maxOffsetX =
@@ -456,10 +465,9 @@ fun ImageViewerContinuous(
                                         // "mid-fling". It never reverses, so one frame
                                         // settles it - but only one that asked to move.
                                         if (delta != 0f && state.offsetX == prevOffsetX && state.scrollY == prevScrollY) {
-                                            throw FlingStalled()
+                                            break
                                         }
-                                    }
-                                } catch (_: FlingStalled) {
+                                    } while (!fling.isFinishedFromNanos(playNanos))
                                 } finally {
                                     // Invalidate so generation resumes without waiting on the
                                     // next gesture.
