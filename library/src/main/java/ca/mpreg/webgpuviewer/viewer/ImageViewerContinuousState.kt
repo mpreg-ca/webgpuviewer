@@ -81,7 +81,12 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
 
     val doubleTapScale: Float get() = homeScale * 2f
 
-    val maxScale: Float get() = max(doubleTapScale * 2f, 4f)
+    /** Highest [scale] a gesture may settle at. Unset, twice [doubleTapScale] and at least 4. */
+    var maxScale = 0f
+        get() {
+            if (field > 0) return field
+            return max(doubleTapScale * 2f, 4f)
+        }
 
     /**
      * True while a gesture is driving zoom (pinch, drag, fling, snap-back). Gates every visible
