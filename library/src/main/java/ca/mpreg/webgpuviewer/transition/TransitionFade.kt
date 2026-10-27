@@ -1,10 +1,8 @@
 package ca.mpreg.webgpuviewer.transition
 
 import androidx.compose.ui.geometry.Offset
-import androidx.webgpu.BufferUsage
 import androidx.webgpu.GPUBindGroupDescriptor
 import androidx.webgpu.GPUBindGroupEntry
-import androidx.webgpu.GPUBufferDescriptor
 import androidx.webgpu.GPUColor
 import androidx.webgpu.GPUColorTargetState
 import androidx.webgpu.GPUCommandEncoder
@@ -65,7 +63,7 @@ struct Uniforms {
     bg2: vec4<f32>,
 }
 
-@group(0) @binding(0) var<uniform> uniforms: Uniforms;
+var<immediate> uniforms: Uniforms;
 @group(0) @binding(1) var tex1: texture_2d<f32>;
 @group(0) @binding(2) var tex2: texture_2d<f32>;
 @group(0) @binding(3) var tex_sampler: sampler;
@@ -152,10 +150,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         putColor(byteBuffer, bg2)
         byteBuffer.flip()
 
-        val uniformBuffer = WebGpuRenderer.device.createBuffer(
-            GPUBufferDescriptor(size = 48, usage = BufferUsage.Uniform or BufferUsage.CopyDst)
-        )
-        WebGpuRenderer.device.queue.writeBuffer(uniformBuffer, 0, byteBuffer)
 
         val targetView = dst.createView()
         val pass = encoder.beginRenderPass(
@@ -173,12 +167,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
         val blendPipeline = blendPipelines[dst.format]
         pass.setPipeline(blendPipeline)
+        pass.setImmediates(0, byteBuffer)
         pass.setTransientBindGroup(
             0, WebGpuRenderer.device.createBindGroup(
                 GPUBindGroupDescriptor(
                     layout = blendPipeline.groupLayout(),
                     entries = arrayOf(
-                        GPUBindGroupEntry(0, buffer = uniformBuffer),
                         GPUBindGroupEntry(1, textureView = cachedView1),
                         GPUBindGroupEntry(2, textureView = cachedView2),
                         GPUBindGroupEntry(3, sampler = blendSampler)
@@ -187,7 +181,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             )
         )
         pass.draw(6)
-        pass.endAndRelease(targetView, uniformBuffer)
+        pass.endAndRelease(targetView)
     }
 
     override fun render(

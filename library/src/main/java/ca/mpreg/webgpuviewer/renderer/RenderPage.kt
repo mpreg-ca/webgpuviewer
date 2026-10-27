@@ -3,14 +3,11 @@ package ca.mpreg.webgpuviewer.renderer
 import android.graphics.RectF
 import androidx.webgpu.BlendFactor
 import androidx.webgpu.BlendOperation
-import androidx.webgpu.BufferUsage
 import androidx.webgpu.CompareFunction
 import androidx.webgpu.GPUBindGroupDescriptor
 import androidx.webgpu.GPUBindGroupEntry
 import androidx.webgpu.GPUBlendComponent
 import androidx.webgpu.GPUBlendState
-import androidx.webgpu.GPUBuffer
-import androidx.webgpu.GPUBufferDescriptor
 import androidx.webgpu.GPUColorTargetState
 import androidx.webgpu.GPUDepthStencilState
 import androidx.webgpu.GPUFragmentState
@@ -66,8 +63,7 @@ import java.nio.ByteOrder
 object RenderPage {
     private val device get() = WebGpuRenderer.device
 
-    // Per thread, to avoid per-frame allocation. Each exactly its uniform's size: writeBuffer
-    // uploads a ByteBuffer's whole capacity, whatever its limit.
+    // Each exactly its struct's size: setImmediates sends the whole capacity.
     private val quadBytes = ThreadLocal.withInitial {
         ByteBuffer.allocateDirect(PLACEMENT_BYTES + 16).order(ByteOrder.nativeOrder())
     }
@@ -230,7 +226,7 @@ struct Params {
     color: vec4<f32>,
 }
 
-@group(0) @binding(0) var<uniform> params: Params;
+var<immediate> params: Params;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -327,28 +323,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         byteBuffer.putFloat(a)
         byteBuffer.flip()
 
-        val uniformBuffer = device.createBuffer(
-            GPUBufferDescriptor(size = 32L, usage = BufferUsage.Uniform or BufferUsage.CopyDst)
-        )
-        device.queue.writeBuffer(uniformBuffer, 0, byteBuffer)
-
-        val maskedRectPipeline = maskedRectPipelines[format]
-        pass.setPipeline(maskedRectPipeline)
-        pass.setTransientBindGroup(
-            0, device.createBindGroup(
-                GPUBindGroupDescriptor(
-                    layout = maskedRectPipeline.groupLayout(), entries = arrayOf(
-                        GPUBindGroupEntry(0, buffer = uniformBuffer)
-                    )
-                )
-            )
-        )
+        pass.setPipeline(maskedRectPipelines[format])
+        pass.setImmediates(0, byteBuffer)
         pass.draw(6)
-        uniformBuffer.close()
     }
 
     /**
-     * Uniforms, bindings and source helpers shared by both resolves. Geometry comes from the CPU:
+     * Immediates, bindings and source helpers shared by both resolves. Geometry comes from the CPU:
      * [dst_rect] in target pixels, [src_rect] the window texels mapped onto it, [content] the
      * window's image texels. Texture sizes never enter in - tiles may be padded (see [Mipmap]),
      * and reads clamp to [content].
@@ -362,7 +343,7 @@ struct Uniforms {
     tile_size: f32,
 }
 
-@group(0) @binding(0) var<uniform> transform: Uniforms;
+var<immediate> transform: Uniforms;
 @group(0) @binding(1) var src_tex0: texture_2d<f32>;
 @group(0) @binding(2) var src_tex1: texture_2d<f32>;
 @group(0) @binding(3) var src_tex2: texture_2d<f32>;
@@ -457,9 +438,10 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 """
 
     /**
-     * Uniforms, single-texture binding and vertex stage shared by [renderFast]/[ImagePage.ImageSingle.renderPage]'s
-     * per-tile draws - one tile a draw, so no window bookkeeping. As [HEADER], [dst_rect] and
-     * [src_rect] place it and [content] is the tile's image texels, padding excluded.
+     * Immediates, single-texture binding and vertex stage shared by [renderFast] and
+     * [ImagePage.ImageSingle.renderPage]'s per-tile draws - one tile a draw, so no window
+     * bookkeeping. As [HEADER], [dst_rect] and [src_rect] place it and [content] is the tile's
+     * image texels, padding excluded.
      */
     private const val TILE_HEADER = """
 struct TileUniforms {
@@ -469,7 +451,7 @@ struct TileUniforms {
     dst_size: vec2<f32>,
 }
 
-@group(0) @binding(0) var<uniform> transform: TileUniforms;
+var<immediate> transform: TileUniforms;
 @group(0) @binding(1) var src_tex: texture_2d<f32>;
 
 struct TileVertexOutput {
@@ -603,8 +585,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         extend: Extend? = null,
         /** See [Image.prepareForRender]. */
         levelZero: Boolean = false,
-        /** See [draw]. */
-        uniform: GPUBuffer = image.buffer,
         /** See [Image.prepareForRender]. */
         source: Mipmap? = null,
     ) {
@@ -613,7 +593,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // carrying both resolves needs registers for the union of them. Against
         // [Image.MipMapForDraw.scale], not the caller's - picking a mip level moves the scale the
         // draw resolves at, and moves it toward 1, the very boundary being tested.
-        draw(pass, dst, res, if (res.scale < 1f) filtered.minify else filtered.magnify, uniform)
+        draw(pass, dst, res, if (res.scale < 1f) filtered.minify else filtered.magnify)
     }
 
     /** Picks one of the 4 tile pipelines - shared by [renderFast] and [ImagePage.ImageSingle.renderPage]. */
@@ -664,29 +644,22 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         dst: GPUTexture,
         res: Image.MipMapForDraw,
         variant: Variant,
-        /**
-         * Where the placement is written. A draw reads it when the pass runs, not when recorded,
-         * so two draws of one image in one command buffer (two blocks) need a buffer each, or both
-         * see the last write.
-         */
-        uniform: GPUBuffer,
     ) {
         val byteBuffer = quadBytes.get()
         byteBuffer.clear()
         putPlacement(byteBuffer, res.placement, dst)
         byteBuffer.putFloat(res.mipmap.tilesize.toFloat())
+        // Struct padding.
+        byteBuffer.putFloat(0f).putFloat(0f).putFloat(0f)
         byteBuffer.flip()
 
-        device.queue.writeBuffer(uniform, 0, byteBuffer)
-
         val pipeline = variant.pipeline(dst.format)
-        val entries = arrayOf(
-            GPUBindGroupEntry(0, buffer = uniform),
-        ).plus(res.quad.tileViews.mapIndexed { i, view ->
+        val entries = res.quad.tileViews.mapIndexed { i, view ->
             GPUBindGroupEntry(1 + i, textureView = view)
-        })
+        }.toTypedArray()
 
         pass.setPipeline(pipeline)
+        pass.setImmediates(0, byteBuffer)
         pass.setTransientBindGroup(
             0, device.createBindGroup(
                 GPUBindGroupDescriptor(layout = pipeline.groupLayout(), entries = entries)
@@ -696,10 +669,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         pass.draw(6)
     }
 
-    /**
-     * Draw one tile from [Image.prepareTilesForRender], into its own persistent uniform buffer
-     * rather than the shared scratch one [draw] uses - see [Mipmap.TileRect]'s doc for why.
-     */
     internal fun drawTile(
         pass: GPURenderPassEncoder,
         dst: GPUTexture,
@@ -707,31 +676,25 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         variant: Variant,
         useLut: Boolean,
     ) {
+        val lut = if (useLut) lut else null
         val byteBuffer = tileBytes.get()
         byteBuffer.clear()
         putPlacement(byteBuffer, tile.placement, dst)
         byteBuffer.flip()
 
-        device.queue.writeBuffer(tile.uniform, 0, byteBuffer)
-
-        val lut = if (useLut) lut else null
         val pipeline = variant.pipeline(dst.format, lut != null)
         pass.setPipeline(pipeline)
+        pass.setImmediates(0, byteBuffer)
         // samplerVariant's stencil test reads against 1 - see [TileRenderer.blitPipelineStencilWrite],
         // the only thing that ever writes this attachment.
         if (variant === samplerVariant) pass.setStencilReference(1)
         val entries = if (lut == null) {
-            arrayOf(
-                GPUBindGroupEntry(0, buffer = tile.uniform),
-                GPUBindGroupEntry(1, textureView = tile.view),
-            )
+            arrayOf(GPUBindGroupEntry(1, textureView = tile.view))
         } else {
             arrayOf(
-                GPUBindGroupEntry(0, buffer = tile.uniform),
                 GPUBindGroupEntry(1, textureView = tile.view),
-                GPUBindGroupEntry(2, buffer = lut.uniforms),
-                GPUBindGroupEntry(3, textureView = lut.view!!),
-                GPUBindGroupEntry(4, sampler = lut.sampler),
+                GPUBindGroupEntry(2, textureView = lut.view!!),
+                GPUBindGroupEntry(3, sampler = lut.sampler),
             )
         }
         pass.setTransientBindGroup(

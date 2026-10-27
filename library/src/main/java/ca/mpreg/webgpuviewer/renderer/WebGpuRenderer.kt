@@ -23,6 +23,7 @@ import androidx.webgpu.GPUTexture
 import androidx.webgpu.SurfaceGetCurrentTextureStatus
 import androidx.webgpu.TextureUsage
 import androidx.webgpu.UncapturedErrorCallback
+import androidx.webgpu.WGSLLanguageFeatureName
 import androidx.webgpu.helper.Util.windowFromSurface
 import androidx.webgpu.helper.initLibrary
 import ca.mpreg.webgpuviewer.filter.FullscreenFilterChain
@@ -61,6 +62,9 @@ class WebGpuRenderer {
          */
         var maxTextureDimension2D = 4096
             private set
+
+        /** What every draw's immediates fit in; several use all of it. */
+        private const val IMMEDIATE_BYTES = 64
         private val mutex = Mutex()
 
         var offsetX: Float = 0f
@@ -225,14 +229,22 @@ class WebGpuRenderer {
                             requiredFeatures = @SuppressLint("WrongConstant") requiredFeatures,
                             requiredLimits = GPULimits(
                                 maxTextureDimension2D = adapterLimits.maxTextureDimension2D,
+                                maxImmediateSize = adapterLimits.maxImmediateSize,
                             ),
                         )
                     )
-                    maxTextureDimension2D = device.getLimits().maxTextureDimension2D
+                    val limits = device.getLimits()
+                    maxTextureDimension2D = limits.maxTextureDimension2D
                     Log.i(
                         "WebGpuRenderer",
                         "maxTextureDimension2D adapter=${adapterLimits.maxTextureDimension2D} device=$maxTextureDimension2D"
                     )
+                    check(
+                        limits.maxImmediateSize >= IMMEDIATE_BYTES &&
+                                instance.hasWGSLLanguageFeature(
+                                    WGSLLanguageFeatureName.ImmediateAddressSpace
+                                )
+                    ) { "no $IMMEDIATE_BYTES bytes of immediates (${limits.maxImmediateSize})" }
                 } catch (e: Throwable) {
                     // Fails soft via initError - a driver init failure shouldn't poison the whole class.
                     Log.e("WebGpuRenderer", "Failed to initialize WebGPU", e)

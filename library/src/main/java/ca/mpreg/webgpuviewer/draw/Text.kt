@@ -760,7 +760,7 @@ struct Params {
     _pad2: f32,
 }
 
-@group(0) @binding(0) var<uniform> params: Params;
+var<immediate> params: Params;
 @group(0) @binding(1) var atlas_tex: texture_2d<f32>;
 @group(0) @binding(2) var atlas_sampler: sampler;
 
@@ -1127,10 +1127,6 @@ private fun drawGlyphBatch(
     paramsBytes.putFloat(0f)
     paramsBytes.putFloat(0f)
     paramsBytes.flip()
-    val paramsBuffer = device.createBuffer(
-        GPUBufferDescriptor(size = 32L, usage = BufferUsage.Uniform or BufferUsage.CopyDst)
-    )
-    device.queue.writeBuffer(paramsBuffer, 0, paramsBytes.slice())
 
     val pipeline = pipelines[format]
     pass.setPipeline(pipeline)
@@ -1139,14 +1135,13 @@ private fun drawGlyphBatch(
         0, device.createBindGroup(
             GPUBindGroupDescriptor(
                 layout = pipeline.groupLayout(), entries = arrayOf(
-                    GPUBindGroupEntry(0, buffer = paramsBuffer),
                     GPUBindGroupEntry(1, textureView = atlasView),
                     GPUBindGroupEntry(2, sampler = sampler),
                 )
             )
         )
     )
+    pass.setImmediates(0, paramsBytes.slice())
     pass.draw(6, glyphCount)
     vertexBuffer.close()
-    paramsBuffer.close()
 }

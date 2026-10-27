@@ -1,10 +1,7 @@
 package ca.mpreg.webgpuviewer.filter
 
 import androidx.webgpu.AddressMode
-import androidx.webgpu.BufferUsage
 import androidx.webgpu.FilterMode
-import androidx.webgpu.GPUBuffer
-import androidx.webgpu.GPUBufferDescriptor
 import androidx.webgpu.GPUExtent3D
 import androidx.webgpu.GPUSampler
 import androidx.webgpu.GPUSamplerDescriptor
@@ -26,8 +23,8 @@ import java.util.concurrent.atomic.AtomicReference
 
 /**
  * A [Lut3d] as a 3D texture, for [ca.mpreg.webgpuviewer.renderer.TileRenderer]'s image LUT. Bind
- * [uniforms], [view] and [sampler] where [wgsl] declares them. [lut] may be set from any thread;
- * [prepare] uploads on the render thread.
+ * [view] and [sampler] where [wgsl] declares them. [lut] may be set from any thread; [prepare]
+ * uploads on the render thread.
  */
 internal class Lut3dTexture {
     private val device get() = WebGpuRenderer.device
@@ -55,14 +52,6 @@ internal class Lut3dTexture {
         private set
 
     private var lutSize = 0
-
-    val uniforms: GPUBuffer by lazy {
-        device.createBuffer(
-            GPUBufferDescriptor(
-                label = LABEL, size = 16, usage = BufferUsage.Uniform or BufferUsage.CopyDst
-            )
-        )
-    }
 
     // Trilinear between entries, clamped so the outermost half-texel doesn't wrap around.
     val sampler: GPUSampler by lazy {
@@ -144,24 +133,7 @@ internal class Lut3dTexture {
                 bytesPerRow = lut.size * 8, rowsPerImage = lut.size
             )
         )
-
-        writeUniforms(lut)
         return replaced
-    }
-
-    private val uniformBytes: ByteBuffer by lazy {
-        ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder())
-    }
-
-    private fun writeUniforms(lut: Lut3d) {
-        val bytes = uniformBytes
-        bytes.clear()
-        bytes.putFloat(lut.size.toFloat())
-        bytes.putFloat(if (lut.limitedRange) 1f else 0f)
-        bytes.putFloat(0f)
-        bytes.putFloat(0f)
-        bytes.flip()
-        device.queue.writeBuffer(uniforms, 0, bytes)
     }
 
     companion object {
@@ -194,27 +166,17 @@ internal class Lut3dTexture {
             return (sign or ((mantissa + (1 shl (shift - 1))) ushr shift)).toShort()
         }
 
-        // [uniforms], [view], [sampler] at bindings [first]..[first]+2 of [group], and
-        // `apply_lut` over straight-alpha colour.
+        // [view], [sampler] at bindings [first], [first]+1 of [group], and `apply_lut` over
+        // straight-alpha colour.
         fun wgsl(group: Int, first: Int) = """
-struct LutParams {
-    size: f32,
-    limited: f32,
-    unused: vec2<f32>,
-}
-
-@group($group) @binding($first) var<uniform> lut_params: LutParams;
-@group($group) @binding(${first + 1}) var lut_tex: texture_3d<f32>;
-@group($group) @binding(${first + 2}) var lut_sampler: sampler;
+@group($group) @binding($first) var lut_tex: texture_3d<f32>;
+@group($group) @binding(${first + 1}) var lut_sampler: sampler;
 
 fn apply_lut(rgb: vec3<f32>) -> vec3<f32> {
-    let colour = clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0));
-
-    let levels = mix(vec3<f32>(16.0 / 255.0), vec3<f32>(235.0 / 255.0), colour);
-    let lookup = mix(colour, levels, lut_params.limited);
+    let lookup = clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0));
 
     // Entry centres, so the ends of the table land on the ends of the range.
-    let half_texel = 0.5 / lut_params.size;
+    let half_texel = 0.5 / f32(textureDimensions(lut_tex).x);
     let coord = mix(vec3<f32>(half_texel), vec3<f32>(1.0 - half_texel), lookup);
     // Level 0: callers may be in non-uniform control flow, where implicit derivatives are not
     // allowed.

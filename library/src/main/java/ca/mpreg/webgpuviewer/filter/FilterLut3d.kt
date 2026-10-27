@@ -1,11 +1,8 @@
 package ca.mpreg.webgpuviewer.filter
 
 import androidx.webgpu.AddressMode
-import androidx.webgpu.BufferUsage
 import androidx.webgpu.FilterMode
 import androidx.webgpu.GPUBindGroupEntry
-import androidx.webgpu.GPUBuffer
-import androidx.webgpu.GPUBufferDescriptor
 import androidx.webgpu.GPUExtent3D
 import androidx.webgpu.GPUSampler
 import androidx.webgpu.GPUSamplerDescriptor
@@ -47,7 +44,6 @@ class FilterLut3d(lut: Lut3d? = null) : FilterFullscreen() {
             if (field === value) return
             field = value
             pending = value
-            limitedRange = value?.limitedRange ?: false
             invalidate()
         }
 
@@ -61,20 +57,6 @@ class FilterLut3d(lut: Lut3d? = null) : FilterFullscreen() {
         set(value) {
             if (field == value) return
             field = value
-            uniformsDirty = true
-            invalidate()
-        }
-
-    /**
-     * Look the table up over TV levels (16..235) rather than the full 0..255 range. Set from
-     * [Lut3d.limitedRange] whenever [lut] is assigned, so a madVR table gets this on its own.
-     */
-    @Volatile
-    var limitedRange: Boolean = false
-        set(value) {
-            if (field == value) return
-            field = value
-            uniformsDirty = true
             invalidate()
         }
 
@@ -92,17 +74,6 @@ class FilterLut3d(lut: Lut3d? = null) : FilterFullscreen() {
     private var texture: GPUTexture? = null
     private var view: GPUTextureView? = null
     private var lutSize = 0
-
-    @Volatile
-    private var uniformsDirty = true
-
-    private val uniforms: GPUBuffer by lazy {
-        device.createBuffer(
-            GPUBufferDescriptor(
-                label = label, size = 16, usage = BufferUsage.Uniform or BufferUsage.CopyDst
-            )
-        )
-    }
 
     // Trilinear between entries, clamped so the outermost half-texel doesn't wrap around.
     private val lutSampler: GPUSampler by lazy {
@@ -127,14 +98,9 @@ class FilterLut3d(lut: Lut3d? = null) : FilterFullscreen() {
         // real regardless rather than leave the pass unbindable.
         val next = pendingRef.getAndSet(null) ?: if (texture == null) Lut3d.identity() else null
         if (next != null) upload(next)
-        if (uniformsDirty) {
-            uniformsDirty = false
-            writeUniforms()
-        }
     }
 
     override fun entries(src: GPUTextureView): Array<GPUBindGroupEntry> = arrayOf(
-        GPUBindGroupEntry(0, buffer = uniforms),
         GPUBindGroupEntry(1, textureView = src),
         GPUBindGroupEntry(2, textureView = view!!),
         GPUBindGroupEntry(3, sampler = lutSampler),
@@ -148,7 +114,6 @@ class FilterLut3d(lut: Lut3d? = null) : FilterFullscreen() {
         // Not just the texture: upload() skips creating one when the size already matches.
         lutSize = 0
         pending = lut
-        uniformsDirty = true
         rebind()
     }
 
@@ -196,22 +161,17 @@ class FilterLut3d(lut: Lut3d? = null) : FilterFullscreen() {
 
         // The bind group holds the old view when the table changed size.
         rebind()
-        uniformsDirty = true
     }
 
-    private val uniformBytes: ByteBuffer by lazy {
-        ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder())
-    }
+    // `Params` in [FRAGMENT]. Render thread only.
+    private val paramBytes = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder())
 
-    private fun writeUniforms() {
-        val bytes = uniformBytes
+    override fun immediates(): ByteBuffer {
+        val bytes = paramBytes
         bytes.clear()
-        bytes.putFloat(lutSize.toFloat())
-        bytes.putFloat(if (limitedRange) 1f else 0f)
         bytes.putFloat(intensity)
-        bytes.putFloat(0f)
         bytes.flip()
-        device.queue.writeBuffer(uniforms, 0, bytes)
+        return bytes
     }
 
     private companion object {
@@ -244,13 +204,10 @@ class FilterLut3d(lut: Lut3d? = null) : FilterFullscreen() {
 
         const val FRAGMENT = """
 struct Params {
-    size: f32,
-    limited: f32,
     intensity: f32,
-    unused: f32,
 }
 
-@group(0) @binding(0) var<uniform> params: Params;
+var<immediate> params: Params;
 @group(0) @binding(1) var src: texture_2d<f32>;
 @group(0) @binding(2) var lut: texture_3d<f32>;
 @group(0) @binding(3) var lut_sampler: sampler;
@@ -267,12 +224,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // The frame is premultiplied - undo that, so the table sees the colour itself.
     let colour = clamp(texel.rgb / texel.a, vec3<f32>(0.0), vec3<f32>(1.0));
 
-    let levels = mix(vec3<f32>(16.0 / 255.0), vec3<f32>(235.0 / 255.0), colour);
-    let lookup = mix(colour, levels, params.limited);
-
     // Entry centres, so the ends of the table land on the ends of the range.
-    let half_texel = 0.5 / params.size;
-    let coord = mix(vec3<f32>(half_texel), vec3<f32>(1.0 - half_texel), lookup);
+    let half_texel = 0.5 / f32(textureDimensions(lut).x);
+    let coord = mix(vec3<f32>(half_texel), vec3<f32>(1.0 - half_texel), colour);
     // Level 0 explicitly: the early return above makes this non-uniform control flow, where
     // textureSample's implicit derivatives are not allowed.
     let mapped = textureSampleLevel(lut, lut_sampler, coord, 0.0).rgb;

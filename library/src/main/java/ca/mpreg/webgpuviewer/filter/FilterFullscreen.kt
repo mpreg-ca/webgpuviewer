@@ -10,6 +10,7 @@ import ca.mpreg.webgpuviewer.renderer.FormatKeyed
 import ca.mpreg.webgpuviewer.renderer.Fullscreen
 import ca.mpreg.webgpuviewer.renderer.endAndRelease
 import ca.mpreg.webgpuviewer.renderer.groupLayout
+import java.nio.ByteBuffer
 
 /**
  * A [Filter] that is one fragment pass over the whole frame - the shape every per-pixel filter
@@ -27,8 +28,8 @@ abstract class FilterFullscreen : Filter() {
 
     /**
      * WGSL fragment stage. [Fullscreen.VERTEX] is prepended, so `VertexOutput` and `in.uv` are
-     * in scope. Read once; pipelines are shared by text and never freed, so keep per-instance
-     * values in uniforms.
+     * in scope. Read once; pipelines are shared by text and never freed, so pass per-instance
+     * values through [immediates].
      */
     protected abstract val code: String
 
@@ -44,6 +45,9 @@ abstract class FilterFullscreen : Filter() {
 
     /** Group 0 bindings for this pass, with the chain's current input as [src]. */
     protected abstract fun entries(src: GPUTextureView): Array<GPUBindGroupEntry>
+
+    /** The data for [code]'s `var<immediate>`, if it declares one. */
+    protected open fun immediates(): ByteBuffer? = null
 
     // Keyed by the view's native handle, which outlives the wrapper object. Zero is free: a
     // live handle is never null.
@@ -113,6 +117,7 @@ abstract class FilterFullscreen : Filter() {
         val pass = Fullscreen.beginPass(encoder, dst, label)
         try {
             pass.setPipeline(pipeline)
+            immediates()?.let { pass.setImmediates(0, it) }
             pass.setBindGroup(0, group)
             pass.draw(3)
         } finally {

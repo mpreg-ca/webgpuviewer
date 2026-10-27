@@ -2,11 +2,8 @@ package ca.mpreg.webgpuviewer.renderer
 
 import android.graphics.Rect
 import android.util.Log
-import androidx.webgpu.BufferUsage
 import androidx.webgpu.ErrorFilter
 import androidx.webgpu.ErrorType
-import androidx.webgpu.GPUBuffer
-import androidx.webgpu.GPUBufferDescriptor
 import androidx.webgpu.GPUExtent3D
 import androidx.webgpu.GPUOrigin3D
 import androidx.webgpu.GPUTexelCopyBufferLayout
@@ -353,8 +350,6 @@ class Mipmap(
         // reference alone leaks the native object: destroy() frees the memory, close() releases the handle.
         // tiles and tileViews only alias entries of textures and textureViews, so closing those twice would
         // release a handle that is already gone - they are just cleared.
-        tileUniforms?.forEach { it?.destroyAndRelease() }
-        tileUniforms = null
         // Not the placeholder a [writable] level's empty tiles share.
         val flags = allocated
         textureViews.forEachIndexed { i, view -> if (flags == null || flags[i]) view.close() }
@@ -472,10 +467,7 @@ class Mipmap(
         val tiles: List<GPUTexture>, val tileViews: List<GPUTextureView>, val x: Int, val y: Int
     )
 
-    /**
-     * One tile overlapping a queried rect, at its own pixel offset within the mipmap. [uniform] is
-     * its own persistent placement buffer - see [tileUniforms] for why it needs one of its own.
-     */
+    /** One tile overlapping a queried rect, at its own pixel offset within the mipmap. */
     class TileRect(
         val texture: GPUTexture,
         val view: GPUTextureView,
@@ -484,26 +476,7 @@ class Mipmap(
         /** Image texels in the tile - the texture may be wider, see [writeSpan]. */
         val width: Int,
         val height: Int,
-        val uniform: GPUBuffer
     )
-
-    /**
-     * One small uniform buffer per physical tile, created on first use and rewritten every frame
-     * that tile is drawn - never shared between tiles. `writeBuffer` calls all land before any
-     * command buffer submitted afterwards executes, so a shared buffer would let the last of
-     * several tiles drawn in one frame win for all of them; one buffer per tile has no such race.
-     */
-    private var tileUniforms: Array<GPUBuffer?>? = null
-
-    private fun tileUniformFor(index: Int): GPUBuffer {
-        val arr = tileUniforms ?: arrayOfNulls<GPUBuffer>(textures.size).also { tileUniforms = it }
-        return arr[index] ?: device.createBuffer(
-            GPUBufferDescriptor(
-                size = RenderPage.PLACEMENT_BYTES.toLong(),
-                usage = BufferUsage.Uniform or BufferUsage.CopyDst,
-            )
-        ).also { arr[index] = it }
-    }
 
     /**
      * Every tile overlapping [left]..[right] by [top]..[bottom] (mipmap pixels) - unlike [getQuad]
@@ -534,7 +507,6 @@ class Mipmap(
                         row * tilesize,
                         min(tilesize, width - col * tilesize),
                         min(tilesize, height - row * tilesize),
-                        tileUniformFor(idx)
                     )
                 )
             }

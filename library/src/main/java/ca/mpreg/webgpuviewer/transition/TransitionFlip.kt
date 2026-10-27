@@ -3,23 +3,15 @@ package ca.mpreg.webgpuviewer.transition
 import androidx.compose.ui.geometry.Offset
 import androidx.webgpu.BlendFactor
 import androidx.webgpu.BlendOperation
-import androidx.webgpu.BufferBindingType
-import androidx.webgpu.BufferUsage
 import androidx.webgpu.FilterMode
 import androidx.webgpu.GPUBindGroupDescriptor
 import androidx.webgpu.GPUBindGroupEntry
-import androidx.webgpu.GPUBindGroupLayoutDescriptor
-import androidx.webgpu.GPUBindGroupLayoutEntry
 import androidx.webgpu.GPUBlendComponent
 import androidx.webgpu.GPUBlendState
-import androidx.webgpu.GPUBuffer
-import androidx.webgpu.GPUBufferBindingLayout
-import androidx.webgpu.GPUBufferDescriptor
 import androidx.webgpu.GPUColor
 import androidx.webgpu.GPUColorTargetState
 import androidx.webgpu.GPUCommandEncoder
 import androidx.webgpu.GPUFragmentState
-import androidx.webgpu.GPUPipelineLayoutDescriptor
 import androidx.webgpu.GPUPrimitiveState
 import androidx.webgpu.GPURenderPassColorAttachment
 import androidx.webgpu.GPURenderPassDescriptor
@@ -34,7 +26,6 @@ import androidx.webgpu.GPUTextureView
 import androidx.webgpu.GPUVertexState
 import androidx.webgpu.LoadOp
 import androidx.webgpu.PrimitiveTopology.Companion.TriangleList
-import androidx.webgpu.ShaderStage
 import androidx.webgpu.StoreOp
 import ca.mpreg.webgpuviewer.draw.Draw
 import ca.mpreg.webgpuviewer.draw.rect
@@ -71,7 +62,8 @@ import kotlin.math.sin
 object TransitionFlip : Transition() {
     override val premultipliedOutput = true
 
-    private const val UNIFORM_SIZE = 96
+    /** `Uniforms` in [code], padded to its 16-byte alignment. */
+    private const val IMMEDIATE_BYTES = 64
 
     /** Total curl at the halfway point, in radians of tangent turn from spine to outer edge. */
     private const val BEND = 0.95f
@@ -93,8 +85,13 @@ object TransitionFlip : Transition() {
     /** Shadow grid then leaf grid, in one draw - see `vs_main`. */
     private const val VERTICES = SHEET_VERTICES * 2
 
+    private const val FLAG_FRONT = 1
+    private const val FLAG_BACK = 2
+    private const val FLAG_FORWARD = 4
+    private const val FLAG_PAINTED = 8
+
     private val byteBufferLocal = ThreadLocal.withInitial {
-        ByteBuffer.allocateDirect(UNIFORM_SIZE).order(ByteOrder.nativeOrder())
+        ByteBuffer.allocateDirect(IMMEDIATE_BYTES).order(ByteOrder.nativeOrder())
     }
 
     private val flipSampler by lazy {
@@ -110,22 +107,14 @@ object TransitionFlip : Transition() {
         /** The face it lands on, in page 2's cache. Mirrors [frontRect] when there is none. */
         val backRect: FloatArray,
         val spine: Float,
-        /** +1 resting right of the spine, -1 left. */
-        val dir: Float,
-        /** Rotation about the spine, 0 (at rest) to PI (landed). */
-        val phi: Float,
-        /** Tangent turn from spine to outer edge - the curl. [phi] + this <= PI. */
-        val bend: Float,
-        /** Spine to the far edge of the sheet - both faces fit inside it. */
-        val len: Float,
-        val top: Float,
-        val bottom: Float,
+        /** Resting right of the spine, else left. */
+        val forward: Boolean,
+        /** Turn progress, 0 (at rest) to 1 (landed); [code] derives the curl from it. */
+        val t: Float,
         val aspect: Float,
         /** Whether that face has a cached page to sample; blank if not. */
         val hasFront: Boolean,
         val hasBack: Boolean,
-        /** Shading strength, 0 at either end - see [LIT_ENDS]. */
-        val shading: Float,
     )
 
     /**
@@ -152,31 +141,12 @@ object TransitionFlip : Transition() {
     private fun blankAlpha(page1: ImagePage, page2: ImagePage): Float =
         if (surfaceFill(page1, page2)) 1f else 0f
 
-    /** [punchPipeline]'s bindings: the uniform, which is all `fs_punch` and `vs_main` read. */
-    private val punchBindGroupLayout by lazy {
-        device.createBindGroupLayout(
-            GPUBindGroupLayoutDescriptor(
-                entries = arrayOf(
-                    GPUBindGroupLayoutEntry(
-                        binding = 0,
-                        visibility = ShaderStage.Vertex or ShaderStage.Fragment,
-                        buffer = GPUBufferBindingLayout(type = BufferBindingType.Uniform)
-                    )
-                )
-            )
-        )
-    }
-
     /**
      * The pipeline that cuts a blank face out of the frame - see [blankAlpha].
      *
      * Its own, because only the blend can do this: zero over the destination, where the usual
      * `src + dst * (1 - src.a)` has no output that returns an opaque page to transparent. Same
-     * module and uniforms as the leaf, entry point `fs_punch`.
-     *
-     * Its layout is spelled out, not inferred: `fs_punch` samples nothing, so an inferred layout
-     * holds the uniform alone and rejects the leaf's own bind group - which fails the pass, and
-     * with it every draw in the frame.
+     * module and immediates as the leaf, entry point `fs_punch`, which binds nothing.
      */
     private val punchPipelines = FormatKeyed { format ->
         val shaderModule = device.createShaderModule(
@@ -189,9 +159,6 @@ object TransitionFlip : Transition() {
         )
         device.createRenderPipeline(
             GPURenderPipelineDescriptor(
-                layout = device.createPipelineLayout(
-                    GPUPipelineLayoutDescriptor(bindGroupLayouts = arrayOf(punchBindGroupLayout))
-                ),
                 vertex = GPUVertexState(shaderModule, entryPoint = "vs_main"),
                 fragment = GPUFragmentState(
                     shaderModule, entryPoint = "fs_punch", targets = arrayOf(
@@ -274,7 +241,7 @@ object TransitionFlip : Transition() {
         )
         try {
             val blank = blankAlpha(page1, page2)
-            val uniforms = uniforms(leaf, background, blank)
+            val immediates = immediates(leaf, background, blank > 0f)
             val cutting = blank <= 0f && (!leaf.hasFront || !leaf.hasBack)
 
             // The sheet folds over itself, so a pixel can be covered twice - by the part before
@@ -287,20 +254,19 @@ object TransitionFlip : Transition() {
             val cutLast = !leaf.hasBack
 
             if (!cutting || cutLast) {
-                attach(leafPass, pipelines[dst.format], uniforms, front, back)
+                attach(leafPass, pipelines[dst.format], immediates, front, back)
                 leafPass.draw(VERTICES)
                 // After the leaf, so the near face goes with the hole it stands in.
-                if (cutting) cut(leafPass, dst.format, uniforms)
+                if (cutting) cut(leafPass, dst.format, immediates)
             } else {
                 // Shadow first, so the cut takes it too - one hanging in the hole is cast by a
                 // sheet nobody can see.
-                attach(leafPass, pipelines[dst.format], uniforms, front, back)
+                attach(leafPass, pipelines[dst.format], immediates, front, back)
                 leafPass.draw(SHEET_VERTICES)
-                cut(leafPass, dst.format, uniforms)
-                attach(leafPass, pipelines[dst.format], uniforms, front, back)
+                cut(leafPass, dst.format, immediates)
+                attach(leafPass, pipelines[dst.format], immediates, front, back)
                 leafPass.draw(SHEET_VERTICES, 1, SHEET_VERTICES)
             }
-            uniforms.close()
         } finally {
             leafPass.endAndRelease(targetView)
         }
@@ -324,7 +290,6 @@ object TransitionFlip : Transition() {
         // Page 1's hinge: blending toward page 2's would slide the fold across mid-turn.
         val spine = spine1 ?: spine2 ?: return null
         // Forward: front is page 1's right half, back is page 2's left. Backward mirrors both.
-        val dir = if (forward) 1f else -1f
         val rawFront = page1.leafRect(dst, left = !forward)
         val rawBack = page2.leafRect(dst, left = forward)
         // A side with no page mirrors the other across the spine, to size its blank sheet by, and
@@ -338,27 +303,18 @@ object TransitionFlip : Transition() {
 
         val lenFront = if (forward) frontRect[2] - spine else spine - frontRect[0]
         val lenBack = if (forward) spine - backRect[0] else backRect[2] - spine
-        val len = max(lenFront, lenBack)
-        if (len <= 0f) return null
-
-        // Flat at both ends, curliest halfway.
-        val bend = MIN_BEND + (BEND - MIN_BEND) * sin(PI * t).toFloat()
+        // `leaf_len` in [code] recomputes this; keep the two in step.
+        if (max(lenFront, lenBack) <= 0f) return null
 
         return Leaf(
             frontRect = frontRect,
             backRect = backRect,
             spine = spine,
-            dir = dir,
-            // Held back so the outer edge stops at PI - strip order needs height monotonic.
-            phi = min((PI * t).toFloat(), PI.toFloat() - bend),
-            bend = bend,
-            len = len,
-            top = min(frontRect[1], backRect[1]),
-            bottom = max(frontRect[3], backRect[3]),
+            forward = forward,
+            t = t,
             aspect = dst.width.toFloat() / dst.height,
             hasFront = rawFront != null && cached1 != null,
             hasBack = rawBack != null && cached2 != null,
-            shading = min(smoothstep(t / LIT_ENDS), smoothstep((1f - t) / LIT_ENDS)),
         )
     }
 
@@ -389,55 +345,45 @@ object TransitionFlip : Transition() {
     }
 
     /**
-     * This frame's uniforms. [blank] paints a face with no page, at [blankAlpha] - see [blankAlpha].
+     * This frame's `Uniforms`. [blank], an ARGB colour, paints a face with no page if [painted] -
+     * see [blankAlpha].
      */
-    private fun uniforms(leaf: Leaf, blank: Int, blankAlpha: Float): GPUBuffer {
+    private fun immediates(leaf: Leaf, blank: Int, painted: Boolean): ByteBuffer {
+        var flags = 0
+        if (leaf.hasFront) flags = flags or FLAG_FRONT
+        if (leaf.hasBack) flags = flags or FLAG_BACK
+        if (leaf.forward) flags = flags or FLAG_FORWARD
+        if (painted) flags = flags or FLAG_PAINTED
+
         val byteBuffer = byteBufferLocal.get()
         byteBuffer.clear()
         for (v in leaf.frontRect) byteBuffer.putFloat(v)
         for (v in leaf.backRect) byteBuffer.putFloat(v)
         byteBuffer.putFloat(leaf.spine)
-        byteBuffer.putFloat(leaf.dir)
-        byteBuffer.putFloat(leaf.phi)
-        byteBuffer.putFloat(leaf.bend)
-        byteBuffer.putFloat(leaf.len)
-        byteBuffer.putFloat(leaf.top)
-        byteBuffer.putFloat(leaf.bottom)
+        byteBuffer.putFloat(leaf.t)
         byteBuffer.putFloat(leaf.aspect)
-        byteBuffer.putFloat(if (leaf.hasFront) 1f else 0f)
-        byteBuffer.putFloat(if (leaf.hasBack) 1f else 0f)
-        byteBuffer.putFloat(leaf.shading)
-        byteBuffer.putFloat(0f)
-        // Premultiplied, so the colour goes in scaled by its own alpha.
-        byteBuffer.putFloat((((blank shr 16) and 0xFF) / 255f) * blankAlpha)
-        byteBuffer.putFloat((((blank shr 8) and 0xFF) / 255f) * blankAlpha)
-        byteBuffer.putFloat(((blank and 0xFF) / 255f) * blankAlpha)
-        byteBuffer.putFloat(blankAlpha)
+        byteBuffer.putInt(flags)
+        byteBuffer.putInt(blank)
+        // Struct padding.
+        byteBuffer.putInt(0).putInt(0).putInt(0)
         byteBuffer.flip()
-
-        val uniformBuffer = device.createBuffer(
-            GPUBufferDescriptor(
-                size = UNIFORM_SIZE.toLong(), usage = BufferUsage.Uniform or BufferUsage.CopyDst
-            )
-        )
-        device.queue.writeBuffer(uniformBuffer, 0, byteBuffer)
-        return uniformBuffer
+        return byteBuffer
     }
 
     /** Set [pipeline] and its own bind group on [pass] - each pipeline's layout wants its own. */
     private fun attach(
         pass: GPURenderPassEncoder,
         pipeline: GPURenderPipeline,
-        uniforms: GPUBuffer,
+        immediates: ByteBuffer,
         front: GPUTextureView,
         back: GPUTextureView,
     ) {
         pass.setPipeline(pipeline)
+        pass.setImmediates(0, immediates)
         pass.setTransientBindGroup(
             0, device.createBindGroup(
                 GPUBindGroupDescriptor(
                     layout = pipeline.groupLayout(), entries = arrayOf(
-                        GPUBindGroupEntry(0, buffer = uniforms),
                         GPUBindGroupEntry(1, textureView = front),
                         GPUBindGroupEntry(2, textureView = back),
                         GPUBindGroupEntry(3, sampler = flipSampler),
@@ -448,16 +394,9 @@ object TransitionFlip : Transition() {
     }
 
     /** Cut the blank face out, over the leaf's own half of the grid - see [punchPipeline]. */
-    private fun cut(pass: GPURenderPassEncoder, format: Int, uniforms: GPUBuffer) {
+    private fun cut(pass: GPURenderPassEncoder, format: Int, immediates: ByteBuffer) {
         pass.setPipeline(punchPipelines[format])
-        pass.setTransientBindGroup(
-            0, device.createBindGroup(
-                GPUBindGroupDescriptor(
-                    layout = punchBindGroupLayout,
-                    entries = arrayOf(GPUBindGroupEntry(0, buffer = uniforms))
-                )
-            )
-        )
+        pass.setImmediates(0, immediates)
         pass.draw(SHEET_VERTICES, 1, SHEET_VERTICES)
     }
 
@@ -471,17 +410,55 @@ struct Uniforms {
     // The leaf's two faces within their cached surfaces: normalised (x1, y1, x2, y2).
     front_rect: vec4<f32>,
     back_rect: vec4<f32>,
-    // spine x, direction (+1 resting right of the spine), turn angle, curl
-    geom: vec4<f32>,
-    // sheet length, top y, bottom y, surface aspect
-    span: vec4<f32>,
-    // front textured, back textured, shading strength, unused
-    flags: vec4<f32>,
-    // What a face with no page behind it is painted, premultiplied - alpha 0 to leave it unpainted.
-    blank: vec4<f32>,
+    spine: f32,
+    // Turn progress, 0 at rest to 1 landed.
+    t: f32,
+    aspect: f32,
+    // Bits: front textured, back textured, resting right of the spine, blank face painted.
+    flags: u32,
+    // ARGB: what a face with no page behind it is painted, if flagged.
+    blank: u32,
 }
 
-@group(0) @binding(0) var<uniform> flip: Uniforms;
+var<immediate> flip: Uniforms;
+
+fn leaf_dir() -> f32 { return select(-1.0, 1.0, (flip.flags & ${FLAG_FORWARD}u) != 0u); }
+
+/// Tangent turn from spine to outer edge - flat at both ends, curliest halfway.
+fn leaf_bend() -> f32 { return ${MIN_BEND} + (${BEND} - ${MIN_BEND}) * sin(PI * flip.t); }
+
+/// Rotation about the spine, held back so the outer edge stops at PI - strip order needs height
+/// monotonic.
+fn leaf_phi() -> f32 { return min(PI * flip.t, PI - leaf_bend()); }
+
+/// Spine to the far edge of the sheet - both faces fit inside it.
+fn leaf_len() -> f32 {
+    let forward = leaf_dir() > 0.0;
+    let front = select(flip.spine - flip.front_rect.x, flip.front_rect.z - flip.spine, forward);
+    let back = select(flip.back_rect.z - flip.spine, flip.spine - flip.back_rect.x, forward);
+    return max(front, back);
+}
+
+fn leaf_top() -> f32 { return min(flip.front_rect.y, flip.back_rect.y); }
+
+fn leaf_bottom() -> f32 { return max(flip.front_rect.w, flip.back_rect.w); }
+
+/// Shading strength, eased to 0 over [LIT_ENDS] of each end of the turn.
+fn leaf_shading() -> f32 {
+    return min(
+        smoothstep(0.0, 1.0, flip.t / ${LIT_ENDS}),
+        smoothstep(0.0, 1.0, (1.0 - flip.t) / ${LIT_ENDS}),
+    );
+}
+
+/// The blank face's paint, premultiplied; transparent when unpainted. Low byte first, so ARGB
+/// unpacks as BGRA.
+fn leaf_blank() -> vec4<f32> {
+    if ((flip.flags & ${FLAG_PAINTED}u) == 0u) { return vec4<f32>(0.0); }
+    let bgra = unpack4x8unorm(flip.blank);
+    return vec4<f32>(bgra.z, bgra.y, bgra.x, 1.0);
+}
+
 @group(0) @binding(1) var front_tex: texture_2d<f32>;
 @group(0) @binding(2) var back_tex: texture_2d<f32>;
 @group(0) @binding(3) var flip_sampler: sampler;
@@ -513,19 +490,19 @@ const SOFT_ALONG: f32 = 0.08;
 const SOFT_DOWN: f32 = 0.05;
 const SOFT_SPREAD: f32 = 1.0;
 
-fn leaf_radius() -> f32 { return flip.span.x / flip.geom.w; }
+fn leaf_radius() -> f32 { return leaf_len() / leaf_bend(); }
 
 /// The tangent angle at arc fraction [s] along the leaf - 0 at the spine, 1 at the outer edge.
-fn leaf_angle(s: f32) -> f32 { return flip.geom.z + flip.geom.w * s; }
+fn leaf_angle(s: f32) -> f32 { return leaf_phi() + leaf_bend() * s; }
 
 /// A point on the leaf in centred width fractions, at tangent angle [b] and vertical fraction [v].
 fn leaf_point(b: f32, v: f32) -> vec3<f32> {
     let r = leaf_radius();
-    let phi = flip.geom.z;
-    let y = mix(flip.span.y, flip.span.z, v);
+    let phi = leaf_phi();
+    let y = mix(leaf_top(), leaf_bottom(), v);
     return vec3<f32>(
-        (flip.geom.x - 0.5) + flip.geom.y * r * (sin(b) - sin(phi)),
-        (y - 0.5) / flip.span.w,
+        (flip.spine - 0.5) + leaf_dir() * r * (sin(b) - sin(phi)),
+        (y - 0.5) / flip.aspect,
         r * (cos(phi) - cos(b)),
     );
 }
@@ -538,7 +515,7 @@ struct Cast {
 
 fn cast_at(b: f32) -> Cast {
     let r = leaf_radius();
-    let phi = flip.geom.z;
+    let phi = leaf_phi();
     var c: Cast;
     c.out = r * (sin(b) - sin(phi));
     c.z = r * (cos(phi) - cos(b));
@@ -557,8 +534,8 @@ struct Span {
 /// layers of paper block no more light than one - and creases where it turns back. Filling the span
 /// its extremes bound covers it once: the hinge, the far edge, and the crest at vertical.
 fn shadow_span() -> Span {
-    let phi = flip.geom.z;
-    let bend = flip.geom.w;
+    let phi = leaf_phi();
+    let bend = leaf_bend();
 
     var lo = cast_at(phi);
     var hi = cast_at(phi + bend);
@@ -582,7 +559,7 @@ fn shadow_span() -> Span {
 /// Centred width fractions back to normalised surface coordinates, under perspective.
 fn project(p: vec3<f32>) -> vec2<f32> {
     let s = EYE / (EYE - p.z);
-    return vec2<f32>(0.5 + p.x * s, 0.5 + p.y * s * flip.span.w);
+    return vec2<f32>(0.5 + p.x * s, 0.5 + p.y * s * flip.aspect);
 }
 
 /// The lamp - see [LIGHT_DISTANCE]. Fixed in the surface: one carried by the leaf would hold its
@@ -601,7 +578,7 @@ fn shadow_cast(p: vec3<f32>) -> vec2<f32> {
 
 /// How dark the shadow is where the point casting it sits [z] above the page.
 fn shadow_alpha(z: f32) -> f32 {
-    return flip.flags.z * SHADOW_DEPTH * exp(-SHADOW_FALLOFF * max(z, 0.0) / flip.span.x);
+    return leaf_shading() * SHADOW_DEPTH * exp(-SHADOW_FALLOFF * max(z, 0.0) / leaf_len());
 }
 
 /// How dark the sheet is at tangent angle [b] - the curl's form, not a light in the world.
@@ -613,8 +590,8 @@ fn shadow_alpha(z: f32) -> f32 {
 /// there, most at the far edge, and continuous across the fold since it never asks which face
 /// shows. Eased off at both ends of the turn, so the leaf lands as lit as the half it becomes.
 fn leaf_shade(b: f32) -> f32 {
-    let turned = 1.0 - cos(b - flip.geom.z);
-    return mix(1.0, 1.0 - CURL_SHADE * turned, flip.flags.z);
+    let turned = 1.0 - cos(b - leaf_phi());
+    return mix(1.0, 1.0 - CURL_SHADE * turned, leaf_shading());
 }
 
 /// The face showing at a point of the sheet - whichever way the surface is turned.
@@ -635,10 +612,10 @@ struct Face {
 fn face_at(s: f32, v: f32, b: f32) -> Face {
     var f: Face;
     f.front = cos(b) > 0.0;
-    f.side = select(-flip.geom.y, flip.geom.y, f.front);
-    f.uv = vec2<f32>(flip.geom.x + f.side * s * flip.span.x, mix(flip.span.y, flip.span.z, v));
+    f.side = select(-leaf_dir(), leaf_dir(), f.front);
+    f.uv = vec2<f32>(flip.spine + f.side * s * leaf_len(), mix(leaf_top(), leaf_bottom(), v));
     f.rect = select(flip.back_rect, flip.front_rect, f.front);
-    f.textured = select(flip.flags.y, flip.flags.x, f.front) > 0.5;
+    f.textured = (flip.flags & select(${FLAG_BACK}u, ${FLAG_FRONT}u, f.front)) != 0u;
     f.covers = f.uv.x >= f.rect.x && f.uv.x <= f.rect.z &&
         f.uv.y >= f.rect.y && f.uv.y <= f.rect.w;
     return f;
@@ -650,7 +627,7 @@ fn face_at(s: f32, v: f32, b: f32) -> Face {
 /// In the shadow's own [s] and [v], so it holds however the span was reached. Widens with the
 /// caster's height [z] - a contact shadow is crisp, one thrown from a lifted curl broad.
 fn shadow_softness(s: f32, v: f32, z: f32) -> f32 {
-    let spread = 1.0 + SOFT_SPREAD * max(z, 0.0) / flip.span.x;
+    let spread = 1.0 + SOFT_SPREAD * max(z, 0.0) / leaf_len();
     let soft_s = min(SOFT_ALONG * spread, 0.5);
     let soft_v = min(SOFT_DOWN * spread, 0.5);
     return smoothstep(0.0, soft_s, s) * smoothstep(0.0, soft_s, 1.0 - s) *
@@ -674,7 +651,7 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     const ROWS: u32 = ${ROWS}u;
     const SHEET: u32 = ${SHEET_VERTICES}u;
 
-    // Shadow grid first, leaf over it. Split by index, not two draws - one uniform buffer, not two.
+    // Shadow grid first, leaf over it.
     let shadow = vertex_index < SHEET;
     let i = select(vertex_index - SHEET, vertex_index, shadow);
 
@@ -705,14 +682,14 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
         // the footprint runs in order and is covered once. Dropped through the light onto the page,
         // landing at z = 0, so no perspective divide.
         let span = shadow_span();
-        let y = mix(flip.span.y, flip.span.z, sv.y);
+        let y = mix(leaf_top(), leaf_bottom(), sv.y);
         world = vec3<f32>(
-            (flip.geom.x - 0.5) + flip.geom.y * mix(span.lo.out, span.hi.out, sv.x),
-            (y - 0.5) / flip.span.w,
+            (flip.spine - 0.5) + leaf_dir() * mix(span.lo.out, span.hi.out, sv.x),
+            (y - 0.5) / flip.aspect,
             mix(span.lo.z, span.hi.z, sv.x),
         );
         let flat = shadow_cast(world);
-        screen = vec2<f32>(0.5 + flat.x, 0.5 + flat.y * flip.span.w);
+        screen = vec2<f32>(0.5 + flat.x, 0.5 + flat.y * flip.aspect);
     } else {
         world = leaf_point(leaf_angle(sv.x), sv.y);
         screen = project(world);
@@ -746,9 +723,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // A blank face with nothing to paint it is not drawn at all, so a turn off the first or last
     // page shows what is behind the surface through the sheet - see [blankAlpha].
-    if (!face.textured && flip.blank.a <= 0.0) { discard; }
+    let blank = leaf_blank();
+    if (!face.textured && blank.a <= 0.0) { discard; }
 
-    var texel = flip.blank;
+    var texel = blank;
     if (face.textured) {
         if (face.front) {
             texel = textureSampleLevel(front_tex, flip_sampler, face.uv, 0.0);

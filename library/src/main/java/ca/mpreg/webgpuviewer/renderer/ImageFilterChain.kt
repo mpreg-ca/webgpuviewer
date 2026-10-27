@@ -1,11 +1,8 @@
 package ca.mpreg.webgpuviewer.renderer
 
 import android.util.Log
-import androidx.webgpu.BufferUsage
 import androidx.webgpu.GPUBindGroupDescriptor
 import androidx.webgpu.GPUBindGroupEntry
-import androidx.webgpu.GPUBuffer
-import androidx.webgpu.GPUBufferDescriptor
 import androidx.webgpu.GPUColor
 import androidx.webgpu.GPUCommandEncoder
 import androidx.webgpu.GPUDevice
@@ -59,7 +56,7 @@ struct Params {
 }
 
 @group(0) @binding(0) var src: texture_2d<f32>;
-@group(0) @binding(1) var<uniform> params: Params;
+var<immediate> params: Params;
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
@@ -443,8 +440,6 @@ internal class ImageFilterChain(private val onChange: () -> Unit) {
             slots.clear()
             totalBytes = 0
             cap = Long.MAX_VALUE
-            placements.clear()
-            writes.clear()
             probeTarget = null
             writers.built.forEach { forgetGroupLayout(it) }
             writers.clear()
@@ -517,7 +512,6 @@ internal class ImageFilterChain(private val onChange: () -> Unit) {
     /**
      * Encodes up to [limit] of the unmade blocks under [rect], after [ready]. The first pass writes
      * [timestamps].
-     * [first] is the first block's index among those in the caller's command buffer, for buffers.
      *
      * Marks nothing: call [Filled.commit] after submit, so an unsubmitted buffer leaves them to be remade.
      */
@@ -527,7 +521,6 @@ internal class ImageFilterChain(private val onChange: () -> Unit) {
         pageScale: Float,
         rect: ImageRect,
         timestamps: GPUPassTimestampWrites?,
-        first: Int,
         limit: Int = Int.MAX_VALUE,
     ): Filled {
         val entry = levels[image]
@@ -559,7 +552,7 @@ internal class ImageFilterChain(private val onChange: () -> Unit) {
                 val column = index % entry.columns
                 val row = index / entry.columns
                 drawBlock(
-                    encoder, image, column, row, geometry, input, inputView, first + n,
+                    encoder, image, column, row, geometry, input, inputView,
                     if (n == 0) timestamps else null,
                 )
                 for (f in running) f.encode(encoder)
@@ -593,7 +586,7 @@ internal class ImageFilterChain(private val onChange: () -> Unit) {
                         1f
                     )
                     write.setScissorRect(x0, y0, width, height)
-                    encodeWrite(write, target.format, output.view, first + n, x0, y0, k * halo)
+                    encodeWrite(write, target.format, output.view, x0, y0, k * halo)
                 } finally {
                     write.endAndRelease()
                 }
@@ -618,7 +611,6 @@ internal class ImageFilterChain(private val onChange: () -> Unit) {
         geometry: BlockGeometry,
         input: GPUTexture,
         inputView: GPUTextureView,
-        i: Int,
         timestamps: GPUPassTimestampWrites?,
     ) {
         val base = image.mipmaps[0]
@@ -654,7 +646,6 @@ internal class ImageFilterChain(private val onChange: () -> Unit) {
                 firstStep(),
                 Extend(h, h, h, h),
                 true,
-                placement(i)
             )
         } finally {
             draw.endAndRelease()
@@ -682,7 +673,7 @@ internal class ImageFilterChain(private val onChange: () -> Unit) {
         val output = prepared ?: return false
         Hdr.cuttingTiles = true
         try {
-            drawBlock(encoder, image, 0, 0, geometry, inputTexture!!, inputView!!, 0, timestamps)
+            drawBlock(encoder, image, 0, 0, geometry, inputTexture!!, inputView!!, timestamps)
         } finally {
             Hdr.cuttingTiles = false
         }
@@ -701,7 +692,7 @@ internal class ImageFilterChain(private val onChange: () -> Unit) {
             )
         )
         try {
-            encodeWrite(write, base.format, output.view, 0, 0, 0, geometry.k * geometry.halo)
+            encodeWrite(write, base.format, output.view, 0, 0, geometry.k * geometry.halo)
         } finally {
             write.endAndRelease()
         }
@@ -736,62 +727,27 @@ internal class ImageFilterChain(private val onChange: () -> Unit) {
         ?: RenderPage.filtered(Sampler.catmullRom().code, Sampler.box().code)
             .also { firstStepPair = it }
 
-    /**
-     * For block [i] of a command buffer: writes land before it runs, so each draw needs its own,
-     * not the image's. Reusable by the next buffer: its writes queue after this one's commands.
-     */
-    private fun placement(i: Int): GPUBuffer {
-        while (placements.size <= i) {
-            placements.add(
-                device.createBuffer(
-                    GPUBufferDescriptor(
-                        label = "image filter block placement", size = BUFFER_SIZE,
-                        usage = BufferUsage.CopyDst or BufferUsage.Uniform,
-                    )
-                )
-            )
-        }
-        return placements[i]
-    }
-
-    private val placements = ArrayList<GPUBuffer>()
-    private val writes = ArrayList<GPUBuffer>()
-    // Exactly the uniform's size: writeBuffer uploads a ByteBuffer's whole capacity.
     private val writeBytes = ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder())
 
     private fun encodeWrite(
         pass: GPURenderPassEncoder,
         format: Int,
         source: GPUTextureView,
-        i: Int,
         x0: Int,
         y0: Int,
         inset: Int,
     ) {
         val writer = writers[format]
-        while (writes.size <= i) {
-            writes.add(
-                device.createBuffer(
-                    GPUBufferDescriptor(
-                        label = "image filter write",
-                        size = 16,
-                        usage = BufferUsage.CopyDst or BufferUsage.Uniform
-                    )
-                )
-            )
-        }
-        val buffer = writes[i]
         writeBytes.clear()
         writeBytes.putInt(x0).putInt(y0).putInt(inset).putInt(inset)
         writeBytes.flip()
-        device.queue.writeBuffer(buffer, 0, writeBytes)
         pass.setPipeline(writer)
+        pass.setImmediates(0, writeBytes)
         pass.setTransientBindGroup(
             0, device.createBindGroup(
                 GPUBindGroupDescriptor(
                     layout = writer.groupLayout(), label = "image filter write", entries = arrayOf(
                         GPUBindGroupEntry(0, textureView = source),
-                        GPUBindGroupEntry(1, buffer = buffer),
                     )
                 )
             )
@@ -818,10 +774,6 @@ internal class ImageFilterChain(private val onChange: () -> Unit) {
         inputTexture = null
         inputView = null
         prepared = null
-        placements.forEach { it.destroyAndRelease() }
-        placements.clear()
-        writes.forEach { it.destroyAndRelease() }
-        writes.clear()
         probeTarget?.let {
             it.view.close()
             it.texture.destroyAndRelease()

@@ -3,12 +3,10 @@ package ca.mpreg.webgpuviewer.transition
 import androidx.compose.ui.geometry.Offset
 import androidx.webgpu.BlendFactor
 import androidx.webgpu.BlendOperation
-import androidx.webgpu.BufferUsage
 import androidx.webgpu.GPUBindGroupDescriptor
 import androidx.webgpu.GPUBindGroupEntry
 import androidx.webgpu.GPUBlendComponent
 import androidx.webgpu.GPUBlendState
-import androidx.webgpu.GPUBufferDescriptor
 import androidx.webgpu.GPUColor
 import androidx.webgpu.GPUColorTargetState
 import androidx.webgpu.GPUCommandEncoder
@@ -141,7 +139,7 @@ struct Uniforms {
     offset: vec2<f32>,
 }
 
-@group(0) @binding(0) var<uniform> uniforms: Uniforms;
+var<immediate> uniforms: Uniforms;
 @group(0) @binding(1) var src_tex: texture_2d<f32>;
 @group(0) @binding(2) var src_sampler: sampler;
 
@@ -220,7 +218,7 @@ struct Uniforms {
     fade: vec4<f32>,
 }
 
-@group(0) @binding(0) var<uniform> uniforms: Uniforms;
+var<immediate> uniforms: Uniforms;
 @group(0) @binding(1) var src_tex: texture_2d<f32>;
 @group(0) @binding(2) var src_sampler: sampler;
 
@@ -290,18 +288,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             byteBuffer.putFloat(0f)
             byteBuffer.flip()
 
-            val uniformBuffer = WebGpuRenderer.device.createBuffer(
-                GPUBufferDescriptor(size = 32, usage = BufferUsage.Uniform or BufferUsage.CopyDst)
-            )
-            WebGpuRenderer.device.queue.writeBuffer(uniformBuffer, 0, byteBuffer)
 
             val regionPipeline = regionPipelines[format]
             pass.setPipeline(regionPipeline)
+            pass.setImmediates(0, byteBuffer)
             pass.setTransientBindGroup(
                 0, WebGpuRenderer.device.createBindGroup(
                     GPUBindGroupDescriptor(
                         layout = regionPipeline.groupLayout(), entries = arrayOf(
-                            GPUBindGroupEntry(0, buffer = uniformBuffer),
                             GPUBindGroupEntry(1, textureView = cachedView),
                             GPUBindGroupEntry(2, sampler = blitSampler)
                         )
@@ -309,7 +303,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 )
             )
             pass.draw(6)
-            uniformBuffer.close()
         }
 
         private val blitSampler by lazy {
@@ -649,18 +642,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             byteBuffer.putFloat(offsetY)
             byteBuffer.flip()
 
-            val uniformBuffer = WebGpuRenderer.device.createBuffer(
-                GPUBufferDescriptor(size = 8, usage = BufferUsage.Uniform or BufferUsage.CopyDst)
-            )
-            WebGpuRenderer.device.queue.writeBuffer(uniformBuffer, 0, byteBuffer)
 
             val blitPipeline = blitPipelines[format]
             pass.setPipeline(blitPipeline)
+            pass.setImmediates(0, byteBuffer)
             pass.setTransientBindGroup(
                 0, WebGpuRenderer.device.createBindGroup(
                     GPUBindGroupDescriptor(
                         layout = blitPipeline.groupLayout(), entries = arrayOf(
-                            GPUBindGroupEntry(0, buffer = uniformBuffer),
                             GPUBindGroupEntry(1, textureView = cachedView),
                             GPUBindGroupEntry(2, sampler = blitSampler)
                         )
@@ -668,7 +657,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 )
             )
             pass.draw(6)
-            uniformBuffer.close()
         }
     }
 }

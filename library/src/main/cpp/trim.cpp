@@ -22,13 +22,12 @@ constexpr int kChannels = 4;
 // ---------------------------------------------------------------------------
 
 /**
- * Foreground test for one background colour, matching is_foreground in the WGSL
- * trim shaders.
+ * Foreground test for one background colour.
  *
- * The shader composites the pixel over the background before comparing:
+ * The pixel is composited over the background before comparing:
  *   diff = |rgb * a + bg * (1 - a) - bg| = a * |rgb - bg|
  * so the blend collapses to a single multiply by alpha. Everything is kept in
- * 0..255 units to avoid normalising every pixel: the shader's
+ * 0..255 units to avoid normalising every pixel:
  *   a01 * |c01 - bg01| > threshold
  * scales to
  *   a * |c - bg255| > threshold * 255 * 255
@@ -76,10 +75,8 @@ inline bool isForeground(const ColorTest &test, const uint8_t *px) {
 /**
  * Bounding box of the foreground pixels.
  *
- * Seeded the way the shader seeds its result buffer - min at the image extent,
- * max at zero - so an image with no foreground at all produces the same
- * (width, height, 0, 0) the GPU path produces, and the callers that already
- * handle that degenerate result keep working.
+ * Seeded min at the image extent, max at zero, so an image with no foreground
+ * at all produces (width, height, 0, 0), the degenerate result callers handle.
  */
 struct Bounds {
   int32_t minX, minY, maxX, maxY;

@@ -2,12 +2,8 @@ package ca.mpreg.webgpuviewer.draw
 
 import androidx.webgpu.BlendFactor
 import androidx.webgpu.BlendOperation
-import androidx.webgpu.BufferUsage
-import androidx.webgpu.GPUBindGroupDescriptor
-import androidx.webgpu.GPUBindGroupEntry
 import androidx.webgpu.GPUBlendComponent
 import androidx.webgpu.GPUBlendState
-import androidx.webgpu.GPUBufferDescriptor
 import androidx.webgpu.GPUColorTargetState
 import androidx.webgpu.GPUCommandEncoder
 import androidx.webgpu.GPUFragmentState
@@ -26,8 +22,6 @@ import androidx.webgpu.StoreOp
 import ca.mpreg.webgpuviewer.renderer.FormatKeyed
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
 import ca.mpreg.webgpuviewer.renderer.endAndRelease
-import ca.mpreg.webgpuviewer.renderer.groupLayout
-import ca.mpreg.webgpuviewer.renderer.setTransientBindGroup
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -70,7 +64,7 @@ struct Params {
     color: vec4<f32>,
 }
 
-@group(0) @binding(0) var<uniform> params: Params;
+var<immediate> params: Params;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -147,10 +141,6 @@ fun Draw.rect(
 /**
  * Draw a filled rectangle into an existing render pass, so it can share a pass with other draws.
  * Sets its own pipeline, so the caller must set theirs again before drawing something else.
- *
- * A fresh uniform buffer is allocated per call: several rects can share one pass, and
- * `queue.writeBuffer` is ordered against `submit` rather than against other writes, so a reused
- * buffer would give every rect in the batch the last colour written.
  */
 fun Draw.rect(
     pass: GPURenderPassEncoder,
@@ -179,22 +169,7 @@ fun Draw.rect(
     byteBuffer.putFloat(a)
     byteBuffer.flip()
 
-    val uniformBuffer = device.createBuffer(
-        GPUBufferDescriptor(size = 32L, usage = BufferUsage.Uniform or BufferUsage.CopyDst)
-    )
-    device.queue.writeBuffer(uniformBuffer, 0, byteBuffer)
-
-    val pipeline = pipelines[format]
-    pass.setPipeline(pipeline)
-    pass.setTransientBindGroup(
-        0, device.createBindGroup(
-            GPUBindGroupDescriptor(
-                layout = pipeline.groupLayout(), entries = arrayOf(
-                    GPUBindGroupEntry(0, buffer = uniformBuffer)
-                )
-            )
-        )
-    )
+    pass.setPipeline(pipelines[format])
+    pass.setImmediates(0, byteBuffer)
     pass.draw(6)
-    uniformBuffer.close()
 }

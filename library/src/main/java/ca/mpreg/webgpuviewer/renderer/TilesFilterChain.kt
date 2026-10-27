@@ -97,7 +97,7 @@ internal class TilesFilterChain(private val onChange: () -> Unit) {
         levelZero: Boolean,
         extend: Extend? = null,
     ) = RenderPage.render(
-        pass, image, target, x, y, scale, filtered(), extend, levelZero, image.buffer, source
+        pass, image, target, x, y, scale, filtered(), extend, levelZero, source
     )
 
     // ---- the filters ----

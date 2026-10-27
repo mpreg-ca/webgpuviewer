@@ -5,10 +5,6 @@ import java.nio.ByteBuffer
 /**
  * JNI bindings for the CPU trim and background-detection passes in `trim.cpp`.
  *
- * Both take the decoded pixels directly, so they can run on a background dispatcher
- * before the image is uploaded - unlike the compute-shader versions in [Trim], which
- * have to wait on a GPU readback from the render thread.
- *
  * Buffers must be direct and hold at least `width * height * 4` bytes of tightly
  * packed RGBA8.
  */

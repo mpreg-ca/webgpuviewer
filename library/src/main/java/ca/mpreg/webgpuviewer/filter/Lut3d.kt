@@ -12,7 +12,7 @@ import java.io.InputStream
  * Values are the mapped output for that input colour, normally in 0..1 but not clamped: a LUT
  * that overshoots keeps its overshoot until [FilterLut3d] writes an 8-bit frame.
  */
-class Lut3d(val size: Int, val data: FloatArray, val limitedRange: Boolean = false) {
+class Lut3d(val size: Int, val data: FloatArray) {
     init {
         require(size >= 2) { "LUT size $size" }
         require(data.size == size * size * size * 3) { "LUT data ${data.size} for size $size" }
@@ -91,7 +91,8 @@ class Lut3d(val size: Int, val data: FloatArray, val limitedRange: Boolean = fal
 
         /**
          * A madVR `.3dlut`: a 16KB header, then 256^3 entries of three little-endian 16-bit
-         * samples in B, G, R order, blue varying fastest, over TV-level input and output.
+         * samples in B, G, R order, blue varying fastest, over TV-level input and output. Both
+         * come out full range: the grid spans TV codes 16..235.
          *
          * Resampled to [size]^3 rather than kept at the file's own 256 points, which would be
          * 200MB of floats on the heap and 134MB on the GPU. 64 is visually indistinguishable
@@ -128,7 +129,7 @@ class Lut3d(val size: Int, val data: FloatArray, val limitedRange: Boolean = fal
                     }
                 }
             }
-            return Lut3d(size, data, limitedRange = true)
+            return Lut3d(size, data)
         }
 
         fun parseMadVr(bytes: ByteArray, size: Int = 64): Lut3d =
@@ -145,9 +146,12 @@ class Lut3d(val size: Int, val data: FloatArray, val limitedRange: Boolean = fal
          */
         const val MAX_SIZE = 128
 
-        /** Nearest full-resolution index for step [i] of a [size]-point axis. */
+        /** The file index, a TV-level code, nearest full-range step [i] of a [size]-point axis. */
         private fun axis(i: Int, size: Int): Int =
-            if (size == FULL) i else (i * (FULL - 1) + (size - 1) / 2) / (size - 1)
+            (TV_BLACK * (size - 1) + i * (TV_WHITE - TV_BLACK) + (size - 1) / 2) / (size - 1)
+
+        private const val TV_BLACK = 16
+        private const val TV_WHITE = 235
 
         /** One 16-bit TV-level sample as 0..1 full range. */
         private fun sample(bytes: ByteArray, at: Int): Float {

@@ -1,11 +1,9 @@
 package ca.mpreg.webgpuviewer.transition
 
 import androidx.compose.ui.geometry.Offset
-import androidx.webgpu.BufferUsage
 import androidx.webgpu.FilterMode
 import androidx.webgpu.GPUBindGroupDescriptor
 import androidx.webgpu.GPUBindGroupEntry
-import androidx.webgpu.GPUBufferDescriptor
 import androidx.webgpu.GPUColor
 import androidx.webgpu.GPUCommandEncoder
 import androidx.webgpu.GPURenderPassColorAttachment
@@ -62,7 +60,7 @@ struct Uniforms {
     transform_mat: mat4x4<f32>,
 }
 
-@group(0) @binding(0) var<uniform> transform: Uniforms;
+var<immediate> transform: Uniforms;
 @group(0) @binding(1) var src_tex: texture_2d<f32>;
 @group(0) @binding(2) var src_sampler: sampler;
 
@@ -328,10 +326,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
         byteBuffer.flip()
 
-        val uniformBuffer = device.createBuffer(
-            GPUBufferDescriptor(size = 64, usage = BufferUsage.Uniform or BufferUsage.CopyDst)
-        )
-        device.queue.writeBuffer(uniformBuffer, 0, byteBuffer)
 
         val targetView = dst.createView()
         val pass = encoder.beginRenderPass(
@@ -349,11 +343,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
         val pipeline = pipelines[dst.format]
         pass.setPipeline(pipeline)
+        pass.setImmediates(0, byteBuffer)
         pass.setTransientBindGroup(
             0, device.createBindGroup(
                 GPUBindGroupDescriptor(
                     layout = pipeline.groupLayout(), entries = arrayOf(
-                        GPUBindGroupEntry(0, buffer = uniformBuffer),
                         GPUBindGroupEntry(1, textureView = cachedView),
                         GPUBindGroupEntry(2, sampler = faceSampler),
                     )
@@ -362,6 +356,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         )
 
         pass.draw(6144)
-        pass.endAndRelease(targetView, uniformBuffer)
+        pass.endAndRelease(targetView)
     }
 }

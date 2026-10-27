@@ -1,6 +1,5 @@
 package ca.mpreg.webgpuviewer.draw
 
-import androidx.webgpu.BufferUsage
 import androidx.webgpu.GPUBindGroupDescriptor
 import androidx.webgpu.GPUBindGroupEntry
 import androidx.webgpu.GPUCommandEncoder
@@ -45,7 +44,7 @@ struct Params {
 }
 
 @group(0) @binding(0) var output_tex: texture_storage_2d<${wgslStorageFormat(format)}, write>;
-@group(0) @binding(1) var<uniform> params: Params;
+var<immediate> params: Params;
 
 @compute @workgroup_size(8, 8, 1)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -106,9 +105,6 @@ fun Draw.line(
     byteBuffer.putFloat(28, a)
     byteBuffer.putFloat(32, thickness)
 
-    val uniformBuffer = createBuffer(48L, BufferUsage.Uniform or BufferUsage.CopyDst)
-    device.queue.writeBuffer(uniformBuffer, 0, byteBuffer)
-
     val dispatchW = ceil(texture.width / 8f).toInt()
     val dispatchH = ceil(texture.height / 8f).toInt()
 
@@ -121,11 +117,11 @@ fun Draw.line(
             GPUBindGroupDescriptor(
                 layout = pipeline.groupLayout(), entries = arrayOf(
                     GPUBindGroupEntry(0, textureView = targetView),
-                    GPUBindGroupEntry(1, buffer = uniformBuffer),
                 )
             )
         )
     )
+    pass.setImmediates(0, byteBuffer)
     pass.dispatchWorkgroups(dispatchW, dispatchH)
     pass.endAndRelease(targetView)
 }

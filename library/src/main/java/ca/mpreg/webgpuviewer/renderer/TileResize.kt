@@ -1,11 +1,8 @@
 package ca.mpreg.webgpuviewer.renderer
 
-import androidx.webgpu.BufferUsage
 import androidx.webgpu.GPUBindGroup
 import androidx.webgpu.GPUBindGroupDescriptor
 import androidx.webgpu.GPUBindGroupEntry
-import androidx.webgpu.GPUBuffer
-import androidx.webgpu.GPUBufferDescriptor
 import androidx.webgpu.GPURenderPassEncoder
 import androidx.webgpu.GPUTextureView
 import java.nio.ByteBuffer
@@ -94,7 +91,7 @@ struct Resize {
 }
 
 @group(0) @binding(0) var src: texture_2d<f32>;
-@group(0) @binding(1) var<uniform> params: Resize;
+var<immediate> params: Resize;
 
 fn load_linear(p: vec2<i32>) -> vec4<f32> {
     let last = vec2<i32>(textureDimensions(src)) - vec2<i32>(1);
@@ -120,12 +117,10 @@ internal class TileResize {
             FormatKeyed { format -> Fullscreen.buildPipeline(TEXTURE, format, "tile resize") }
     }
 
-    private var uniforms: GPUBuffer? = null
     private var group: GPUBindGroup? = null
     private var groupSource: GPUTextureView? = null
     private var groupFormat = 0
 
-    // Exactly the uniform's size: writeBuffer uploads a ByteBuffer's whole capacity.
     private val bytes = ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder())
 
     /** [offsetX]/[offsetY]: the tile's start in [source] texels; [ratio]: [source] texels per tile pixel. */
@@ -138,18 +133,9 @@ internal class TileResize {
         ratio: Float,
     ) {
         val device = WebGpuRenderer.device
-        val buffer = uniforms ?: device.createBuffer(
-            GPUBufferDescriptor(
-                label = "tile resize",
-                size = 16,
-                usage = BufferUsage.Uniform or BufferUsage.CopyDst
-            )
-        ).also { uniforms = it }
         bytes.clear()
         bytes.putFloat(offsetX).putFloat(offsetY).putFloat(ratio).putFloat(0f)
         bytes.flip()
-        // Safe per tile: each is submitted before the next is recorded.
-        device.queue.writeBuffer(buffer, 0, bytes)
 
         val pipeline = pipelines[format]
         var bound = group
@@ -159,7 +145,6 @@ internal class TileResize {
                 GPUBindGroupDescriptor(
                     layout = pipeline.groupLayout(), label = "tile resize", entries = arrayOf(
                         GPUBindGroupEntry(0, textureView = source),
-                        GPUBindGroupEntry(1, buffer = buffer),
                     )
                 )
             )
@@ -168,6 +153,7 @@ internal class TileResize {
             groupFormat = format
         }
         pass.setPipeline(pipeline)
+        pass.setImmediates(0, bytes)
         pass.setBindGroup(0, bound)
         pass.draw(3)
     }
@@ -180,13 +166,11 @@ internal class TileResize {
     }
 
     fun cleanup() {
-        uniforms?.destroyAndRelease()
         group?.close()
         drop()
     }
 
     private fun drop() {
-        uniforms = null
         group = null
         groupSource = null
         groupFormat = 0
