@@ -756,14 +756,6 @@ internal class ImageFilterChain(private val onChange: () -> Unit) {
 
     private val placements = ArrayList<GPUBuffer>()
     private val writes = ArrayList<GPUBuffer>()
-    private val writers = FormatKeyed { format ->
-        Fullscreen.buildPipeline(
-            write(if (format == TextureFormat.RGBA8Unorm) "1.0" else "65504.0"),
-            format,
-            "image filter write"
-        )
-    }
-
     // Exactly the uniform's size: writeBuffer uploads a ByteBuffer's whole capacity.
     private val writeBytes = ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder())
 
@@ -835,11 +827,18 @@ internal class ImageFilterChain(private val onChange: () -> Unit) {
             it.texture.destroyAndRelease()
         }
         probeTarget = null
-        writers.built.forEach { it.closeWithLayout() }
-        writers.clear()
     }
 
     private companion object {
         const val TAG = "ImageFilterChain"
+
+        // Shared by every chain, so never closed.
+        val writers = FormatKeyed { format ->
+            Fullscreen.buildPipeline(
+                write(if (format == TextureFormat.RGBA8Unorm) "1.0" else "65504.0"),
+                format,
+                "image filter write"
+            )
+        }
     }
 }

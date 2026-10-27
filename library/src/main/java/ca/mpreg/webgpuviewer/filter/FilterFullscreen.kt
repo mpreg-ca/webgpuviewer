@@ -27,12 +27,18 @@ abstract class FilterFullscreen : Filter() {
 
     /**
      * WGSL fragment stage. [Fullscreen.VERTEX] is prepended, so `VertexOutput` and `in.uv` are
-     * in scope.
+     * in scope. Read once; pipelines are shared by text and never freed, so keep per-instance
+     * values in uniforms.
      */
     protected abstract val code: String
 
     // Per format: [outputFormat] follows [Hdr.frameFormat], which an HDR toggle changes.
-    private val pipelines = FormatKeyed { format -> Fullscreen.buildPipeline(code, format, label) }
+    private val pipelines by lazy(LazyThreadSafetyMode.NONE) {
+        val code = code
+        shared.getOrPut(code) {
+            FormatKeyed { format -> Fullscreen.buildPipeline(code, format, label) }
+        }
+    }
 
     protected open val pipeline: GPURenderPipeline get() = pipelines[outputFormat]
 
@@ -117,5 +123,8 @@ abstract class FilterFullscreen : Filter() {
     private companion object {
         /** Enough for [FullscreenFilterChain]'s texture ring, so a steady chain builds none per frame. */
         const val CACHED_BIND_GROUPS = 4
+
+        // Never closed. Render thread only.
+        val shared = HashMap<String, FormatKeyed<GPURenderPipeline>>()
     }
 }

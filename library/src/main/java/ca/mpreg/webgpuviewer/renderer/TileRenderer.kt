@@ -217,6 +217,176 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         private val device get() = WebGpuRenderer.device
 
         private val timestampsSupported = device.hasFeature(FeatureName.TimestampQuery)
+
+        // Nearest: tiles are blitted 1:1 at integer pixel positions, so this is an exact copy.
+        private val blitSampler by lazy {
+            device.createSampler(
+                GPUSamplerDescriptor(
+                    magFilter = FilterMode.Nearest,
+                    minFilter = FilterMode.Nearest,
+                )
+            )
+        }
+
+        // Explicit (not auto-inferred) so it can be shared across
+        // blitPipeline/blitPipelineStencilWrite - an implicit/auto pipeline layout is unique to the
+        // pipeline it was inferred for, so a bind group made against one pipeline's auto layout is
+        // invalid on the other, even though both pipelines share the exact same shader and
+        // bindings. A grid's bind group is created once and reused across both pipelines (see
+        // gridBindGroup), so it must be built against this.
+        private val blitBindGroupLayout by lazy {
+            device.createBindGroupLayout(
+                GPUBindGroupLayoutDescriptor(
+                    entries = arrayOf(
+                        GPUBindGroupLayoutEntry(
+                            binding = 0,
+                            visibility = ShaderStage.Vertex or ShaderStage.Fragment,
+                            buffer = GPUBufferBindingLayout(type = BufferBindingType.Uniform)
+                        ),
+                        GPUBindGroupLayoutEntry(
+                            binding = 1,
+                            visibility = ShaderStage.Fragment,
+                            texture = GPUTextureBindingLayout(sampleType = TextureSampleType.Float)
+                        ),
+                        GPUBindGroupLayoutEntry(
+                            binding = 2,
+                            visibility = ShaderStage.Fragment,
+                            sampler = GPUSamplerBindingLayout(type = SamplerBindingType.Filtering)
+                        ),
+                    )
+                )
+            )
+        }
+
+        private val blitPipelineLayout by lazy {
+            device.createPipelineLayout(
+                GPUPipelineLayoutDescriptor(bindGroupLayouts = arrayOf(blitBindGroupLayout))
+            )
+        }
+
+        // Must match [Lut3dTexture.wgsl].
+        private val lutBindGroupLayout by lazy {
+            device.createBindGroupLayout(
+                GPUBindGroupLayoutDescriptor(
+                    entries = arrayOf(
+                        GPUBindGroupLayoutEntry(
+                            binding = 0,
+                            visibility = ShaderStage.Fragment,
+                            buffer = GPUBufferBindingLayout(type = BufferBindingType.Uniform)
+                        ),
+                        GPUBindGroupLayoutEntry(
+                            binding = 1,
+                            visibility = ShaderStage.Fragment,
+                            texture = GPUTextureBindingLayout(
+                                sampleType = TextureSampleType.Float,
+                                viewDimension = TextureViewDimension._3D
+                            )
+                        ),
+                        GPUBindGroupLayoutEntry(
+                            binding = 2,
+                            visibility = ShaderStage.Fragment,
+                            sampler = GPUSamplerBindingLayout(type = SamplerBindingType.Filtering)
+                        ),
+                    )
+                )
+            )
+        }
+
+        private val blitLutPipelineLayout by lazy {
+            device.createPipelineLayout(
+                GPUPipelineLayoutDescriptor(
+                    bindGroupLayouts = arrayOf(blitBindGroupLayout, lutBindGroupLayout)
+                )
+            )
+        }
+
+        private fun buildBlitPipeline(
+            format: Int,
+            depthStencil: GPUDepthStencilState?,
+            lut: Boolean = false,
+        ): GPURenderPipeline {
+            val code = BLIT_SHADER + if (lut) Lut3dTexture.wgsl(1, 0) + BLIT_LUT_FS else BLIT_FS
+            val shaderModule = device.createShaderModule(
+                GPUShaderModuleDescriptor(shaderSourceWGSL = GPUShaderSourceWGSL(code))
+            )
+            return device.createRenderPipeline(
+                GPURenderPipelineDescriptor(
+                    vertex = GPUVertexState(
+                        module = shaderModule, entryPoint = "vs_main", buffers = arrayOf(
+                            GPUVertexBufferLayout(
+                                arrayStride = INSTANCE_BYTES,
+                                stepMode = VertexStepMode.Instance,
+                                attributes = arrayOf(
+                                    GPUVertexAttribute(
+                                        format = VertexFormat.Float32x4,
+                                        offset = 0,
+                                        shaderLocation = 0
+                                    )
+                                )
+                            )
+                        )
+                    ),
+                    layout = if (lut) blitLutPipelineLayout else blitPipelineLayout,
+                    fragment = GPUFragmentState(
+                        module = shaderModule, entryPoint = "fs_main", targets = arrayOf(
+                            GPUColorTargetState(
+                                // Tiles hold RenderPage's output, which is premultiplied, so One
+                                // rather than SrcAlpha.
+                                format = format, blend = GPUBlendState(
+                                    color = GPUBlendComponent(
+                                        srcFactor = BlendFactor.One,
+                                        dstFactor = BlendFactor.OneMinusSrcAlpha,
+                                        operation = BlendOperation.Add
+                                    ), alpha = GPUBlendComponent(
+                                        srcFactor = BlendFactor.One,
+                                        dstFactor = BlendFactor.OneMinusSrcAlpha,
+                                        operation = BlendOperation.Add
+                                    )
+                                )
+                            )
+                        )
+                    ),
+                    primitive = GPUPrimitiveState(topology = PrimitiveTopology.TriangleList),
+                    depthStencil = depthStencil,
+                )
+            )
+        }
+
+        /**
+         * Plain blit, no stencil attachment - [blitAvailableTiles]/[renderFullyTiled]'s own pass.
+         */
+        private val blitPipelines = FormatKeyed { format -> buildBlitPipeline(format, null) }
+
+        /**
+         * As [blitPipeline], but always writes 1 into the stencil attachment wherever it draws -
+         * for [drawCore]'s live-render callers ([draw]), which mask [RenderPage.renderFast]'s
+         * per-pixel work against exactly this: a tile pixel drawn here needs no further shading
+         * underneath it, so a pixel [RenderPage] would otherwise redraw stays skipped once this
+         * stencil value marks it done. See [stencilViewFor].
+         */
+        private val blitPipelinesStencilWrite = FormatKeyed { format ->
+            buildBlitPipeline(format, stencilWriteState)
+        }
+
+        private val stencilWriteState = GPUDepthStencilState(
+            format = TextureFormat.Stencil8,
+            depthWriteEnabled = OptionalBool.False,
+            depthCompare = CompareFunction.Always,
+            stencilFront = GPUStencilFaceState(
+                compare = CompareFunction.Always, passOp = StencilOperation.Replace
+            ),
+            stencilBack = GPUStencilFaceState(
+                compare = CompareFunction.Always, passOp = StencilOperation.Replace
+            ),
+            stencilWriteMask = 0xFF,
+        )
+
+        private val blitLutPipelines = FormatKeyed { format ->
+            buildBlitPipeline(format, null, true)
+        }
+        private val blitLutPipelinesStencilWrite = FormatKeyed { format ->
+            buildBlitPipeline(format, stencilWriteState, true)
+        }
     }
 
     /**
@@ -950,171 +1120,6 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     // Thread-local ByteBuffer to avoid per-blit allocation
     private val byteBufferLocal = ThreadLocal.withInitial {
         ByteBuffer.allocateDirect(FRAME_UNIFORM_BYTES.toInt()).order(ByteOrder.nativeOrder())
-    }
-
-    // Nearest: tiles are blitted 1:1 at integer pixel positions, so this is an exact copy.
-    private val blitSampler by lazy {
-        device.createSampler(
-            GPUSamplerDescriptor(
-                magFilter = FilterMode.Nearest,
-                minFilter = FilterMode.Nearest,
-            )
-        )
-    }
-
-    // Explicit (not auto-inferred) so it can be shared across blitPipeline/blitPipelineStencilWrite -
-    // an implicit/auto pipeline layout is unique to the pipeline it was inferred for, so a bind
-    // group made against one pipeline's auto layout is invalid on the other, even though both
-    // pipelines share the exact same shader and bindings. A grid's bind group is created once
-    // and reused across both pipelines (see gridBindGroup), so it must be built against this.
-    private val blitBindGroupLayout by lazy {
-        device.createBindGroupLayout(
-            GPUBindGroupLayoutDescriptor(
-                entries = arrayOf(
-                    GPUBindGroupLayoutEntry(
-                        binding = 0,
-                        visibility = ShaderStage.Vertex or ShaderStage.Fragment,
-                        buffer = GPUBufferBindingLayout(type = BufferBindingType.Uniform)
-                    ),
-                    GPUBindGroupLayoutEntry(
-                        binding = 1,
-                        visibility = ShaderStage.Fragment,
-                        texture = GPUTextureBindingLayout(sampleType = TextureSampleType.Float)
-                    ),
-                    GPUBindGroupLayoutEntry(
-                        binding = 2,
-                        visibility = ShaderStage.Fragment,
-                        sampler = GPUSamplerBindingLayout(type = SamplerBindingType.Filtering)
-                    ),
-                )
-            )
-        )
-    }
-
-    private val blitPipelineLayout by lazy {
-        device.createPipelineLayout(
-            GPUPipelineLayoutDescriptor(bindGroupLayouts = arrayOf(blitBindGroupLayout))
-        )
-    }
-
-    // Must match [Lut3dTexture.wgsl].
-    private val lutBindGroupLayout by lazy {
-        device.createBindGroupLayout(
-            GPUBindGroupLayoutDescriptor(
-                entries = arrayOf(
-                    GPUBindGroupLayoutEntry(
-                        binding = 0,
-                        visibility = ShaderStage.Fragment,
-                        buffer = GPUBufferBindingLayout(type = BufferBindingType.Uniform)
-                    ),
-                    GPUBindGroupLayoutEntry(
-                        binding = 1,
-                        visibility = ShaderStage.Fragment,
-                        texture = GPUTextureBindingLayout(
-                            sampleType = TextureSampleType.Float,
-                            viewDimension = TextureViewDimension._3D
-                        )
-                    ),
-                    GPUBindGroupLayoutEntry(
-                        binding = 2,
-                        visibility = ShaderStage.Fragment,
-                        sampler = GPUSamplerBindingLayout(type = SamplerBindingType.Filtering)
-                    ),
-                )
-            )
-        )
-    }
-
-    private val blitLutPipelineLayout by lazy {
-        device.createPipelineLayout(
-            GPUPipelineLayoutDescriptor(
-                bindGroupLayouts = arrayOf(blitBindGroupLayout, lutBindGroupLayout)
-            )
-        )
-    }
-
-    private fun buildBlitPipeline(
-        format: Int,
-        depthStencil: GPUDepthStencilState?,
-        lut: Boolean = false,
-    ): GPURenderPipeline {
-        val code = BLIT_SHADER + if (lut) Lut3dTexture.wgsl(1, 0) + BLIT_LUT_FS else BLIT_FS
-        val shaderModule = device.createShaderModule(
-            GPUShaderModuleDescriptor(shaderSourceWGSL = GPUShaderSourceWGSL(code))
-        )
-        return device.createRenderPipeline(
-            GPURenderPipelineDescriptor(
-                vertex = GPUVertexState(
-                    module = shaderModule, entryPoint = "vs_main", buffers = arrayOf(
-                        GPUVertexBufferLayout(
-                            arrayStride = INSTANCE_BYTES,
-                            stepMode = VertexStepMode.Instance,
-                            attributes = arrayOf(
-                                GPUVertexAttribute(
-                                    format = VertexFormat.Float32x4,
-                                    offset = 0,
-                                    shaderLocation = 0
-                                )
-                            )
-                        )
-                    )
-                ),
-                layout = if (lut) blitLutPipelineLayout else blitPipelineLayout,
-                fragment = GPUFragmentState(
-                    module = shaderModule, entryPoint = "fs_main", targets = arrayOf(
-                        GPUColorTargetState(
-                            // Tiles hold RenderPage's output, which is premultiplied, so One
-                            // rather than SrcAlpha.
-                            format = format, blend = GPUBlendState(
-                                color = GPUBlendComponent(
-                                    srcFactor = BlendFactor.One,
-                                    dstFactor = BlendFactor.OneMinusSrcAlpha,
-                                    operation = BlendOperation.Add
-                                ), alpha = GPUBlendComponent(
-                                    srcFactor = BlendFactor.One,
-                                    dstFactor = BlendFactor.OneMinusSrcAlpha,
-                                    operation = BlendOperation.Add
-                                )
-                            )
-                        )
-                    )
-                ),
-                primitive = GPUPrimitiveState(topology = PrimitiveTopology.TriangleList),
-                depthStencil = depthStencil,
-            )
-        )
-    }
-
-    /** Plain blit, no stencil attachment - [blitAvailableTiles]/[renderFullyTiled]'s own pass. */
-    private val blitPipelines = FormatKeyed { format -> buildBlitPipeline(format, null) }
-
-    /**
-     * As [blitPipeline], but always writes 1 into the stencil attachment wherever it draws - for
-     * [drawCore]'s live-render callers ([draw]), which mask [RenderPage.renderFast]'s per-pixel
-     * work against exactly this: a tile pixel drawn here needs no further shading underneath it,
-     * so a pixel [RenderPage] would otherwise redraw stays skipped once this stencil value marks
-     * it done. See [stencilViewFor].
-     */
-    private val blitPipelinesStencilWrite = FormatKeyed { format ->
-        buildBlitPipeline(format, stencilWriteState)
-    }
-
-    private val stencilWriteState = GPUDepthStencilState(
-        format = TextureFormat.Stencil8,
-        depthWriteEnabled = OptionalBool.False,
-        depthCompare = CompareFunction.Always,
-        stencilFront = GPUStencilFaceState(
-            compare = CompareFunction.Always, passOp = StencilOperation.Replace
-        ),
-        stencilBack = GPUStencilFaceState(
-            compare = CompareFunction.Always, passOp = StencilOperation.Replace
-        ),
-        stencilWriteMask = 0xFF,
-    )
-
-    private val blitLutPipelines = FormatKeyed { format -> buildBlitPipeline(format, null, true) }
-    private val blitLutPipelinesStencilWrite = FormatKeyed { format ->
-        buildBlitPipeline(format, stencilWriteState, true)
     }
 
     private fun setBlitPipeline(

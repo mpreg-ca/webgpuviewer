@@ -114,8 +114,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
  * the atlas's; pipelines are keyed by the atlas format.
  */
 internal class TileResize {
-    private val pipelines =
-        FormatKeyed { format -> Fullscreen.buildPipeline(TEXTURE, format, "tile resize") }
+    private companion object {
+        // Shared by every instance, so never closed.
+        val pipelines =
+            FormatKeyed { format -> Fullscreen.buildPipeline(TEXTURE, format, "tile resize") }
+    }
 
     private var uniforms: GPUBuffer? = null
     private var group: GPUBindGroup? = null
@@ -171,10 +174,7 @@ internal class TileResize {
 
     /** Drop everything without freeing it, for a lost device's objects. */
     fun forget() {
-        uniforms = null
-        group = null
-        groupSource = null
-        groupFormat = 0
+        drop()
         pipelines.built.forEach { forgetGroupLayout(it) }
         pipelines.clear()
     }
@@ -182,7 +182,13 @@ internal class TileResize {
     fun cleanup() {
         uniforms?.destroyAndRelease()
         group?.close()
-        pipelines.built.forEach { it.closeWithLayout() }
-        forget()
+        drop()
+    }
+
+    private fun drop() {
+        uniforms = null
+        group = null
+        groupSource = null
+        groupFormat = 0
     }
 }

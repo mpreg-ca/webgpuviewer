@@ -75,7 +75,9 @@ class ImageFilterWgsl(source: String, private val label: String = "Wgsl") : Imag
             pumpingEvents {
                 forgetReplacedDevice()
                 try {
-                    testRun(scale)
+                    testRun(scale).also { error ->
+                        if (error != null) pipelines.values.forEach { ComputePipelines.evict(it) }
+                    }
                 } finally {
                     cleanup()
                 }
@@ -311,7 +313,7 @@ class ImageFilterWgsl(source: String, private val label: String = "Wgsl") : Imag
     override fun cleanup() {
         textures?.destroy()
         textures = null
-        pipelines.values.forEach { it.closeWithLayout() }
+        pipelines.values.forEach { ComputePipelines.release(it) }
         pipelines.clear()
         gpuSampler?.close()
         gpuSampler = null
@@ -323,6 +325,8 @@ class ImageFilterWgsl(source: String, private val label: String = "Wgsl") : Imag
         if (failed) return
         failed = true
         Log.w(TAG, "$label unavailable", e)
+        // One may be what failed; don't hand it to another reader.
+        pipelines.values.forEach { ComputePipelines.evict(it) }
         try {
             cleanup()
         } catch (cleanupError: Exception) {
@@ -340,35 +344,38 @@ class ImageFilterWgsl(source: String, private val label: String = "Wgsl") : Imag
         val current = device
         if (builtOn != null && builtOn !== current) {
             textures = null
-            pipelines.values.forEach { forgetGroupLayout(it) }
+            // [ComputePipelines] forgets them itself.
             pipelines.clear()
             gpuSampler = null
         }
         builtOn = current
     }
 
-    private val pipelines = HashMap<WgslNetwork.Stage, GPUComputePipeline>()
+    // Held from [ComputePipelines] until [cleanup].
+    private val pipelines = HashMap<WgslNetwork.Stage, RefCache.Entry<GPUComputePipeline>>()
 
     private fun pipelineFor(stage: WgslNetwork.Stage): GPUComputePipeline =
-        pipelines.getOrPut(stage) {
-            val module = device.createShaderModule(
-                GPUShaderModuleDescriptor(
-                    label = stage.name,
-                    shaderSourceWGSL = GPUShaderSourceWGSL(stage.code)
+        pipelines.getOrPut(stage) { ComputePipelines.acquire(stage.code) { build(stage) } }.value
+
+    private fun build(stage: WgslNetwork.Stage): GPUComputePipeline {
+        val module = device.createShaderModule(
+            GPUShaderModuleDescriptor(
+                label = stage.name,
+                shaderSourceWGSL = GPUShaderSourceWGSL(stage.code)
+            )
+        )
+        // The pipeline keeps its own reference to the module.
+        try {
+            return device.createComputePipeline(
+                GPUComputePipelineDescriptor(
+                    label = "$label ${stage.name}",
+                    compute = GPUComputeState(module, entryPoint = "main")
                 )
             )
-            // The pipeline keeps its own reference to the module.
-            try {
-                device.createComputePipeline(
-                    GPUComputePipelineDescriptor(
-                        label = "$label ${stage.name}",
-                        compute = GPUComputeState(module, entryPoint = "main")
-                    )
-                )
-            } finally {
-                module.close()
-            }
+        } finally {
+            module.close()
         }
+    }
 
     private var gpuSampler: GPUSampler? = null
 
