@@ -540,7 +540,6 @@ object Hdr {
     }
 
     private fun setColorMode(wantHdr: Boolean) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val view = colorModeHost?.get() ?: return
 
         // Claimed under the lock: two threads reaching here with opposite intents could
@@ -611,14 +610,12 @@ object Hdr {
     }
 
     fun requestHdrColorMode(window: Window): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return false
         window.colorMode = ActivityInfo.COLOR_MODE_HDR
         return true
     }
 
     /** The counterpart to [requestHdrColorMode]; the mode costs power for as long as it is set. */
     fun clearHdrColorMode(context: Context) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val activity = context.findActivity() ?: return
         activity.window.colorMode = ActivityInfo.COLOR_MODE_DEFAULT
     }
