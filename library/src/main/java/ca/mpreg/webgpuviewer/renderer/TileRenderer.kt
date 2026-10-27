@@ -1172,7 +1172,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
                 stencilTextures[i]?.destroyAndRelease()
                 val texture = device.createTexture(
                     GPUTextureDescriptor(
-                        usage = TextureUsage.RenderAttachment,
+                        usage = TextureUsage.RenderAttachment or TextureUsage.TransientAttachment,
                         size = GPUExtent3D(dst.width, dst.height),
                         format = TextureFormat.Stencil8,
                     )
