@@ -53,6 +53,7 @@ class ComposePageImage(private val host: ViewGroup) {
         val image = Image(width, height)
         try {
             image.backgroundColor = backgroundColor
+            image.useImageLut = false
             WebGpuRenderer.withContext { _ -> image.mipmaps[0].update(pixels) }
         } catch (e: Throwable) {
             image.cleanup()

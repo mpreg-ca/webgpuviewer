@@ -26,6 +26,7 @@ import androidx.webgpu.GPUVertexState
 import androidx.webgpu.OptionalBool
 import androidx.webgpu.PrimitiveTopology.Companion.TriangleList
 import androidx.webgpu.TextureFormat
+import ca.mpreg.webgpuviewer.filter.Lut3dTexture
 import ca.mpreg.webgpuviewer.renderer.RenderPage.HEADER
 import ca.mpreg.webgpuviewer.renderer.RenderPage.TILE_HEADER
 import ca.mpreg.webgpuviewer.renderer.RenderPage.TILE_SAMPLER_FS
@@ -98,18 +99,30 @@ object RenderPage {
      * Per format because a pipeline bakes its colour target's: the same shader draws an SDR page
      * into an 8-bit target and an HDR page into a float one, often in the same frame.
      */
-    internal class Variant(build: (format: Int) -> GPURenderPipeline) {
-        private val byFormat = FormatKeyed(build)
-        fun pipeline(format: Int): GPURenderPipeline = byFormat[format]
+    internal class Variant(build: (format: Int, lut: Boolean) -> GPURenderPipeline) {
+        private val plain = FormatKeyed { build(it, false) }
+        private val withLut = FormatKeyed { build(it, true) }
+        fun pipeline(format: Int, lut: Boolean = false): GPURenderPipeline =
+            (if (lut) withLut else plain)[format]
     }
+
+    /**
+     * This frame's image LUT, null for none. Set by [TileRenderer.newFrame]; frames hold the render
+     * mutex, so one global serves every viewer. Tile draws only: [render] also feeds
+     * [ImageFilterChain], and its tiles get the LUT when [TileRenderer] blits them.
+     */
+    internal var lut: Lut3dTexture? = null
+
+    private fun tileHeader(lut: Boolean) =
+        TILE_HEADER + if (lut) Lut3dTexture.wgsl(0, 2) else NO_LUT
 
     // Every caller of renderFast is inside ImageViewerState/ImageViewerContinuousState's own
     // render pass, which always attaches TileRenderer's stencil buffer (see [stencilViewFor]) -
     // so samplerVariant's pipeline can carry the stencil test directly, skipping a pixel
     // TileRenderer's blit already wrote (stencil == 1) instead of shading it a second time.
-    private val samplerVariant = Variant { format ->
+    private val samplerVariant = Variant { format, lut ->
         buildPipeline(
-            TILE_HEADER + TILE_VS_MAIN + TILE_SAMPLER_FS, format,
+            tileHeader(lut) + TILE_VS_MAIN + TILE_SAMPLER_FS, format,
             depthStencil = GPUDepthStencilState(
                 format = TextureFormat.Stencil8,
                 depthWriteEnabled = OptionalBool.False,
@@ -137,7 +150,7 @@ object RenderPage {
     private val resolveVariants = HashMap<String, Variant>()
 
     private fun variant(code: String) = resolveVariants.getOrPut(code) {
-        Variant { format -> buildPipeline(HEADER + VS_MAIN + code + RESOLVE_MAIN, format) }
+        Variant { format, _ -> buildPipeline(HEADER + VS_MAIN + code + RESOLVE_MAIN, format) }
     }
 
     /** The resolves the samplers in force supply - see [Sampler.code]. */
@@ -146,21 +159,23 @@ object RenderPage {
 
     // As samplerVariant, but stencil-free - Transition's cache-seed pass has none, and doesn't
     // need one: it fills once, then tiles blit on top in later passes via ordinary blending.
-    private val samplerVariantUnmasked =
-        Variant { format -> buildPipeline(TILE_HEADER + TILE_VS_MAIN + TILE_SAMPLER_FS, format) }
+    private val samplerVariantUnmasked = Variant { format, lut ->
+        buildPipeline(tileHeader(lut) + TILE_VS_MAIN + TILE_SAMPLER_FS, format)
+    }
 
     // Used by Transition's cache seed for non-highQuality pages, whose pass has no stencil
     // attachment at all - must stay stencil-free. See [plainVariantMasked] for the
     // stencil-pass-compatible twin ImageViewerState/Continuous use instead.
-    private val plainVariant =
-        Variant { format -> buildPipeline(TILE_HEADER + TILE_VS_MAIN + TILE_PLAIN_FS, format) }
+    private val plainVariant = Variant { format, lut ->
+        buildPipeline(tileHeader(lut) + TILE_VS_MAIN + TILE_PLAIN_FS, format)
+    }
 
     // As plainVariant, but declares a no-op stencil state (always passes, never writes) purely so
     // it's valid to use within ImageViewerState/Continuous's stencil-attached pass alongside
     // samplerVariant/renderBackground's pipelines - it doesn't itself participate in masking.
-    private val plainVariantMasked = Variant { format ->
+    private val plainVariantMasked = Variant { format, lut ->
         buildPipeline(
-            TILE_HEADER + TILE_VS_MAIN + TILE_PLAIN_FS, format,
+            tileHeader(lut) + TILE_VS_MAIN + TILE_PLAIN_FS, format,
             depthStencil = GPUDepthStencilState(
                 format = TextureFormat.Stencil8,
                 depthWriteEnabled = OptionalBool.False,
@@ -471,6 +486,12 @@ fn tile_to_srgb(linear_rgb: vec4<f32>) -> vec4<f32> {
 }
 """
 
+    private const val NO_LUT = """
+fn apply_lut(rgb: vec3<f32>) -> vec3<f32> {
+    return rgb;
+}
+"""
+
     private const val TILE_VS_MAIN = """
 @vertex
 fn vs_main(@builtin(vertex_index) vertex_index: u32) -> TileVertexOutput {
@@ -520,7 +541,7 @@ fn fs_main(in: TileVertexOutput) -> @location(0) vec4<f32> {
 
     let linear_col = mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
     let col = tile_to_srgb(linear_col);
-    return vec4<f32>(col.rgb * col.a, col.a);
+    return vec4<f32>(apply_lut(col.rgb) * col.a, col.a);
 }
 """
 
@@ -546,7 +567,7 @@ fn fs_main(in: TileVertexOutput) -> @location(0) vec4<f32> {
     let c11 = textureLoad(src_tex, vec2<i32>(i1.x, i1.y), 0);
 
     let col = mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
-    return vec4<f32>(col.rgb * col.a, col.a);
+    return vec4<f32>(apply_lut(col.rgb) * col.a, col.a);
 }
 """
 
@@ -634,7 +655,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         src: RectF? = null,
     ) {
         for (tile in image.prepareTilesForRender(dst, x, y, scale, src)) {
-            drawTile(pass, dst, tile, variant)
+            drawTile(pass, dst, tile, variant, image.useImageLut)
         }
     }
 
@@ -680,7 +701,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
      * rather than the shared scratch one [draw] uses - see [Mipmap.TileRect]'s doc for why.
      */
     internal fun drawTile(
-        pass: GPURenderPassEncoder, dst: GPUTexture, tile: Image.TileForDraw, variant: Variant
+        pass: GPURenderPassEncoder,
+        dst: GPUTexture,
+        tile: Image.TileForDraw,
+        variant: Variant,
+        useLut: Boolean,
     ) {
         val byteBuffer = tileBytes.get()
         byteBuffer.clear()
@@ -689,19 +714,29 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
         device.queue.writeBuffer(tile.uniform, 0, byteBuffer)
 
-        val pipeline = variant.pipeline(dst.format)
+        val lut = if (useLut) lut else null
+        val pipeline = variant.pipeline(dst.format, lut != null)
         pass.setPipeline(pipeline)
         // samplerVariant's stencil test reads against 1 - see [TileRenderer.blitPipelineStencilWrite],
         // the only thing that ever writes this attachment.
         if (variant === samplerVariant) pass.setStencilReference(1)
+        val entries = if (lut == null) {
+            arrayOf(
+                GPUBindGroupEntry(0, buffer = tile.uniform),
+                GPUBindGroupEntry(1, textureView = tile.view),
+            )
+        } else {
+            arrayOf(
+                GPUBindGroupEntry(0, buffer = tile.uniform),
+                GPUBindGroupEntry(1, textureView = tile.view),
+                GPUBindGroupEntry(2, buffer = lut.uniforms),
+                GPUBindGroupEntry(3, textureView = lut.view!!),
+                GPUBindGroupEntry(4, sampler = lut.sampler),
+            )
+        }
         pass.setTransientBindGroup(
             0, device.createBindGroup(
-                GPUBindGroupDescriptor(
-                    layout = pipeline.groupLayout(), entries = arrayOf(
-                        GPUBindGroupEntry(0, buffer = tile.uniform),
-                        GPUBindGroupEntry(1, textureView = tile.view),
-                    )
-                )
+                GPUBindGroupDescriptor(layout = pipeline.groupLayout(), entries = entries)
             )
         )
         pass.draw(6)

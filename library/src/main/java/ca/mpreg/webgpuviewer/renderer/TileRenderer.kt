@@ -63,8 +63,10 @@ import androidx.webgpu.StoreOp
 import androidx.webgpu.TextureFormat
 import androidx.webgpu.TextureSampleType
 import androidx.webgpu.TextureUsage
+import androidx.webgpu.TextureViewDimension
 import androidx.webgpu.VertexFormat
 import androidx.webgpu.VertexStepMode
+import ca.mpreg.webgpuviewer.filter.Lut3dTexture
 import ca.mpreg.webgpuviewer.renderer.TileRenderer.Companion.BATCH_TARGET_NS
 import ca.mpreg.webgpuviewer.renderer.TileRenderer.Companion.OFF_SCREEN_SCORE
 import ca.mpreg.webgpuviewer.renderer.TileRenderer.Companion.SLAB_SIZE
@@ -278,6 +280,15 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
 
     /** Times every tile this generates - see [TileProfile]. */
     val profile = TileProfile()
+
+    // Applied when tiles are blitted, not baked into them, so a change regenerates none.
+    val imageLut = Lut3dTexture()
+
+    // From [newFrame] before anything draws, when the applied table changes. Render thread.
+    var onImageLutChanged: () -> Unit = {}
+
+    // Rebuilt when [imageLut]'s view is.
+    private var lutBindGroup: GPUBindGroup? = null
 
     /**
      * In run order - see [ImageFilterChain]. Assigning wipes every grid and cleans up dropped
@@ -986,12 +997,50 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         )
     }
 
+    // Must match [Lut3dTexture.wgsl].
+    private val lutBindGroupLayout by lazy {
+        device.createBindGroupLayout(
+            GPUBindGroupLayoutDescriptor(
+                entries = arrayOf(
+                    GPUBindGroupLayoutEntry(
+                        binding = 0,
+                        visibility = ShaderStage.Fragment,
+                        buffer = GPUBufferBindingLayout(type = BufferBindingType.Uniform)
+                    ),
+                    GPUBindGroupLayoutEntry(
+                        binding = 1,
+                        visibility = ShaderStage.Fragment,
+                        texture = GPUTextureBindingLayout(
+                            sampleType = TextureSampleType.Float,
+                            viewDimension = TextureViewDimension._3D
+                        )
+                    ),
+                    GPUBindGroupLayoutEntry(
+                        binding = 2,
+                        visibility = ShaderStage.Fragment,
+                        sampler = GPUSamplerBindingLayout(type = SamplerBindingType.Filtering)
+                    ),
+                )
+            )
+        )
+    }
+
+    private val blitLutPipelineLayout by lazy {
+        device.createPipelineLayout(
+            GPUPipelineLayoutDescriptor(
+                bindGroupLayouts = arrayOf(blitBindGroupLayout, lutBindGroupLayout)
+            )
+        )
+    }
+
     private fun buildBlitPipeline(
         format: Int,
-        depthStencil: GPUDepthStencilState?
+        depthStencil: GPUDepthStencilState?,
+        lut: Boolean = false,
     ): GPURenderPipeline {
+        val code = BLIT_SHADER + if (lut) Lut3dTexture.wgsl(1, 0) + BLIT_LUT_FS else BLIT_FS
         val shaderModule = device.createShaderModule(
-            GPUShaderModuleDescriptor(shaderSourceWGSL = GPUShaderSourceWGSL(BLIT_SHADER))
+            GPUShaderModuleDescriptor(shaderSourceWGSL = GPUShaderSourceWGSL(code))
         )
         return device.createRenderPipeline(
             GPURenderPipelineDescriptor(
@@ -1010,7 +1059,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
                         )
                     )
                 ),
-                layout = blitPipelineLayout,
+                layout = if (lut) blitLutPipelineLayout else blitPipelineLayout,
                 fragment = GPUFragmentState(
                     module = shaderModule, entryPoint = "fs_main", targets = arrayOf(
                         GPUColorTargetState(
@@ -1047,20 +1096,51 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
      * it done. See [stencilViewFor].
      */
     private val blitPipelinesStencilWrite = FormatKeyed { format ->
-        buildBlitPipeline(
-            format, GPUDepthStencilState(
-                format = TextureFormat.Stencil8,
-                depthWriteEnabled = OptionalBool.False,
-                depthCompare = CompareFunction.Always,
-                stencilFront = GPUStencilFaceState(
-                    compare = CompareFunction.Always, passOp = StencilOperation.Replace
-                ),
-                stencilBack = GPUStencilFaceState(
-                    compare = CompareFunction.Always, passOp = StencilOperation.Replace
-                ),
-                stencilWriteMask = 0xFF,
+        buildBlitPipeline(format, stencilWriteState)
+    }
+
+    private val stencilWriteState = GPUDepthStencilState(
+        format = TextureFormat.Stencil8,
+        depthWriteEnabled = OptionalBool.False,
+        depthCompare = CompareFunction.Always,
+        stencilFront = GPUStencilFaceState(
+            compare = CompareFunction.Always, passOp = StencilOperation.Replace
+        ),
+        stencilBack = GPUStencilFaceState(
+            compare = CompareFunction.Always, passOp = StencilOperation.Replace
+        ),
+        stencilWriteMask = 0xFF,
+    )
+
+    private val blitLutPipelines = FormatKeyed { format -> buildBlitPipeline(format, null, true) }
+    private val blitLutPipelinesStencilWrite = FormatKeyed { format ->
+        buildBlitPipeline(format, stencilWriteState, true)
+    }
+
+    private fun setBlitPipeline(
+        pass: GPURenderPassEncoder, format: Int, st: PageTiles, stencilWrite: Boolean
+    ) {
+        var useLut = true
+        st.page.forEachImage { image, _, _ -> if (!image.useImageLut) useLut = false }
+        val lut = if (useLut) RenderPage.lut else null
+        val pipelines = when {
+            lut == null && stencilWrite -> blitPipelinesStencilWrite
+            lut == null -> blitPipelines
+            stencilWrite -> blitLutPipelinesStencilWrite
+            else -> blitLutPipelines
+        }
+        pass.setPipeline(pipelines[format])
+        if (lut == null) return
+        val group = lutBindGroup ?: device.createBindGroup(
+            GPUBindGroupDescriptor(
+                layout = lutBindGroupLayout, entries = arrayOf(
+                    GPUBindGroupEntry(0, buffer = lut.uniforms),
+                    GPUBindGroupEntry(1, textureView = lut.view!!),
+                    GPUBindGroupEntry(2, sampler = lut.sampler),
+                )
             )
-        )
+        ).also { lutBindGroup = it }
+        pass.setBindGroup(1, group)
     }
 
     // Ring-buffered, not one shared texture: reusing a single stencil texture every frame would
@@ -1117,6 +1197,14 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         retired.clear()
         ErrorScopes.pump()
         imageChain.prune()
+
+        val drawnLut = imageLut.applied
+        if (imageLut.prepare()) {
+            lutBindGroup?.close()
+            lutBindGroup = null
+        }
+        RenderPage.lut = if (imageLut.applied != null) imageLut else null
+        if (imageLut.applied !== drawnLut) onImageLutChanged()
 
         // Every cached tile is at the old format, so an HDR change takes the whole atlas. Here
         // only: this is the one point in a frame where no caller holds a grid, and tearing one
@@ -1685,12 +1773,8 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         val instances = st.instances ?: return
         if (st.instanceCount == 0) return
 
-        if (useStencilMask) {
-            pass.setPipeline(blitPipelinesStencilWrite[format])
-            pass.setStencilReference(1)
-        } else {
-            pass.setPipeline(blitPipelines[format])
-        }
+        setBlitPipeline(pass, format, st, useStencilMask)
+        if (useStencilMask) pass.setStencilReference(1)
         pass.setBindGroup(0, st.bindGroup ?: gridBindGroup(st).also { st.bindGroup = it })
         pass.setVertexBuffer(0, instances)
         pass.draw(6, st.instanceCount)
@@ -1729,7 +1813,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         )
         device.queue.writeBuffer(instances, 0, bytes.slice())
 
-        pass.setPipeline(blitPipelines[format])
+        setBlitPipeline(pass, format, st, false)
         pass.setBindGroup(0, st.bindGroup ?: gridBindGroup(st).also { st.bindGroup = it })
         pass.setVertexBuffer(0, instances)
         pass.draw(6, count)
@@ -2900,6 +2984,8 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
                 stencilViews.fill(null)
                 stencilWidth = 0
                 stencilHeight = 0
+                lutBindGroup = null
+                if (RenderPage.lut === imageLut) RenderPage.lut = null
                 return@launch
             }
             // On the worker with everything else it owns: the chains' textures can be mid-tile
@@ -2907,6 +2993,10 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             WebGpuRenderer.withContext {
                 imageChain.cleanup()
                 tilesFilters.cleanup()
+                lutBindGroup?.close()
+                lutBindGroup = null
+                imageLut.cleanup()
+                if (RenderPage.lut === imageLut) RenderPage.lut = null
                 pages.values.forEach { it.destroyAll(atlasOrNull) }
                 pages.clear()
                 atlasOrNull?.destroy()
@@ -2979,10 +3069,24 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32, @location(0) tile: vec4<f32
     return out;
 }
 
+"""
+
+private const val BLIT_FS = """
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // 1:1 at integer positions with a nearest sampler: an exact copy of the tile's texels,
     // already premultiplied by RenderPage.
     return textureSample(src_tex, src_sampler, in.uv);
+}
+"""
+
+private const val BLIT_LUT_FS = """
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    let texel = textureSample(src_tex, src_sampler, in.uv);
+    if (texel.a <= 0.0) {
+        return texel;
+    }
+    return vec4<f32>(apply_lut(texel.rgb / texel.a) * texel.a, texel.a);
 }
 """

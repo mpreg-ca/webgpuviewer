@@ -84,6 +84,8 @@ class Image private constructor(
 
     var backgroundColor: Int = 0xFF000000.toInt()
 
+    internal var useImageLut = true
+
     /**
      * Trim bounds detected from image content, or null if not trimmed.
      */

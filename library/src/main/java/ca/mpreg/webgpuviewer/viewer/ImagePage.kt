@@ -746,7 +746,7 @@ open class ImagePage {
             }
             forEachPlacedImage(dst, x, y, scale) { image, _, placeX, placeY, placeScale ->
                 for (tile in image.prepareTilesForRender(dst, placeX, placeY, placeScale)) {
-                    RenderPage.drawTile(pass, dst, tile, variant)
+                    RenderPage.drawTile(pass, dst, tile, variant, image.useImageLut)
                 }
             }
         }
@@ -1051,6 +1051,7 @@ open class ImagePage {
                 throw e
             }
             backgroundColor?.let { image.backgroundColor = it }
+            image.useImageLut = false
             // Against [cleanup], which swaps [snapshot] out under the same lock: exactly one side
             // frees each image.
             val kept = synchronized(this) {

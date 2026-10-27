@@ -23,7 +23,9 @@ import androidx.webgpu.LoadOp
 import androidx.webgpu.StoreOp
 import ca.mpreg.webgpuviewer.draw.Draw
 import ca.mpreg.webgpuviewer.draw.clear
+import ca.mpreg.webgpuviewer.filter.FilterLut3d
 import ca.mpreg.webgpuviewer.filter.FullscreenFilterChain
+import ca.mpreg.webgpuviewer.filter.Lut3d
 import ca.mpreg.webgpuviewer.renderer.FrameResult
 import ca.mpreg.webgpuviewer.renderer.Hdr
 import ca.mpreg.webgpuviewer.renderer.ImageFilter
@@ -47,7 +49,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boolean = false) {
     val renderer = WebGpuRenderer()
 
-    internal val tiles = TileRenderer { invalidate() }
+    internal val tiles = TileRenderer { invalidate() }.also {
+        it.onImageLutChanged = { Transition.releasePagesOf(this) }
+    }
 
     /**
      * Filters over whole images, output kept as a level of each image for the tiles to read - see
@@ -85,6 +89,20 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
         get() = tiles.downscaler
         set(value) {
             tiles.downscaler = value
+        }
+
+    /**
+     * A 3D LUT over image pixels after sampling, except composed pages' ([ImagePage.Compose],
+     * [ComposePageImage]); [FilterLut3d] in [filters] takes the whole frame instead. Null for
+     * none. Safe from any thread. Assign a new table to change it: one edited in place is not
+     * re-uploaded. Input is clamped to 0..1, so HDR highlights clip.
+     */
+    var imageLut: Lut3d?
+        get() = tiles.imageLut.lut
+        set(value) {
+            if (tiles.imageLut.lut === value) return
+            tiles.imageLut.lut = value
+            invalidate()
         }
 
     /**
