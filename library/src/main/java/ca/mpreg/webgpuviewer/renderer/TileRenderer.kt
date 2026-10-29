@@ -109,9 +109,9 @@ internal fun solveImagePlacement(
     dstHeight: Float
 ): Pair<Float, Float> {
     val x =
-        (targetX - dstWidth / 2f) / (imageScale * dstWidth) - image.x / dstWidth - WebGpuRenderer.offsetX
+        (targetX - dstWidth / 2f) / (imageScale * dstWidth) - image.offsetX / dstWidth - WebGpuRenderer.offsetX
     val y =
-        (targetY - dstHeight / 2f) / (imageScale * dstHeight) - image.y / dstHeight - WebGpuRenderer.offsetY
+        (targetY - dstHeight / 2f) / (imageScale * dstHeight) - image.offsetY / dstHeight - WebGpuRenderer.offsetY
     return x to y
 }
 
@@ -2417,8 +2417,8 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             if (base == null || failed) return@forEachImage
             // Placed as [renderTileContent] places it: centred on the target.
             val si = st.scale * imageScale
-            val targetX = -tx * ts + st.scale * offsetX + si * image.x
-            val targetY = st.centerYOffset - ty * ts + si * image.y
+            val targetX = -tx * ts + st.scale * offsetX + si * image.offsetX
+            val targetY = st.centerYOffset - ty * ts + si * image.offsetY
             val dstLeft = targetX - si * base.width / 2f
             val dstTop = targetY - si * base.height / 2f
             // In image pixels: the tiles filters' halo and the resolve's 2-texel reach are level
@@ -2507,8 +2507,8 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         try {
             for ((image, srcOffsetX, imageScale) in images) {
                 val si = s * imageScale
-                val targetX = -originX + inset + s * srcOffsetX + si * image.x
-                val targetY = centerY - originY + inset + si * image.y
+                val targetX = -originX + inset + s * srcOffsetX + si * image.offsetX
+                val targetY = centerY - originY + inset + si * image.offsetY
                 val (x, y) = solveImagePlacement(targetX, targetY, si, image, dst, dst)
                 val extend = if (inset > 0f) Extend(
                     left = if (srcOffsetX == leftmost) inset else 0f,

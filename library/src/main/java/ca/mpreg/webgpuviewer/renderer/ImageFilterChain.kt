@@ -632,9 +632,9 @@ internal class ImageFilterChain(private val onChange: () -> Unit) {
             val originY = row * geometry.blockSize - halo
             // Centre putting the left edge at -originX: see solveImagePlacement.
             val x =
-                (-originX + base.width / 2f - side / 2f) / side - image.x / side - WebGpuRenderer.offsetX
+                (-originX + base.width / 2f - side / 2f) / side - image.offsetX / side - WebGpuRenderer.offsetX
             val y =
-                (-originY + base.height / 2f - side / 2f) / side - image.y / side - WebGpuRenderer.offsetY
+                (-originY + base.height / 2f - side / 2f) / side - image.offsetY / side - WebGpuRenderer.offsetY
             val h = halo.toFloat()
             RenderPage.render(
                 draw,

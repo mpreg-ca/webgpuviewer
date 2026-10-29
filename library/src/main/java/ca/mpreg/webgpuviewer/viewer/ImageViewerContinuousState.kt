@@ -175,15 +175,15 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
     private fun cropInImage(
         crop: Rect, page: ImagePage.ImageSingle, image: Image, offsetX: Float, imageScale: Float,
     ): RectF {
-        fun x(px: Int) = (px - page.width / 2f - offsetX) / imageScale - image.x + image.width / 2f
-        fun y(py: Int) = (py - page.height / 2f) / imageScale - image.y + image.height / 2f
+        fun x(px: Int) = (px - page.width / 2f - offsetX) / imageScale - image.offsetX + image.width / 2f
+        fun y(py: Int) = (py - page.height / 2f) / imageScale - image.offsetY + image.height / 2f
         return RectF(x(crop.left), y(crop.top), x(crop.right), y(crop.bottom))
     }
 
     /** The part of [page] drawn, in its own pixels; null for all of it. */
     private fun cropOf(page: ImagePage.ImageSingle): Rect? {
         if (!cropBorders) return null
-        val trim = page.image?.trim ?: return null
+        val trim = page.image?.visibleTrim ?: return null
         return if (trim.width() > 0 && trim.height() > 0) Rect(trim) else null
     }
 
@@ -842,9 +842,9 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
                             if (image.mipmaps.isEmpty()) return@forEachImage
                             val imageScale = pageScale * s.scale * sideScale
                             val docCenterX =
-                                shiftX + pageScale * (srcOffsetX + sideScale * image.x)
+                                shiftX + pageScale * (srcOffsetX + sideScale * image.offsetX)
                             val docCenterY = vp.docTop + 0.5f * vp.contentHeight + shiftY +
-                                    pageScale * sideScale * image.y
+                                    pageScale * sideScale * image.offsetY
                             // A composed page lands where the window draws it - see [composeLeft].
                             val compose = page is ImagePage.Compose
                             val targetX = if (compose) {

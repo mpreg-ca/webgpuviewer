@@ -324,24 +324,24 @@ open class ImagePage {
         open var highQuality: Boolean = true
 
         override val width: Int
-            get() = image?.width ?: 0
+            get() = image?.shownWidth ?: 0
         override val height: Int
-            get() = image?.height ?: 0
+            get() = image?.shownHeight ?: 0
 
         override val trimWidth: Int
-            get() = image?.let { it.trim?.width() ?: it.width } ?: 0
+            get() = image?.let { it.visibleTrim?.width() ?: it.shownWidth } ?: 0
         override val trimHeight: Int
-            get() = image?.let { it.trim?.height() ?: it.height } ?: 0
+            get() = image?.let { it.visibleTrim?.height() ?: it.shownHeight } ?: 0
 
         override fun xEdges(trimmed: Boolean): Pair<Float, Float> {
             if (!trimmed) return 0f to width.toFloat()
-            val trim = image?.trim ?: return 0f to width.toFloat()
+            val trim = image?.visibleTrim ?: return 0f to width.toFloat()
             return trim.left.toFloat() to trim.right.toFloat()
         }
 
         override fun yEdges(trimmed: Boolean): Pair<Int, Int>? {
             if (!trimmed) return null
-            val trim = image?.trim ?: return null
+            val trim = image?.visibleTrim ?: return null
             return trim.top to trim.bottom
         }
 
@@ -1197,8 +1197,8 @@ open class ImagePage {
         override fun forEachImage(
             action: (image: Image, offsetX: Float, imageScale: Float) -> Unit
         ) {
-            leftSingle?.currentImage?.let { action(it, -0.5f * it.width * leftScale, leftScale) }
-            rightSingle?.currentImage?.let { action(it, 0.5f * it.width * rightScale, rightScale) }
+            leftSingle?.currentImage?.let { action(it, -0.5f * it.shownWidth * leftScale, leftScale) }
+            rightSingle?.currentImage?.let { action(it, 0.5f * it.shownWidth * rightScale, rightScale) }
         }
 
         override val hasUploadedImage: Boolean
@@ -1377,9 +1377,9 @@ open class ImagePage {
         override val trimWidth: Int
             get() {
                 val leftW = if (!counted(left)) 0 else
-                    leftSingle?.image?.let { it.width - (it.trim?.left ?: 0) } ?: left?.width ?: 0
+                    leftSingle?.image?.let { it.shownWidth - (it.visibleTrim?.left ?: 0) } ?: left?.width ?: 0
                 val rightW = if (!counted(right)) 0 else
-                    rightSingle?.image?.let { it.trim?.right ?: it.width } ?: right?.width ?: 0
+                    rightSingle?.image?.let { it.visibleTrim?.right ?: it.shownWidth } ?: right?.width ?: 0
                 return (leftW * leftScale + rightW * rightScale).roundToInt()
             }
 
@@ -1414,10 +1414,10 @@ open class ImagePage {
         override fun yEdges(trimmed: Boolean): Pair<Int, Int>? {
             if (!trimmed) return null
             val images = listOfNotNull(leftSingle?.image, rightSingle?.image)
-            if (images.all { it.trim == null }) return null
+            if (images.all { it.visibleTrim == null }) return null
             // An untrimmed side contributes its whole extent, so nothing of it is panned past.
-            val trimTop = images.minOf { it.trim?.top ?: 0 }
-            val trimBottom = images.maxOf { it.trim?.bottom ?: it.height }
+            val trimTop = images.minOf { it.visibleTrim?.top ?: 0 }
+            val trimBottom = images.maxOf { it.visibleTrim?.bottom ?: it.shownHeight }
             return trimTop to trimBottom
         }
 

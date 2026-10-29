@@ -87,6 +87,25 @@ class Image private constructor(
     var trim: Rect? = null
 
     /**
+     * Show only [trim]: pages take its size, it sits where the whole image would, and nothing
+     * outside it draws. Set before the image is shown; a page already laid out keeps its size.
+     */
+    @Volatile
+    var crop: Boolean = false
+
+    internal val cropRect: Rect?
+        get() = if (crop) trim?.takeIf { it.width() > 0 && it.height() > 0 } else null
+
+    internal val visibleTrim: Rect?
+        get() = if (cropRect != null) null else trim
+
+    internal val shownWidth: Int get() = cropRect?.width() ?: width
+    internal val shownHeight: Int get() = cropRect?.height() ?: height
+
+    internal val offsetX: Float get() = x + (cropRect?.let { width / 2f - it.exactCenterX() } ?: 0f)
+    internal val offsetY: Float get() = y + (cropRect?.let { height / 2f - it.exactCenterY() } ?: 0f)
+
+    /**
      * How HDR source pixels were fitted at creation - peak kept in half-float and scaled to
      * [HdrFit.target], or tone mapped (target 1) - so [update] and [twin] fit later frames the
      * same way instead of each by its own peak. Null for an SDR source.
@@ -465,8 +484,8 @@ class Image private constructor(
     }
 
     /**
-     * Another image like this one - size, texel format, HDR fit, background - from [pixels], a
-     * later frame in the form [update] takes. For swapping with it frame by frame.
+     * Another image like this one - size, texel format, HDR fit, background, placement and crop -
+     * from [pixels], a later frame in the form [update] takes. For swapping with it frame by frame.
      */
     suspend fun twin(pixels: ByteBuffer): Image = invoke(
         pixels, width, height,
@@ -475,7 +494,12 @@ class Image private constructor(
         hdr = hdrFit != null,
         hdrHeadroom = hdrHeadroom,
         hdrPeak = hdrFit?.peak ?: 0f,
-    )
+    ).also {
+        it.x = x
+        it.y = y
+        it.trim = trim
+        it.crop = crop
+    }
 
     // [fitHdr]'s output, reused: a frame's worth a call would otherwise pile up until a GC.
     private var fitScratch: ByteBuffer? = null
@@ -557,7 +581,7 @@ class Image private constructor(
     }
 
     /**
-     * Where this image's full extent lands in [dst], as normalised (x1, y1, x2, y2) surface
+     * Where this image's shown extent lands in [dst], as normalised (x1, y1, x2, y2) surface
      * coordinates - the same placement [prepareForRender] resolves to, but without going through
      * a mip level or [Mipmap.getQuad]. For callers that only want geometry (a background rect,
      * [ca.mpreg.webgpuviewer.viewer.ImagePage.ImageSingle.pageRect]) with no reason to touch mip/tile
@@ -566,10 +590,10 @@ class Image private constructor(
     fun placement(dst: GPUTexture, x: Float, y: Float, scale: Float): FloatArray {
         val adjustedX = x + this.x / dst.width + WebGpuRenderer.offsetX
         val adjustedY = y + this.y / dst.height + WebGpuRenderer.offsetY
-        val x1 = 0.5f + scale * (adjustedX - 0.5f * width / dst.width)
-        val y1 = 0.5f + scale * (adjustedY - 0.5f * height / dst.height)
+        val x1 = 0.5f + scale * (adjustedX - 0.5f * shownWidth / dst.width)
+        val y1 = 0.5f + scale * (adjustedY - 0.5f * shownHeight / dst.height)
         return floatArrayOf(
-            x1, y1, x1 + scale * width / dst.width, y1 + scale * height / dst.height
+            x1, y1, x1 + scale * shownWidth / dst.width, y1 + scale * shownHeight / dst.height
         )
     }
 
@@ -654,8 +678,8 @@ class Image private constructor(
 
         val mipmap = source ?: mipmaps[level]
 
-        val adjustedX = x + this.x / dst.width + WebGpuRenderer.offsetX
-        val adjustedY = y + this.y / dst.height + WebGpuRenderer.offsetY
+        val adjustedX = x + offsetX / dst.width + WebGpuRenderer.offsetX
+        val adjustedY = y + offsetY / dst.height + WebGpuRenderer.offsetY
 
         // View centre in this level's pixels: scale the level-0 offset by mipmap.scale before
         // adding the level's half-size, or the window lands up to 2^level too far out.
@@ -708,7 +732,7 @@ class Image private constructor(
      * guard is needed here since any viewport is just whichever tiles it happens to overlap.
      *
      * [src], in this image's pixels, crops the draw: each tile draws only its part inside, in
-     * place.
+     * place. By default, [cropRect].
      */
     fun prepareTilesForRender(
         dst: GPUTexture, x: Float, y: Float, scale: Float, src: RectF? = null
@@ -719,8 +743,9 @@ class Image private constructor(
         val level = floor(log2(1 / scale)).toInt().coerceIn(0, mipmaps.size - 1)
         val mipmap = mipmaps[level]
 
-        val adjustedX = x + this.x / dst.width + WebGpuRenderer.offsetX
-        val adjustedY = y + this.y / dst.height + WebGpuRenderer.offsetY
+        val adjustedX = x + offsetX / dst.width + WebGpuRenderer.offsetX
+        val adjustedY = y + offsetY / dst.height + WebGpuRenderer.offsetY
+        val src = src ?: cropRect?.let(::RectF)
 
         // Same view-centre derivation as prepareForRender's vx/vy, kept unrounded since this is
         // now just a rect query rather than a single discrete window pick.
