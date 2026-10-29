@@ -3,10 +3,10 @@ package ca.mpreg.webgpuviewer.renderer
 import kotlin.math.truncate
 
 /**
- * mpv user shader size expressions (`//!WHEN`, `//!WIDTH`, `//!HEIGHT`): space-separated RPN.
- * Numbers, `NAME.w`/`NAME.h` for a texture's size, `!`, binary `+ - * / % > < >= <= == != && ||`,
- * and ternary `?`: `c a b ?` is `a` if `c` is nonzero, else `b`. Comparisons give 1 or 0;
- * `//!WHEN` runs the pass when nonzero.
+ * mpv user shader size expressions (`//!WHEN`, `//!WIDTH`, `//!HEIGHT`, and `//!HALO`):
+ * space-separated RPN. Numbers, `NAME.w`/`NAME.h` for a texture's size, a bare `NAME` for a param,
+ * `!`, binary `+ - * / % > < >= <= == != && ||`, and ternary `?`: `c a b ?` is `a` if `c` is
+ * nonzero, else `b`. Comparisons give 1 or 0; `//!WHEN` runs the pass when nonzero.
  */
 internal class SzExpr private constructor(val source: String, private val tokens: List<Token>) {
 
@@ -52,7 +52,7 @@ internal class SzExpr private constructor(val source: String, private val tokens
         private val BINARY =
             setOf("+", "-", "*", "/", "%", ">", "<", ">=", "<=", "==", "!=", "&&", "||")
 
-        private val VARIABLE = Regex("""[A-Za-z_][A-Za-z0-9_]*\.[wh]""")
+        private val VARIABLE = Regex("""[A-Za-z_][A-Za-z0-9_]*(\.[wh])?""")
 
         /** Nonzero and a number, as mpv reads a condition. */
         private fun truthy(v: Double) = v != 0.0 && !v.isNaN()

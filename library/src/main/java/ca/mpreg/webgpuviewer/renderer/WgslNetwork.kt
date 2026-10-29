@@ -1,6 +1,7 @@
 package ca.mpreg.webgpuviewer.renderer
 
 import androidx.webgpu.TextureFormat
+import kotlin.math.ceil
 import kotlin.math.floor
 
 /**
@@ -12,7 +13,8 @@ import kotlin.math.floor
 internal class WgslNetwork(
     val stages: List<Stage>,
     /** Input pixels of page around an output pixel it reads, for passes without `//!HALO`. */
-    private val fileHalo: Int,
+    private val fileHalo: SzExpr?,
+    val params: List<ImageFilterWgsl.Param>,
 ) {
 
     enum class Kind { Sampled, Storage, Sampler }
@@ -30,11 +32,13 @@ internal class WgslNetwork(
         val width: SzExpr,
         val height: SzExpr,
         val `when`: SzExpr?,
-        val halo: Int?,
+        val halo: SzExpr?,
         val bindings: List<Binding>,
         val storageFormat: Int,
         val blockX: Int,
         val blockY: Int,
+        /** Indices in [params] of those it declares as `override`s. */
+        val params: List<Int>,
     )
 
     /** A texture as a pass sees it. The tile itself has no [format]. */
@@ -85,8 +89,23 @@ internal class WgslNetwork(
         }
     }
 
-    /** Input pixels of page around the tile needed: the most any of [active] reads. */
-    fun halo(active: List<Stage>): Int = active.maxOfOrNull { it.halo ?: fileHalo } ?: 0
+    fun defaults() = FloatArray(params.size) { params[it].default }
+
+    /**
+     * Input pixels of page around the tile needed: the most any of [active] reads, with [params] at
+     * [values]. Throws if a `//!HALO` comes to less than 0 or more than [MAX_HALO].
+     */
+    fun halo(active: List<Stage>, values: FloatArray): Int {
+        val env = params.indices.associate { params[it].name to values[it].toDouble() }
+        return active.maxOfOrNull { stage ->
+            val expr = stage.halo ?: fileHalo ?: return@maxOfOrNull 0
+            val halo = ceil(expr.eval(env))
+            require(halo in 0.0..MAX_HALO.toDouble()) {
+                "${stage.name}: //!HALO ${expr.source} is $halo, not 0 to $MAX_HALO"
+            }
+            halo.toInt()
+        } ?: 0
+    }
 
     /**
      * Size [active] for a [side]-pixel square tile at page [scale], reusing each texture once its last
@@ -155,16 +174,27 @@ internal class WgslNetwork(
         var `when`: String? = null
         var components: Int? = null
         var compute: List<Int>? = null
-        var halo: Int? = null
+        var halo: String? = null
         val code = StringBuilder()
 
         /** Set by any non-blank body line; the next directive then starts another pass. */
         var hasBody = false
     }
 
+    private class ParamDraft(val name: String) {
+        var desc: String? = null
+        var type: String? = null
+        var default: String? = null
+        var minimum: String? = null
+        var maximum: String? = null
+    }
+
     companion object {
         private const val MAX_HALO = 256
         private const val MAX_PASSES = 64
+
+        /** Bounds a bad file. */
+        private const val MAX_PARAMS = 64
 
         /** Compatibility mode's `maxComputeInvocationsPerWorkgroup`, the lowest a device has. */
         private const val MAX_INVOCATIONS = 128
@@ -192,6 +222,7 @@ internal class WgslNetwork(
                     """(texture_storage_2d|texture_2d|sampler)\b(?:<\s*(\w+)(?:\s*,\s*(\w+))?)?"""
         )
         private val GROUP = Regex("""@group\(""")
+        private val OVERRIDE = Regex("""\boverride\s+(\w+)""")
         private val COMPUTE = Regex("""@compute[^{]*?\bfn\s+main\s*\(""")
         private val WORKGROUP = Regex("""@workgroup_size\(\s*(\d+)\s*(?:,\s*(\d+))?""")
         private val INTEGER = Regex("""[+-]?\d+""")
@@ -218,16 +249,61 @@ internal class WgslNetwork(
         private fun toIntOrNull(text: String): Int? =
             if (INTEGER.matches(text)) text.toIntOrNull() else null
 
+        private fun param(draft: ParamDraft): ImageFilterWgsl.Param {
+            val name = draft.name
+            val type = when (draft.type ?: "float") {
+                "float" -> ImageFilterWgsl.ParamType.Float
+                "int" -> ImageFilterWgsl.ParamType.Int
+                "uint" -> ImageFilterWgsl.ParamType.UInt
+                else -> bad("PARAM $name: TYPE ${draft.type}: float, int or uint")
+            }
+            fun number(text: String): Float = when (type) {
+                ImageFilterWgsl.ParamType.Float -> text.toFloatOrNull()?.takeIf { it.isFinite() }
+                ImageFilterWgsl.ParamType.Int -> toIntOrNull(text)?.toFloat()
+                ImageFilterWgsl.ParamType.UInt -> toIntOrNull(text)?.takeIf { it >= 0 }?.toFloat()
+            } ?: bad("PARAM $name: $text is not a ${type.wgsl}")
+            val min = draft.minimum?.let(::number) ?: if (type == ImageFilterWgsl.ParamType.UInt) 0f else null
+            val max = draft.maximum?.let(::number)
+            val default = draft.default ?: bad("PARAM $name: no //!DEFAULT")
+            val value = number(default)
+            require((min == null || value >= min) && (max == null || value <= max)) {
+                "PARAM $name: $default is not within ${min ?: "-inf"} to ${max ?: "inf"}"
+            }
+            return ImageFilterWgsl.Param(name, draft.desc.orEmpty(), type, min, max, value)
+        }
+
         fun parse(source: String): WgslNetwork {
-            var fileHalo = 0
+            var fileHalo: String? = null
             val drafts = ArrayList<Draft>()
             var current: Draft? = null
             fun next(): Draft {
                 require(drafts.size < MAX_PASSES) { "more than $MAX_PASSES passes" }
                 return Draft().also { drafts.add(it); current = it }
             }
+            val paramDrafts = LinkedHashMap<String, ParamDraft>()
+            var param: ParamDraft? = null
             for (line in source.split(Regex("""\r\n|\r|\n"""))) {
                 val match = DIRECTIVE.matchEntire(line)
+                val open = param
+                if (open != null) {
+                    // Its block ends at the first line not its own, so a pass's //!DESC right
+                    // after it would be taken as the param's.
+                    val key = match?.groupValues?.get(1)
+                    val value = match?.groupValues?.get(2)
+                    when {
+                        key == "DESC" && open.desc == null -> open.desc = value
+                        key == "TYPE" && open.type == null -> open.type = value
+                        key == "DEFAULT" && open.default == null -> open.default = value
+                        key == "MINIMUM" && open.minimum == null -> open.minimum = value
+                        key == "MAXIMUM" && open.maximum == null -> open.maximum = value
+                        else -> param = null
+                    }
+                    if (param != null) {
+                        // Kept, as comments, so the device's line numbers match the file's.
+                        current?.code?.append(line)?.append('\n')
+                        continue
+                    }
+                }
                 if (match == null) {
                     current?.let {
                         it.code.append(line).append('\n')
@@ -237,9 +313,18 @@ internal class WgslNetwork(
                 }
                 val (key, value) = match.destructured
 
+                if (key == "PARAM") {
+                    require(NAME.matches(value)) { "PARAM $value: not a name" }
+                    require(value !in paramDrafts) { "PARAM $value: declared twice" }
+                    require(paramDrafts.size < MAX_PARAMS) { "more than $MAX_PARAMS params" }
+                    param = ParamDraft(value).also { paramDrafts[value] = it }
+                    current?.code?.append(line)?.append('\n')
+                    continue
+                }
+
                 if (key == "HALO") {
-                    val halo = toIntOrNull(value)?.takeIf { it in 0..MAX_HALO }
-                        ?: bad("HALO $value: 0 to $MAX_HALO")
+                    // Parsed once every param is known: one may come later in the file.
+                    val halo = value
                     // Before any pass: every pass's default. In a header: that pass's.
                     val draft = current
                     if (draft == null || draft.hasBody) {
@@ -286,11 +371,19 @@ internal class WgslNetwork(
             }
             require(drafts.isNotEmpty()) { "no pass" }
 
+            // WebGPU rejects a constant its module doesn't declare.
+            val names = paramDrafts.keys.toList()
+            val declared = drafts.map { d ->
+                OVERRIDE.findAll(d.code).map { names.indexOf(it.groupValues[1]) }.filter { it >= 0 }.distinct().toList()
+            }
+            val params = paramDrafts.values.map(::param)
+
+            fun halo(text: String) = SzExpr.parse(text) { it in paramDrafts }
+
             val saved = HashSet<String>()
             val stages = drafts.mapIndexed { i, d ->
                 val name = d.desc ?: "pass$i"
                 val code = d.code.toString()
-                require(d.hooks.isNotEmpty()) { "$name: no //!HOOK" }
                 require(d.hooks.all { it in HOOKS }) { "$name: //!HOOK must be MAIN or RGB" }
                 val found = BINDING.findAll(code).map { m ->
                     val kind = when (m.groupValues[2]) {
@@ -326,18 +419,14 @@ internal class WgslNetwork(
                 val format =
                     FORMATS[storage[0].format] ?: bad("$name: storage format ${storage[0].format}")
 
-                val compute = d.compute ?: bad("$name: no //!COMPUTE")
-                val blockX = compute[0]
-                val blockY = compute[1]
-                val threadsX = compute.getOrElse(2) { blockX }
-                val threadsY = compute.getOrElse(3) { blockY }
                 val workgroup = WORKGROUP.find(code) ?: bad("$name: no @workgroup_size")
                 val wx = toIntOrNull(workgroup.groupValues[1]) ?: 0
                 val wy = toIntOrNull(workgroup.groupValues[2].ifEmpty { "1" }) ?: 0
-                require(wx == threadsX && wy == threadsY) {
-                    "$name: @workgroup_size($wx, $wy) differs from //!COMPUTE's ${threadsX}x$threadsY threads"
-                }
-                require(threadsX * threadsY <= MAX_INVOCATIONS) { "$name: more than $MAX_INVOCATIONS invocations" }
+                require(wx >= 1 && wy >= 1) { "$name: @workgroup_size must be numbers" }
+                require(wx * wy <= MAX_INVOCATIONS) { "$name: more than $MAX_INVOCATIONS invocations" }
+                // //!COMPUTE's threads are ignored: @workgroup_size sets them.
+                val blockX = d.compute?.get(0) ?: wx
+                val blockY = d.compute?.get(1) ?: wy
 
                 val sizes = { variable: String ->
                     val texture = variable.substringBefore('.')
@@ -347,21 +436,23 @@ internal class WgslNetwork(
                     { variable: String -> variable.startsWith("HOOKED.") || variable.startsWith("OUTPUT.") }
                 val save = d.save.takeIf { it != "HOOKED" }
                 require(save != "OUTPUT") { "$name: //!SAVE OUTPUT is the target's size, not a texture" }
-                require(save == null || save !in saved) { "$name: //!SAVE $save twice" }
                 val stage = Stage(
                     name, code, d.binds, save,
                     SzExpr.parse(d.width ?: "HOOKED.w", sizes),
                     SzExpr.parse(d.height ?: "HOOKED.h", sizes),
                     d.`when`?.let { SzExpr.parse(it, nominal) },
-                    d.halo,
+                    d.halo?.let(::halo),
                     found.map { it.binding }.sortedBy { it.index },
-                    format, blockX, blockY,
+                    format, blockX, blockY, declared[i],
                 )
                 if (save != null) saved.add(save)
                 stage
             }
             require(stages.any { it.save == null }) { "no pass is without //!SAVE, so nothing replaces HOOKED" }
-            return WgslNetwork(stages, fileHalo)
+            return WgslNetwork(stages, fileHalo?.let(::halo), params).also {
+                // Catches a constant out of range; others are checked as values change.
+                it.halo(stages, it.defaults())
+            }
         }
 
         private fun bad(message: String): Nothing = throw IllegalArgumentException(message)

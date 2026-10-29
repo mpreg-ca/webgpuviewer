@@ -12,6 +12,7 @@ import androidx.webgpu.GPUComputePassDescriptor
 import androidx.webgpu.GPUComputePipeline
 import androidx.webgpu.GPUComputePipelineDescriptor
 import androidx.webgpu.GPUComputeState
+import androidx.webgpu.GPUConstantEntry
 import androidx.webgpu.GPUDevice
 import androidx.webgpu.GPUExtent3D
 import androidx.webgpu.GPUPassTimestampWrites
@@ -45,8 +46,8 @@ import kotlin.time.Duration.Companion.milliseconds
  * textures between passes are sized from the block and reused once their last reader has run.
  *
  * A block runs the passes whose `//!WHEN` accepts the page scale, or none. Bindings hold while the
- * block size and those passes do, so a block costs one `dispatchWorkgroups` per pass in one
- * compute pass.
+ * block size, those passes and the [params] do, so a block costs one `dispatchWorkgroups` per pass
+ * in one compute pass.
  *
  * Holds GPU objects for one chain's block size: one viewer per instance. If the device can't
  * build it, or runs out of memory doing so, [supported] goes false for good.
@@ -59,6 +60,68 @@ class ImageFilterWgsl(source: String, private val label: String = "Wgsl") : Imag
 
     init {
         require(network.stages.isNotEmpty()) { "$label: no pass" }
+    }
+
+    /** What the WGSL type holds as a Float; a constant outside fails the pipeline. */
+    enum class ParamType(
+        internal val wgsl: String,
+        internal val lowest: kotlin.Float,
+        internal val highest: kotlin.Float,
+    ) {
+        Float("f32", -kotlin.Float.MAX_VALUE, kotlin.Float.MAX_VALUE),
+        Int("i32", -2147483648f, 2147483520f),
+        UInt("u32", 0f, 4294967040f),
+    }
+
+    /** Passes read it by declaring `override <name>`. */
+    class Param internal constructor(
+        val name: String,
+        /** Empty without `//!DESC`. */
+        val description: String,
+        val type: ParamType,
+        /** Null for none; 0 for [ParamType.UInt] without one. */
+        val minimum: Float?,
+        /** Null for none. */
+        val maximum: Float?,
+        val default: Float,
+    ) {
+        internal fun coerce(value: Float): Float {
+            val clamped = value.coerceIn(minimum ?: type.lowest, maximum ?: type.highest)
+                .coerceIn(type.lowest, type.highest)
+            return if (type == ParamType.Float) clamped else Math.round(clamped.toDouble()).toFloat()
+        }
+    }
+
+    val params: List<Param> get() = network.params
+
+    // Replaced, never written: the render thread reads it unlocked.
+    @Volatile
+    private var values = network.defaults()
+
+    private fun indexOf(name: String): Int =
+        network.params.indexOfFirst { it.name == name }.also {
+            require(it >= 0) { "$label: no //!PARAM $name" }
+        }
+
+    operator fun get(name: String): Float = values[indexOf(name)]
+
+    /**
+     * Any thread. Redoes what the filter made, rebuilding its pipelines.
+     *
+     * @throws IllegalArgumentException if there is no such param, [value] is NaN, or it puts a
+     *   `//!HALO` out of range.
+     */
+    operator fun set(name: String, value: Float) {
+        val i = indexOf(name)
+        require(!value.isNaN()) { "$label: $name is NaN" }
+        val v = network.params[i].coerce(value)
+        synchronized(this) {
+            if (values[i] == v) return
+            val changed = values.copyOf().also { it[i] = v }
+            network.halo(network.stages, changed)
+            values = changed
+        }
+        WebGpuRenderer.dispatcher.dispatch(EmptyCoroutineContext) { onUpdate?.invoke() }
     }
 
     /**
@@ -108,7 +171,7 @@ class ImageFilterWgsl(source: String, private val label: String = "Wgsl") : Imag
             )
             owned.add { input.destroyAndRelease() }
             val view = input.createView().also { view -> owned.add { view.close() } }
-            val textures = Textures(plan, view, owned)
+            val textures = Textures(plan, view, values, owned)
             val encoder = device.createCommandEncoder()
             dispatch(encoder, textures, null)
             device.queue.submitAndRelease(encoder)
@@ -177,6 +240,12 @@ class ImageFilterWgsl(source: String, private val label: String = "Wgsl") : Imag
      * good. Cached: asked per tile, and per frame a plain tile awaits an upgrade.
      */
     private fun info(pageScale: Float): ScaleInfo {
+        // The halo depends on them.
+        val values = values
+        if (values !== infosValues) {
+            infos.clear()
+            infosValues = values
+        }
         infos[pageScale]?.let { return it }
         val active = network.active(pageScale)
         var found = ScaleInfo(active, false, 1f, 0)
@@ -187,7 +256,8 @@ class ImageFilterWgsl(source: String, private val label: String = "Wgsl") : Imag
                     "writes ${result.width}x${result.height}, which is not square"
                 }
                 found = ScaleInfo(
-                    active, true, result.width.toFloat() / REFERENCE_SIDE, network.halo(active)
+                    active, true, result.width.toFloat() / REFERENCE_SIDE,
+                    network.halo(active, values)
                 )
             } catch (e: IllegalArgumentException) {
                 Log.w(TAG, "$label left out at scale $pageScale", e)
@@ -200,6 +270,7 @@ class ImageFilterWgsl(source: String, private val label: String = "Wgsl") : Imag
     }
 
     private val infos = HashMap<Float, ScaleInfo>()
+    private var infosValues: FloatArray? = null
 
     private class KeptPlan(val size: Int, val scale: Float, val plan: WgslNetwork.Plan)
 
@@ -240,7 +311,7 @@ class ImageFilterWgsl(source: String, private val label: String = "Wgsl") : Imag
             info(pageScale).active.joinToString(",") {
                 stages.indexOf(it).toString()
             }
-        }]"
+        }]${values.joinToString(",", "(", ")")}"
     }
 
     override fun prepare(input: GPUTextureView, size: Int, pageScale: Float) =
@@ -260,13 +331,14 @@ class ImageFilterWgsl(source: String, private val label: String = "Wgsl") : Imag
             val plan = planFor(size, pageScale)
             forgetReplacedDevice()
             var t = textures
-            if (t == null || t.input !== input || t.signature != plan.signature) {
+            val values = values
+            if (t == null || t.input !== input || t.signature != plan.signature || t.values !== values) {
                 // Cleared first, so [fail] can't destroy these twice if the build throws.
                 textures = null
                 t?.destroy()
                 // Here, not in [encode], so a throw lets the caller fall back. GPU errors arrive
                 // later via [fail], which drops what was made with it.
-                t = create(plan, input, probing)
+                t = create(plan, input, values, probing)
                 textures = t
             }
             return t.output
@@ -354,10 +426,22 @@ class ImageFilterWgsl(source: String, private val label: String = "Wgsl") : Imag
     // Held from [ComputePipelines] until [cleanup].
     private val pipelines = HashMap<WgslNetwork.Stage, RefCache.Entry<GPUComputePipeline>>()
 
-    private fun pipelineFor(stage: WgslNetwork.Stage): GPUComputePipeline =
-        pipelines.getOrPut(stage) { ComputePipelines.acquire(stage.code) { build(stage) } }.value
+    private var pipelinesValues: FloatArray? = null
 
-    private fun build(stage: WgslNetwork.Stage): GPUComputePipeline {
+    private fun pipelineFor(stage: WgslNetwork.Stage, values: FloatArray): GPUComputePipeline {
+        if (values !== pipelinesValues) {
+            pipelines.values.forEach { ComputePipelines.release(it) }
+            pipelines.clear()
+            pipelinesValues = values
+        }
+        return pipelines.getOrPut(stage) {
+            // Only its own, so other passes' changes reuse it.
+            val key = stage.code + stage.params.joinToString("") { "\n//${values[it]}" }
+            ComputePipelines.acquire(key) { build(stage, values) }
+        }.value
+    }
+
+    private fun build(stage: WgslNetwork.Stage, values: FloatArray): GPUComputePipeline {
         val module = device.createShaderModule(
             GPUShaderModuleDescriptor(
                 label = stage.name,
@@ -369,7 +453,13 @@ class ImageFilterWgsl(source: String, private val label: String = "Wgsl") : Imag
             return device.createComputePipeline(
                 GPUComputePipelineDescriptor(
                     label = "$label ${stage.name}",
-                    compute = GPUComputeState(module, entryPoint = "main")
+                    compute = GPUComputeState(
+                        module, entryPoint = "main",
+                        constants = Array(stage.params.size) {
+                            val i = stage.params[it]
+                            GPUConstantEntry(network.params[i].name, values[i].toDouble())
+                        },
+                    )
                 )
             )
         } finally {
@@ -401,7 +491,12 @@ class ImageFilterWgsl(source: String, private val label: String = "Wgsl") : Imag
      * Builds [Textures] so a partial failure frees what was made: the constructor registers each
      * GPU object in `owned`, as the half-built instance is unreachable once it throws.
      */
-    private fun create(plan: WgslNetwork.Plan, input: GPUTextureView, probing: Boolean): Textures {
+    private fun create(
+        plan: WgslNetwork.Plan,
+        input: GPUTextureView,
+        values: FloatArray,
+        probing: Boolean
+    ): Textures {
         val device = device
         val owned = ArrayList<() -> Unit>()
         var built: Textures? = null
@@ -410,7 +505,7 @@ class ImageFilterWgsl(source: String, private val label: String = "Wgsl") : Imag
         device.pushErrorScope(ErrorFilter.Validation)
         device.pushErrorScope(ErrorFilter.OutOfMemory)
         try {
-            return Textures(plan, input, owned).also { built = it }
+            return Textures(plan, input, values, owned).also { built = it }
         } catch (e: Throwable) {
             release(owned)
             throw e
@@ -466,8 +561,8 @@ class ImageFilterWgsl(source: String, private val label: String = "Wgsl") : Imag
     }
 
     /**
-     * One plan's textures and bind groups. Rebuilt only when the (fixed) block size or the running
-     * passes change.
+     * One plan's textures and bind groups. Rebuilt only when the (fixed) block size, the running
+     * passes or the params change.
      *
      * Each is a Dawn handle of its own, and only close() drops it - nothing releases one when it
      * is garbage collected.
@@ -475,6 +570,7 @@ class ImageFilterWgsl(source: String, private val label: String = "Wgsl") : Imag
     private inner class Textures(
         plan: WgslNetwork.Plan,
         val input: GPUTextureView,
+        val values: FloatArray,
         private val owned: MutableList<() -> Unit>
     ) {
         val signature = plan.signature
@@ -505,7 +601,7 @@ class ImageFilterWgsl(source: String, private val label: String = "Wgsl") : Imag
 
             val linear = linearSampler()
             dispatches = plan.steps.map { step ->
-                val pipeline = pipelineFor(step.stage)
+                val pipeline = pipelineFor(step.stage, values)
                 var sampled = 0
                 val entries = Array(step.stage.bindings.size) { j ->
                     val binding = step.stage.bindings[j]
