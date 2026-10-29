@@ -111,6 +111,10 @@ fun ImageViewer(
                 val wasScrolling = state.pageOffset != 0f
                 val pageTurnJob = state.animationJob
                 val page = state.getPage(0) ?: return@awaitEachGesture
+                // A tap resumes it, so a navigation pan steps on from where the last one was heading.
+                val moving = page.animationJob?.isActive == true
+                val interruptedX = page.animationTargetX.takeIf { moving }
+                val interruptedY = page.animationTargetY.takeIf { moving }
                 page.animationJob?.cancel()
 
                 view.parent?.requestDisallowInterceptTouchEvent(true)
@@ -164,7 +168,11 @@ fun ImageViewer(
                                 }
                             }
                         }
-                        page.animateTo(Offset(0.5f, 0.5f))
+                        if (interruptedX != null && interruptedY != null && !stoppedMotion) {
+                            page.animateTo(targetX = interruptedX, targetY = interruptedY)
+                        } else {
+                            page.animateTo(Offset(0.5f, 0.5f))
+                        }
                         if (!stoppedMotion && !state.contentClaimedTouch) {
                             state.onTap?.invoke(
                                 Offset(
