@@ -205,7 +205,10 @@ fun ImageViewerContinuous(
                                         val newScale =
                                             startScale + (state.homeScale - startScale) * t
                                         val diff = 1f / newScale - 1f / state.scale
-                                        state.offsetX += px * diff
+                                        // No snap-back follows, as after a pinch: clamp as it goes.
+                                        val limit = max(0f, (newScale - 1f) / (2f * newScale))
+                                        state.offsetX =
+                                            (state.offsetX + px * diff).fastCoerceIn(-limit, limit)
                                         state.scale = newScale
                                         state.scrollBy(-py * diff * state.height)
                                         state.invalidate()
@@ -232,7 +235,10 @@ fun ImageViewerContinuous(
                                         val newScale =
                                             startScale + (state.doubleTapScale - startScale) * t
                                         val diff = 1f / newScale - 1f / state.scale
-                                        state.offsetX += px * diff
+                                        // No snap-back follows, as after a pinch: clamp as it goes.
+                                        val limit = max(0f, (newScale - 1f) / (2f * newScale))
+                                        state.offsetX =
+                                            (state.offsetX + px * diff).fastCoerceIn(-limit, limit)
                                         state.scale = newScale
                                         state.scrollBy(-py * diff * state.height)
                                         state.invalidate()
