@@ -237,7 +237,7 @@ class ImageFilterWgsl(source: String, private val label: String = "Wgsl") : Imag
     /**
      * The passes whose `//!WHEN` accept [pageScale], and whether they can run: reading a skipped
      * pass's output, or a non-square result, leaves the filter out at that scale, not failed for
-     * good. Cached: asked per tile, and per frame a plain tile awaits an upgrade.
+     * good. Cached: asked for every tile.
      */
     private fun info(pageScale: Float): ScaleInfo {
         // The halo depends on them.

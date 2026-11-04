@@ -104,14 +104,6 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
     @Volatile
     var isFlinging: Boolean = false
 
-    /**
-     * True while a one-or-more-finger drag is actively panning content (not yet released into a
-     * fling). Along with [isFlinging], marks real scroll [onViewport] reports against - unlike
-     * [animateSlideIn], whose [slideOffset] never touches [scrollY] at all.
-     */
-    @Volatile
-    var isPanning: Boolean = false
-
     /** Set while [restorePosition] walks pages, so its intermediate steps don't reach the app. */
     @Volatile
     private var isRestoring: Boolean = false
@@ -228,6 +220,11 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
      * Observation only - it never moves the scroll.
      */
     var onViewport: ((readThrough: ImagePage?) -> Unit)? = null
+
+    // Set with [onScreenPages].
+    private var marginPages: List<ImagePage> = emptyList()
+
+    override val heldPages: List<ImagePage> get() = onScreenPages - marginPages.toSet()
 
     /**
      * Pages the last frame reached below and above the current one. How many the viewport shows
@@ -587,6 +584,30 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
 
     private fun cropFor(page: ImagePage) = (page as? ImagePage.ImageSingle)?.let(::cropOf)
 
+    override fun isMoving(snapshot: Any): Boolean {
+        if (snapshot !is ContinuousRenderSnapshot) return super.isMoving(snapshot)
+        return isPanning || isFlinging || isScaleAnimating || animationJob?.isActive == true
+    }
+
+    override fun viewOf(snapshot: Any): Any? {
+        val s = snapshot as? ContinuousRenderSnapshot ?: return super.viewOf(snapshot)
+        // Not the margin's: a prefetch decode there changes nothing on screen.
+        val shown = s.pages.map { it.page }.filter { it !in marginPages }
+        return listOf(shown, s.cameraDocY, s.offsetX, s.scale, width, height)
+    }
+
+    override fun tilesComplete(snapshot: Any): Boolean {
+        val s = snapshot as? ContinuousRenderSnapshot ?: return super.tilesComplete(snapshot)
+        // Not `all`, which stops at the first miss: every page's tiles are queued.
+        return s.pages.map { vp ->
+            val page = tiled(vp.page) ?: return@map true
+            tiles.ensureTiles(
+                page, width, height, s.cameraDocY, vp.docTop, vp.contentHeight, s.offsetX, s.scale,
+                vp.crop,
+            )
+        }.all { it }
+    }
+
     override fun captureRenderState(): Any {
         val snapshot = captureLocked()
 
@@ -632,6 +653,8 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
         val pages = mutableListOf<VisiblePage>()
         // Undecoded ones too: [pages] skips them, and their decode's invalidate must still land.
         val visible = mutableListOf<ImagePage>()
+        // Of those, past the screen's bottom: the prefetch margin.
+        val margin = mutableListOf<ImagePage>()
 
         // Visible band in unscaled page space, from page 0's top - see cameraDocY.
         val visTop = 0f
@@ -702,6 +725,7 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
 
             if (y + pageHeight > visTop) {
                 visible.add(page)
+                if (y >= screenBot) margin.add(page)
                 if (page.isDecoded && contentHeight > 0f) {
                     pages.add(VisiblePage(page, docTop, pageHeight, contentHeight, cropFor(page)))
                 }
@@ -714,6 +738,7 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
         }
 
         onScreenPages = visible
+        marginPages = margin
         pagesBelow = below
         pagesAbove = above
 

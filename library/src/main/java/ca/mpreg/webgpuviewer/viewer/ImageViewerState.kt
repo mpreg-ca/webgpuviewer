@@ -159,6 +159,30 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
     /** Whether two fingers scale the page. Off leaves the page at whatever scale it is on. */
     var pinchZoomEnabled: Boolean = true
 
+    /**
+     * Anything moving draws live, as do an animated page's frames; a view at rest is shown once as
+     * it is, unless a moving frame just showed it, and again once no [ImagePage.isPlaceholder] or
+     * fade is left - then held until its tiles are all cut.
+     */
+    @Volatile
+    var holdUntilFinal: Boolean = false
+        set(value) {
+            if (field == value) return
+            field = value
+            invalidate()
+        }
+
+    /** Off, pages draw through the fast path alone: no tiles or filters. Any thread. */
+    var enableTiles: Boolean
+        get() = tiles.enabled
+        set(value) {
+            tiles.enabled = value
+        }
+
+    /** A drag is panning, until released; not the fling after it. Set by the gesture handling. */
+    @Volatile
+    var isPanning: Boolean = false
+
     /** When true, images will be positioned/scaled to avoid the display cutout. */
     var avoidCutout: Boolean by mutableStateOf(false)
 
@@ -306,6 +330,7 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
     @Synchronized
     fun init(scope: CoroutineScope, surface: Surface, width: Int, height: Int) {
         this.renderer.init(scope, surface, width, height)
+        reshow = true
         this.scope = scope
         Hdr.requestFrame = invalidateCallback
 
@@ -321,6 +346,7 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
     @Synchronized
     fun resize(width: Int, height: Int) {
         renderer.resize(width, height)
+        reshow = true
         invalidate()
     }
 
@@ -403,6 +429,7 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
             // Captured here, drawn on the GPU thread below - see this function's doc.
             val snapshot = captureRenderState() ?: continue
             drawing = launch(dispatcher) {
+                if (holdUntilFinal && held(snapshot)) return@launch
                 when (renderer.render { encoder, texture ->
                     renderSnapshot(encoder, texture, snapshot)
                 }) {
@@ -412,20 +439,99 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
                     }
 
                     // Past the cap, park until something else invalidates.
-                    FrameResult.Retry -> if (++retries <= MAX_RETRIES) invalidate()
+                    FrameResult.Retry -> {
+                        shown = null
+                        if (++retries <= MAX_RETRIES) invalidate()
+                    }
 
                     // No invalidate: leaving [dirty] clear parks the loop on [renderWake] rather
                     // than spinning the frame clock, and a later resize still wakes it.
-                    FrameResult.Unavailable -> if (!reportedUnavailable) {
-                        reportedUnavailable = true
-                        val reason = WebGpuRenderer.unavailableReason ?: "no render surface"
-                        Log.e("ImageViewerState", "Nothing can be drawn: $reason")
-                        onRenderUnavailable?.runCatching { invoke(reason) }
+                    FrameResult.Unavailable -> {
+                        shown = null
+                        if (!reportedUnavailable) {
+                            reportedUnavailable = true
+                            val reason = WebGpuRenderer.unavailableReason ?: "no render surface"
+                            Log.e("ImageViewerState", "Nothing can be drawn: $reason")
+                            onRenderUnavailable?.runCatching { invoke(reason) }
+                        }
                     }
                 }
             }
         }
     }
+
+    /** How far a view at rest is from final; [holdUntilFinal] paints each stage once. */
+    private enum class Stage { Loading, Fast, Final }
+
+    // What the screen shows, of a view at rest, and of which view. Render thread only.
+    private var shown: Stage? = null
+    private var shownView: Any? = null
+
+    // A new or resized surface shows nothing yet.
+    @Volatile
+    private var reshow = true
+
+    /** The pages [holdUntilFinal] waits on to settle; by default, those on screen. */
+    protected open val heldPages: List<ImagePage> get() = onScreenPages
+
+    private fun held(snapshot: Any): Boolean {
+        // Nothing below may touch a lost device.
+        if (!WebGpuRenderer.isAvailable) return false
+        tiles.newFrame()
+        // A new page or zoom without moving, as an unanimated page turn: none of it is shown yet.
+        val view = viewOf(snapshot)
+        if (reshow || view != shownView) {
+            reshow = false
+            shownView = view
+            shown = null
+        }
+        val stage = when {
+            isMoving(snapshot) -> {
+                shown = Stage.Fast
+                return false
+            }
+
+            // Set with the snapshot, which isn't captured again until this frame is done.
+            !heldPages.all { it.isSettled } -> Stage.Loading
+            !tilesComplete(snapshot) -> Stage.Fast
+            else -> Stage.Final
+        }
+        if (stage != Stage.Final && stage == shown) return true
+        shown = stage
+        return false
+    }
+
+    /** Whether [snapshot] moves, so [holdUntilFinal] paints it live. Unknown snapshots don't. */
+    protected open fun isMoving(snapshot: Any): Boolean {
+        val s = snapshot as? RenderSnapshot ?: return false
+        val page = s.currentPage
+        return isPanning || s.offset != 0f || animationJob?.isActive == true ||
+                page.animationJob?.isActive == true || page.isScaleAnimating || page.isFlinging
+    }
+
+    /** What [snapshot] shows, equal for the same pages at the same place and zoom. */
+    protected open fun viewOf(snapshot: Any): Any? {
+        val s = snapshot as? RenderSnapshot ?: return null
+        val page = s.currentPage
+        // A turn's frames too: its last, a hair from rest, isn't the view at rest.
+        return listOf(page, s.adjacentPage, s.offset, page.x, page.y, page.scale, width, height)
+    }
+
+    /**
+     * Whether [snapshot]'s visible tiles are all cut. Queues those missing, so only asked at rest.
+     * Unknown snapshots' are.
+     */
+    protected open fun tilesComplete(snapshot: Any): Boolean {
+        val s = snapshot as? RenderSnapshot ?: return true
+        val page = tiled(s.currentPage) ?: return true
+        return tiles.ensureTiles(page, width, height)
+    }
+
+    /** [page] if its frames come from tiles, else null. */
+    protected fun tiled(page: ImagePage): ImagePage.ImageSingle? =
+        (page as? ImagePage.ImageSingle)?.takeIf {
+            it.highQuality && it.hasUploadedImage && tiles.enabled
+        }
 
     protected open fun captureRenderState(): Any? {
         val currentPage = getPage(0) ?: run {

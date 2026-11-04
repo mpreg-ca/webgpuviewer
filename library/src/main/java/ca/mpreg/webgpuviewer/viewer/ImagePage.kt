@@ -47,6 +47,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -1233,6 +1234,9 @@ open class ImagePage {
         override fun covers(other: ImagePage): Boolean =
             this === other || left === other || right === other
 
+        override val isSettled: Boolean
+            get() = super.isSettled && left?.isSettled != false && right?.isSettled != false
+
         override fun attach(
             parent: ImageViewerState, scope: CoroutineScope?, onInvalidate: () -> Unit
         ) {
@@ -1663,10 +1667,26 @@ open class ImagePage {
     var scope: CoroutineScope? = null
     var onInvalidate: (() -> Unit)? = null
 
+    /**
+     * True while this page stands in for one still to come - a loading page or preview - so
+     * [ImageViewerState.holdUntilFinal] won't show it at rest. Clear it when it becomes the page.
+     */
+    @Volatile
+    var isPlaceholder: Boolean = false
+        set(value) {
+            if (field == value) return
+            field = value
+            invalidate()
+        }
+
     /** How far this page has faded in: 1 is shown, less leaves a [backgroundColor] veil. */
     @Volatile
     var fade: Float = 1f
         private set
+
+    /** No placeholder, faded in and still alive: nothing about it will change by itself. */
+    internal open val isSettled: Boolean
+        get() = !isPlaceholder && fade >= 1f && !destroyed
 
     private var fadeJob: Job? = null
 
@@ -1701,7 +1721,8 @@ open class ImagePage {
     @Synchronized
     private fun startFade() {
         if (!fadePending) return
-        val scope = scope ?: return
+        // Left pending for the next [attach]: launched into a dead scope, it would never run.
+        val scope = scope?.takeIf { it.isActive } ?: return
         fadePending = false
         fadeJob?.cancel()
 
@@ -1714,12 +1735,23 @@ open class ImagePage {
         fade = from
 
         fadeJob = scope.launch {
-            // No finally: only another fadeIn cancels this, and it sets fade itself.
-            animate(from, 1f, animationSpec = tween(fadeMillis - elapsed)) { value, _ ->
-                fade = value
-                // invalidate(), not onInvalidate: its frameVersion bump re-seeds a transition's
-                // cached copy, which would otherwise hold the veil at whatever it was seeded with.
-                invalidate()
+            try {
+                animate(from, 1f, animationSpec = tween(fadeMillis - elapsed)) { value, _ ->
+                    fade = value
+                    // invalidate(), not onInvalidate: its frameVersion bump re-seeds a
+                    // transition's cached copy, which would otherwise hold the veil at whatever it
+                    // was seeded with.
+                    invalidate()
+                }
+            } finally {
+                // Cancelled with its scope, a fade left short never settles the page. Another
+                // fadeIn has replaced [fadeJob] and set the fade itself.
+                val snapped = synchronized(this@ImagePage) {
+                    val left = fadeJob === coroutineContext[Job] && fade < 1f
+                    if (left) fade = 1f
+                    left
+                }
+                if (snapped) invalidate()
             }
         }
     }

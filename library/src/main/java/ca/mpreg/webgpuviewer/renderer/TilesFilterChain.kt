@@ -118,8 +118,8 @@ internal class TilesFilterChain(private val onChange: () -> Unit) {
     }
 
     /**
-     * Set when [input] fails, until [filters] is reassigned: otherwise the plain-tile upgrade would
-     * re-cut the tiles that fell back every frame.
+     * Set when [input] fails, until [filters] is reassigned: otherwise every tile would try it
+     * again, and fall back, for as long as it fails.
      */
     private var broken = false
 

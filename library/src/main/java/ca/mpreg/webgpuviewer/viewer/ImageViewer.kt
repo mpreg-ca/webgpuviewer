@@ -338,6 +338,7 @@ fun ImageViewer(
                     page.animationJob?.cancel()
 
                     var canceled = false
+                    state.isPanning = true
                     try {
                         do {
                             val event = awaitPointerEvent(pass = PointerEventPass.Initial)
@@ -469,6 +470,7 @@ fun ImageViewer(
                         } while (!canceled && event.changes.any { it.pressed })
                     } finally {
                         page.isScaleAnimating = false
+                        state.isPanning = false
                         page.invalidate()
                     }
 
