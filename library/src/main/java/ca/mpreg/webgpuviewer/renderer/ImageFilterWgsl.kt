@@ -16,7 +16,6 @@ import androidx.webgpu.GPUConstantEntry
 import androidx.webgpu.GPUDevice
 import androidx.webgpu.GPUExtent3D
 import androidx.webgpu.GPUPassTimestampWrites
-import androidx.webgpu.GPURequestCallback
 import androidx.webgpu.GPUSampler
 import androidx.webgpu.GPUSamplerDescriptor
 import androidx.webgpu.GPUShaderModuleDescriptor
@@ -25,18 +24,9 @@ import androidx.webgpu.GPUTextureDescriptor
 import androidx.webgpu.GPUTextureView
 import androidx.webgpu.TextureFormat
 import androidx.webgpu.TextureUsage
-import androidx.webgpu.WebGpuRuntimeException
 import ca.mpreg.webgpuviewer.renderer.ImageFilterWgsl.Companion.TEST_SIDE
-import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.Deferred
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.util.concurrent.Executor
 import kotlin.coroutines.EmptyCoroutineContext
-import kotlin.time.Duration.Companion.milliseconds
 
 /**
  * The only [ImageFilter]: passes, textures, bindings, sizes and the scales it runs at all come from
@@ -135,7 +125,7 @@ class ImageFilterWgsl(source: String, private val label: String = "Wgsl") : Imag
         if (!WebGpuRenderer.isAvailable) return
         val scale = TEST_SCALES.firstOrNull { applies(it) } ?: return
         val error = withContext(WebGpuRenderer.dispatcher) {
-            pumpingEvents {
+            ErrorScopes.pumpingEvents {
                 forgetReplacedDevice()
                 try {
                     testRun(scale).also { error ->
@@ -180,7 +170,7 @@ class ImageFilterWgsl(source: String, private val label: String = "Wgsl") : Imag
         } finally {
             // Popped before anything suspends: frames run meanwhile, and their errors would land in
             // these scopes. Innermost first.
-            val pops = List(filters.size) { popScope(device) }
+            val pops = List(filters.size) { ErrorScopes.popMessage(device) }
             try {
                 device.queue.onSubmittedWorkDone()
                 for (pop in pops) {
@@ -192,37 +182,6 @@ class ImageFilterWgsl(source: String, private val label: String = "Wgsl") : Imag
             }
         }
         return error
-    }
-
-    /** The innermost scope's error message, or null. Pops at once; the answer needs events processed. */
-    private fun popScope(device: GPUDevice): Deferred<String?> {
-        val answer = CompletableDeferred<String?>()
-        device.popErrorScope(Executor(Runnable::run), object : GPURequestCallback<Int> {
-            override fun onResult(result: Int) {
-                answer.complete(if (result == ErrorType.NoError) null else ErrorType.toString(result))
-            }
-
-            override fun onError(exception: Exception) {
-                // Else a lost device, which fails the work itself.
-                answer.complete((exception as? WebGpuRuntimeException)?.message)
-            }
-        })
-        return answer
-    }
-
-    /** Async WebGPU calls resolve only while events are processed. */
-    private suspend fun <T> pumpingEvents(block: suspend () -> T): T = coroutineScope {
-        val pump = launch {
-            while (isActive) {
-                WebGpuRenderer.instance.processEvents()
-                delay(1.milliseconds)
-            }
-        }
-        try {
-            block()
-        } finally {
-            pump.cancel()
-        }
     }
 
     override val supported: Boolean get() = !failed

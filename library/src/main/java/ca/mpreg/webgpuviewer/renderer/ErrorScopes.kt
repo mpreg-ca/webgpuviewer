@@ -8,8 +8,16 @@ import androidx.webgpu.OutOfMemoryException
 import androidx.webgpu.ValidationException
 import androidx.webgpu.WebGpuRuntimeException
 import ca.mpreg.webgpuviewer.renderer.ErrorScopes.pump
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.asExecutor
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.time.Duration.Companion.milliseconds
 
 /** Error scopes popped without suspending. Their answers need events processed: see [pump]. */
 internal object ErrorScopes {
@@ -40,6 +48,37 @@ internal object ErrorScopes {
         is OutOfMemoryException -> ErrorType.OutOfMemory
         is InternalException -> ErrorType.Internal
         else -> ErrorType.Unknown
+    }
+
+    /** The innermost scope's error message, or null. Pops at once; the answer needs events processed. */
+    fun popMessage(device: GPUDevice): Deferred<String?> {
+        val answer = CompletableDeferred<String?>()
+        device.popErrorScope(Executor(Runnable::run), object : GPURequestCallback<Int> {
+            override fun onResult(result: Int) {
+                answer.complete(if (result == ErrorType.NoError) null else ErrorType.toString(result))
+            }
+
+            override fun onError(exception: Exception) {
+                // Else a lost device, which fails the work itself.
+                answer.complete((exception as? WebGpuRuntimeException)?.message)
+            }
+        })
+        return answer
+    }
+
+    /** Async WebGPU calls resolve only while events are processed. */
+    suspend fun <T> pumpingEvents(block: suspend () -> T): T = coroutineScope {
+        val pump = launch {
+            while (isActive) {
+                WebGpuRenderer.instance.processEvents()
+                delay(1.milliseconds)
+            }
+        }
+        try {
+            block()
+        } finally {
+            pump.cancel()
+        }
     }
 
     /** Lets pending pops answer. Once a frame, on the render thread. */

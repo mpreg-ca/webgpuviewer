@@ -15,6 +15,7 @@ import androidx.webgpu.GPUPrimitiveState
 import androidx.webgpu.GPURenderPassEncoder
 import androidx.webgpu.GPURenderPipeline
 import androidx.webgpu.GPURenderPipelineDescriptor
+import androidx.webgpu.GPUShaderModule
 import androidx.webgpu.GPUShaderModuleDescriptor
 import androidx.webgpu.GPUShaderSourceWGSL
 import androidx.webgpu.GPUStencilFaceState
@@ -149,6 +150,11 @@ object RenderPage {
         Variant { format, _ -> buildPipeline(HEADER + VS_MAIN + code + RESOLVE_MAIN, format) }
     }
 
+    /** Uncached, for [Sampler.validate]. Render thread. */
+    internal fun buildResolve(code: String) {
+        buildPipeline(HEADER + VS_MAIN + code + RESOLVE_MAIN, TextureFormat.RGBA8Unorm).close()
+    }
+
     /** The resolves the samplers in force supply - see [Sampler.code]. */
     internal fun filtered(magnify: String, minify: String) =
         Filtered(variant(magnify), variant(minify))
@@ -187,6 +193,17 @@ object RenderPage {
             GPUShaderModuleDescriptor(shaderSourceWGSL = GPUShaderSourceWGSL(code))
         )
 
+        // The pipeline keeps its own reference to the module.
+        try {
+            return createPipeline(shaderModule, format, depthStencil)
+        } finally {
+            shaderModule.close()
+        }
+    }
+
+    private fun createPipeline(
+        shaderModule: GPUShaderModule, format: Int, depthStencil: GPUDepthStencilState?
+    ): GPURenderPipeline {
         return device.createRenderPipeline(
             GPURenderPipelineDescriptor(
                 vertex = GPUVertexState(shaderModule, entryPoint = "vs_main"),
