@@ -504,6 +504,9 @@ fun ImageViewerContinuous(
                 // Before init: the panel's HDR support gates the decode path, which can reach
                 // an image before the first frame.
                 attachHdrDisplay(view)
+                view.display?.refreshRate?.takeIf { it > 0f }?.let {
+                    state.tiles.batchTargetNs = 0.5e9 / it
+                }
                 state.init(scope, surface, width, height)
                 surface.onChanged { w, h -> state.resize(w, h) }
                 // After init, so Hdr.resolve has run and the surface's capability is known.

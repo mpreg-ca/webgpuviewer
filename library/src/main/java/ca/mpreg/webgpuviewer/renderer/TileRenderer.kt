@@ -65,7 +65,6 @@ import androidx.webgpu.TextureViewDimension
 import androidx.webgpu.VertexFormat
 import androidx.webgpu.VertexStepMode
 import ca.mpreg.webgpuviewer.filter.Lut3dTexture
-import ca.mpreg.webgpuviewer.renderer.TileRenderer.Companion.BATCH_TARGET_NS
 import ca.mpreg.webgpuviewer.renderer.TileRenderer.Companion.OFF_SCREEN_SCORE
 import ca.mpreg.webgpuviewer.renderer.TileRenderer.Companion.SLAB_SIZE
 import ca.mpreg.webgpuviewer.renderer.TileRenderer.Companion.STENCIL_BUFFER_COUNT
@@ -116,8 +115,8 @@ internal fun solveImagePlacement(
 }
 
 /**
- * A cache of the filtered render, cut into square screen-resolution tiles - [TILE_SIZE] by
- * default, per grid via [preferredTileSize]. Every tile is a slot in one atlas texture
+ * A cache of the filtered render, cut into square screen-resolution tiles, sized per grid by
+ * [preferredTileSize]. Every tile is a slot in one atlas texture
  * ([TileAtlas]), so a grid draws in a single instanced call.
  *
  * [RenderPage.render] is too expensive every frame; [RenderPage.renderFast] is cheap but
@@ -153,7 +152,6 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         const val TILE_SIZE = 256
 
         private const val TILES_PER_BATCH_FALLBACK = 1
-        private const val BATCH_TARGET_NS = 4_000_000.0
         private const val MAX_TILES_PER_BATCH = 8
 
         /** Image filter blocks one step makes before [blockCostNs] is known. */
@@ -181,10 +179,10 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         private const val SLAB_SIZE = 512
 
         /** Smallest [preferredTileSize] worth having - below this the per-tile pass dominates. */
-        private const val MIN_TILE_SIZE = 64
+        private const val MIN_TILE_SIZE = 128
 
         /** The sizes [reconsiderTileSize] chooses between, smallest first. */
-        private val TILE_SIZES = intArrayOf(MIN_TILE_SIZE, 128, 256, SLAB_SIZE)
+        private val TILE_SIZES = intArrayOf(MIN_TILE_SIZE, 256, SLAB_SIZE)
 
         /** Measurements a size needs before it is allowed to win, or lose, a comparison. */
         private const val TILE_SIZE_SAMPLES = 4
@@ -403,12 +401,16 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             .coerceIn(MIN_CACHE_BYTES / TILE_BYTES, MAX_CACHE_BYTES / TILE_BYTES)
     }
 
+    /** GPU time a batch aims at, in ns: by default half a 60 Hz frame. Any thread. */
+    @Volatile
+    var batchTargetNs = 0.5e9 / 60
+
     /**
      * The size grids are cut at from now on, chosen by [reconsiderTileSize] from measured cost.
      * A grid adopts it on its next draw, through the same wipe a scale change goes through, so
      * this never disturbs one mid-gesture.
      */
-    var preferredTileSize = TILE_SIZE
+    var preferredTileSize = MIN_TILE_SIZE
         set(value) {
             field = value.coerceIn(MIN_TILE_SIZE, SLAB_SIZE)
         }
@@ -557,7 +559,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             blockSamples.fill(0)
             blockProbeAttempts.fill(0)
             imageChain.blockSize = BLOCK_SIZE
-            preferredTileSize = TILE_SIZE
+            preferredTileSize = MIN_TILE_SIZE
             invalidate()
         }
     }
@@ -597,7 +599,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
 
     // Timestamp-query based GPU cost measurement for [generateTile]'s batches - null wherever the
     // adapter didn't have the feature (see WebGpuRenderer's requiredFeatures), in which case
-    // batches just fall back to [TILES_PER_BATCH_FALLBACK] tiles forever.
+    // [schedule] times a step per batch by the queue instead - see [measureSubmitted].
     private val timestampQuerySet: GPUQuerySet? by lazy {
         if (!device.hasFeature(FeatureName.TimestampQuery)) return@lazy null
         device.createQuerySet(GPUQuerySetDescriptor(type = QueryType.Timestamp, count = 16))
@@ -694,7 +696,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         val current = blockIndex(imageChain.blockSize)
         if (current < 0 || blockSamples[current] < TILE_SIZE_SAMPLES) return
 
-        if (blockCostNs[current] > BATCH_TARGET_NS && current > 0) {
+        if (blockCostNs[current] > batchTargetNs && current > 0) {
             imageChain.blockSize = BLOCK_SIZES[current - 1]
             return
         }
@@ -703,7 +705,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         var bestCost = blockCostPerPixel(current)
         for (i in BLOCK_SIZES.indices) {
             if (i == current || blockSamples[i] < TILE_SIZE_SAMPLES) continue
-            if (blockCostNs[i] > BATCH_TARGET_NS) continue
+            if (blockCostNs[i] > batchTargetNs) continue
             val cost = blockCostPerPixel(i)
             if (cost * TILE_SIZE_MARGIN < bestCost) {
                 best = i
@@ -719,18 +721,17 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
 
     /** Blocks one step may make: a tile needing more makes them over several - see [fillBlocks]. */
     private fun blocksPerStep(): Int {
-        if (timestampQuerySet == null) return MAX_BLOCKS_PER_STEP
         val cost = currentBlockCostNs()
         return if (cost <= 0.0) {
             BLOCKS_PER_STEP_FALLBACK
         } else {
-            (BATCH_TARGET_NS / cost).toInt().coerceIn(1, MAX_BLOCKS_PER_STEP)
+            (batchTargetNs / cost).toInt().coerceIn(1, MAX_BLOCKS_PER_STEP)
         }
     }
 
     /** What [step] is expected to cost a batch; unmeasured, a [TILES_PER_BATCH_FALLBACK]th of one. */
     private fun estimatedNs(step: Generated): Double {
-        val unmeasured = BATCH_TARGET_NS / TILES_PER_BATCH_FALLBACK
+        val unmeasured = batchTargetNs / TILES_PER_BATCH_FALLBACK
         val blockCost = currentBlockCostNs()
         if (step.blocks > 0 && blockCost <= 0.0) return unmeasured
         val blocks = step.blocks * blockCost
@@ -761,7 +762,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
 
     /**
      * Pick the size whose pixels are cheapest, among those with [TILE_SIZE_SAMPLES] readings and
-     * a tile inside [BATCH_TARGET_NS] - one tile is the smallest unit [schedule] can pace, so a
+     * a tile inside [batchTargetNs] - one tile is the smallest unit [schedule] can pace, so a
      * tile costing more than a batch's target is itself the hitch. A challenger needs
      * [TILE_SIZE_MARGIN] to win, since switching re-cuts every grid.
      *
@@ -783,17 +784,17 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         val current = sizeIndex(preferredTileSize)
         if (current < 0 || tileSamples[current] < TILE_SIZE_SAMPLES) return
 
-        if (totalTileCostNs(current) > BATCH_TARGET_NS && current > 0) {
+        if (totalTileCostNs(current) > batchTargetNs && current > 0) {
             switchTileSize(current - 1)
             return
         }
 
-        if (staged) {
+        // Without timestamps nothing probes other sizes to compare.
+        if (staged || timestampQuerySet == null) {
             // Frozen comparison or not, a size must be able to climb back: a slow start would
-            // otherwise pin the smallest. One up holds four times the pixels; the margin covers
-            // that a tile's cost isn't quite proportional to them.
+            // otherwise pin the smallest.
             if (current < TILE_SIZES.lastIndex && !climbFailed[current] &&
-                totalTileCostNs(current) * 4 * TILE_SIZE_MARGIN < BATCH_TARGET_NS
+                projectedUpNs(current) * TILE_SIZE_MARGIN < batchTargetNs
             ) {
                 switchTileSize(current + 1)
                 climbedFrom = current
@@ -805,7 +806,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         var bestCost = costPerPixel(current)
         for (i in TILE_SIZES.indices) {
             if (i == current || tileSamples[i] < TILE_SIZE_SAMPLES) continue
-            if (totalTileCostNs(i) > BATCH_TARGET_NS) continue
+            if (totalTileCostNs(i) > batchTargetNs) continue
             val cost = costPerPixel(i)
             if (cost * TILE_SIZE_MARGIN < bestCost) {
                 best = i
@@ -817,6 +818,17 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         // Grids re-cut on their next draw - see drawCore's invalidation.
         preferredTileSize = TILE_SIZES[best]
         invalidate()
+    }
+
+    /**
+     * A tile one size up from [i]: a fixed cost plus one per pixel, fitted to [i] and the size
+     * below where measured. Else four times [i]'s, which overstates a small tile.
+     */
+    private fun projectedUpNs(i: Int): Double {
+        val cost = totalTileCostNs(i)
+        if (i == 0 || tileSamples[i - 1] < TILE_SIZE_SAMPLES) return cost * 4
+        // One up adds three times [i]'s pixels; [i] added three quarters of them.
+        return cost + 4 * (cost - totalTileCostNs(i - 1)).coerceAtLeast(0.0)
     }
 
     /**
@@ -1085,6 +1097,9 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         var txMax = -1
         var tyMin = 0
         var tyMax = -1
+
+        /** The frame that set [txMin]..[tyMax]: an older one is a page no longer on screen. */
+        var shownFrame = -1L
 
         val destroyed get() = page.destroyed
 
@@ -1767,6 +1782,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         st.txMax = ceil((dstWidth - anchorX) / ts).toInt() - 1
         st.tyMin = floor(-anchorY / ts).toInt()
         st.tyMax = ceil((dstHeight - anchorY) / ts).toInt() - 1
+        st.shownFrame = frame
 
         placeGrid(
             st, dstWidth, dstHeight, gp.snapX, gp.snapY, gp.clipL, gp.clipT, gp.clipR, gp.clipB
@@ -2047,12 +2063,12 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
      * The worker shares the render thread but not the render mutex, so suspending between
      * batches actually lets a queued frame through - the same reasoning as
      * [WebGpuRenderer.onDispatcher]. A batch ends once its steps' [estimatedNs] reach
-     * [BATCH_TARGET_NS], re-read as [tileCostNs] and [blockCostNs] accumulate measurements. Each
+     * [batchTargetNs], re-read as [tileCostNs] and [blockCostNs] accumulate measurements. Each
      * tile's [generate] job is collected and joined once per batch (not per tile) on `this` coroutine directly - no nested
      * [coroutineScope], and that join is itself what lets a queued frame through, so no separate
-     * [yield] is needed. Without [FeatureName.TimestampQuery], [generate] never returns a [Job],
-     * so joining an always-empty [measurements] does nothing - pacing falls back to a flat
-     * [delay] between [TILES_PER_BATCH_FALLBACK]-sized batches instead.
+     * [yield] is needed. Without [FeatureName.TimestampQuery], each batch starts on an idle queue
+     * and its first step is timed to the queue's completion ([measureSubmitted]), with a flat
+     * [delay] between batches.
      */
     private fun schedule() {
         if (workerActive) return
@@ -2060,11 +2076,22 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         workerScope.launch {
             try {
                 while (true) {
+                    if (!timestampsSupported) {
+                        try {
+                            awaitPumped { device.queue.onSubmittedWorkDone() }
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Tile queue unavailable: ${e.message}")
+                            break
+                        }
+                        timeNextSubmit = true
+                    }
                     var spentNs = 0.0
                     var generated = 0
                     var visible = false
                     val measurements = ArrayList<Job>(MAX_TILES_PER_BATCH)
-                    while (generated < MAX_TILES_PER_BATCH && spentNs < BATCH_TARGET_NS) {
+                    while (generated < MAX_TILES_PER_BATCH && spentNs < batchTargetNs) {
                         val req = nextRequest() ?: break
                         try {
                             val started = System.nanoTime()
@@ -2103,9 +2130,14 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
                         continue
                     }
                     if (visible) invalidate()
-                    if (timestampsSupported) measurements.joinAll() else delay(5.milliseconds)
+                    // Untaken, a frame's own tile would be timed behind a busy queue.
+                    timeNextSubmit = false
+                    measurements.joinAll()
+                    if (!timestampsSupported) delay(5.milliseconds)
                 }
             } finally {
+                // Drained with it set, the next frame's own tile would take it.
+                timeNextSubmit = false
                 workerActive = false
             }
         }
@@ -2129,10 +2161,17 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         fun priorityOf(st: PageTiles, key: Long): Float {
             val tx = (key shr 32).toInt()
             val ty = key.toInt()
-            val centerTx = (st.txMin + st.txMax) * 0.5f
-            val centerTy = (st.tyMin + st.tyMax) * 0.5f
-            val outX = max(max(st.txMin - tx, tx - st.txMax), 0)
-            val outY = max(max(st.tyMin - ty, ty - st.tyMax), 0)
+            // A page turned away from keeps its last window: as empty, as a [prewarm]ed grid's.
+            // Mid-record, the last finished frame's: this one may not have reached the page yet.
+            val shown = st.shownFrame >= if (recording) frame - 1 else frame
+            val txMin = if (shown) st.txMin else 0
+            val txMax = if (shown) st.txMax else -1
+            val tyMin = if (shown) st.tyMin else 0
+            val tyMax = if (shown) st.tyMax else -1
+            val centerTx = (txMin + txMax) * 0.5f
+            val centerTy = (tyMin + tyMax) * 0.5f
+            val outX = max(max(txMin - tx, tx - txMax), 0)
+            val outY = max(max(tyMin - ty, ty - tyMax), 0)
             val cx = tx - centerTx
             val cy = ty - centerTy
             return max(outX, outY) * OFF_SCREEN_SCORE + cx * cx + cy * cy
@@ -2395,6 +2434,8 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         val timing = if (queries != null) acquireTimestampBuffers() else null
         val encoder = device.createCommandEncoder()
         var made = 0
+        var timed = false
+        var submitted = 0L
         val commits = ArrayList<() -> Unit>()
         try {
             var opening = queries?.let {
@@ -2417,6 +2458,8 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
                 queries,
                 timing
             )
+            timed = queries == null && made > 0 && takeTimedSubmit()
+            submitted = System.nanoTime()
             device.queue.submitAndRelease(encoder)
         } catch (e: Throwable) {
             encoder.close()
@@ -2442,6 +2485,10 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
                     blockSize
                 )
             }
+        } ?: if (timed) {
+            measurementScope.launch { measureSubmitted(submitted, 0, made, blockSize) }
+        } else {
+            null
         }
         return Generated(job, false, made)
     }
@@ -2770,13 +2817,19 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
                 pass.endAndRelease()
             }
             pool.copyScratchInto(encoder, origin, st.tileSize)
+            val timed = takeTimedSubmit()
+            val submitted = System.nanoTime()
             device.queue.submitAndRelease(encoder)
             storeTile(st, key, origin)
             if (run != null) {
                 run.cpuMs = (System.nanoTime() - run.cpuStart) / 1e6
                 profile.report(run, null)
             }
-            return null
+            if (!timed) return null
+            val made = blocks()
+            return measurementScope.launch {
+                measureSubmitted(submitted, st.tileSize, made, blockSize)
+            }
         }
 
         val timing = acquireTimestampBuffers()
@@ -2884,22 +2937,49 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         releaseTimestampBuffers(timing)
         val start = timestamps[0]
         val end = timestamps[1]
-        if (start > 0 && end > start) {
-            val elapsed = (end - start).toDouble()
-            if (blocks == 0) {
-                recordTileCost(tileSize, elapsed)
-            } else if (tileSize == 0) {
-                recordBlockCost(blockSize, elapsed / blocks)
-            } else {
-                // A tile and its blocks: split only once the tile alone has been measured.
-                val tile = tileCostNs.getOrElse(sizeIndex(tileSize)) { 0.0 }
-                if (tile > 0.0) recordBlockCost(
-                    blockSize,
-                    (elapsed - tile).coerceAtLeast(0.0) / blocks
-                )
-            }
-        }
+        if (start > 0 && end > start) recordSpan((end - start).toDouble(), tileSize, blocks, blockSize)
         if (run != null) profile.report(run, timestamps)
+    }
+
+    /** As [measureTileGpuTime], for [elapsed] ns of GPU time. */
+    private fun recordSpan(elapsed: Double, tileSize: Int, blocks: Int, blockSize: Int) {
+        if (blocks == 0) {
+            recordTileCost(tileSize, elapsed)
+        } else if (tileSize == 0) {
+            recordBlockCost(blockSize, elapsed / blocks)
+        } else {
+            // A tile and its blocks: split only once the tile alone has been measured.
+            val tile = tileCostNs.getOrElse(sizeIndex(tileSize)) { 0.0 }
+            if (tile > 0.0) recordBlockCost(
+                blockSize,
+                (elapsed - tile).coerceAtLeast(0.0) / blocks
+            )
+        }
+    }
+
+    // Render thread only. Set by [schedule] once the queue is idle, taken by the next submit.
+    private var timeNextSubmit = false
+
+    private fun takeTimedSubmit(): Boolean {
+        if (!timeNextSubmit) return false
+        timeNextSubmit = false
+        return true
+    }
+
+    /**
+     * Without timestamps: [submitted] to the queue's completion, from an idle queue - see
+     * [schedule]. Reads high by the submit's latency and any frame queued meanwhile.
+     */
+    private suspend fun measureSubmitted(submitted: Long, tileSize: Int, blocks: Int, blockSize: Int) {
+        try {
+            awaitPumped { device.queue.onSubmittedWorkDone() }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Tile timing unavailable: ${e.message}")
+            return
+        }
+        recordSpan((System.nanoTime() - submitted).toDouble(), tileSize, blocks, blockSize)
     }
 
     private suspend fun awaitPumped(block: suspend () -> Unit) = coroutineScope {
