@@ -453,6 +453,10 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             invalidate()
         }
 
+    /** [ImageFilterChain.regions]; null with tiles off or no image filter running. */
+    fun filteredRegions(image: Image): ImageFilterChain.Regions? =
+        if (enabled && imageChain.runsAt()) imageChain.regions(image, frame) else null
+
     private fun releaseAll() {
         workerScope.launch {
             if (!WebGpuRenderer.isAvailable) return@launch
@@ -576,7 +580,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
 
     /** [ImageFilterChain.geometry], null where it cannot run on blocks - [imageLevels] says why. */
     private fun imageGeometry(st: PageTiles): BlockGeometry? = try {
-        imageChain.geometry(st.scale)
+        imageChain.geometry()
     } catch (e: Exception) {
         null
     }
@@ -841,7 +845,9 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
      */
     private class TileMode(val opens: Boolean, val detailed: Boolean)
 
-    /** An image a tile reads through its filtered level; [rect] is the part read, in image pixels. */
+    /**
+     * An image a tile reads through its filtered level; [rect] is the part read, in image pixels.
+     */
     private class FilteredImage(val image: Image, val level: Mipmap, val rect: ImageRect)
 
     /** What [imageLevels] finds for a tile. */
@@ -1181,13 +1187,24 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         return stencilViews[(frame % STENCIL_BUFFER_COUNT).toInt()]!!
     }
 
+    // Between [newFrame] and [endFrame]: the worker can run while a frame is suspended mid-record.
+    private var recording = false
+
+    /** The frame [newFrame] began is recorded: what it drew may be evicted. Render thread. */
+    fun endFrame() {
+        recording = false
+    }
+
     /**
      * Advance the frame counter and drop tiles for any page the app has since evicted. Called
      * once at the top of every rendered frame, including ones that don't draw tiles at all (e.g.
-     * a page transition), so a destroyed page's textures are freed right away.
+     * a page transition), so a destroyed page's textures are freed right away. Again before
+     * [endFrame] does nothing: a held frame's check begins it ahead of the draw.
      */
     fun newFrame() {
+        if (recording) return
         frame++
+        recording = true
         ErrorScopes.pump()
         imageChain.prune()
 
@@ -1963,7 +1980,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         if (!imageChain.isActive) return null
         val queries = timestampQuerySet ?: return null
         val st = pages.values.lastOrNull {
-            it.stable && !it.destroyed && it.page.hasUploadedImage && imageChain.runsAt(it.scale)
+            it.stable && !it.destroyed && it.page.hasUploadedImage && imageChain.runsAt()
         } ?: return null
         var image: Image? = null
         st.page.forEachImage { candidate, _, _ ->
@@ -1987,7 +2004,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
                     beginningOfPassWriteIndex = 0,
                     endOfPassWriteIndex = Constants.QUERY_SET_INDEX_UNDEFINED
                 )
-                if (!imageChain.probe(encoder, probed, st.scale, blockSize, opening)) {
+                if (!imageChain.probe(encoder, probed, blockSize, opening)) {
                     // Can't run at this size: never try it again.
                     blockProbeAttempts[index] = 2 * TILE_SIZE_SAMPLES
                     encoder.close()
@@ -2264,7 +2281,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             onScreen = onScreen,
             filters = if (throughTiles) tiles.names(st.scale) else emptyList(),
             inputSize = if (throughTiles) size else 0,
-            imageFilters = if (levels != null || blank) imageChain.names(st.scale) else emptyList(),
+            imageFilters = if (levels != null || blank) imageChain.names() else emptyList(),
             rendered = made,
             blank = blank,
             cpuStart = cpuStart,
@@ -2282,7 +2299,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
                 if (levels != null) {
                     commits = levels.images.map { f ->
                         val filled =
-                            imageChain.fill(encoder, f.image, st.scale, f.rect, opening)
+                            imageChain.fill(encoder, f.image, f.rect, opening)
                         if (filled.made > 0) opening = null
                         encoded += filled.made
                         filled.commit
@@ -2390,7 +2407,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             for (f in levels.images) {
                 if (made >= limit) break
                 val filled =
-                    imageChain.fill(encoder, f.image, st.scale, f.rect, opening, limit - made)
+                    imageChain.fill(encoder, f.image, f.rect, opening, limit - made)
                 if (filled.made > 0) opening = null
                 made += filled.made
                 commits.add(filled.commit)
@@ -2450,7 +2467,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     private fun imageLevelsOrThrow(st: PageTiles, tx: Int, ty: Int): ImageLevels? {
         val chain = imageChain
         if (!chain.isActive) return null
-        val geometry = chain.geometry(st.scale) ?: return null
+        val geometry = chain.geometry() ?: return null
         val k = geometry.k
         val ts = st.tileSize.toFloat()
         val tilesHalo = if (tilesFilters.runsAt(st.scale)) tilesFilters.halo(st.scale) else 0
@@ -2475,12 +2492,13 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
                 (ts - dstLeft) / si + margin,
                 (ts - dstTop) / si + margin,
             )
-            if (rect.right <= 0f || rect.bottom <= 0f || rect.left >= base.width || rect.top >= base.height) {
+            if (rect.right <= 0f || rect.bottom <= 0f || rect.left >= base.width ||
+                rect.top >= base.height
+            ) {
                 return@forEachImage
             }
-            val level = chain.level(image, st.scale)!!
+            val level = chain.level(image)!!
             // The page draw binds a 2x2 window of level tiles, so a tile's read must fit in one.
-            // Exceeded only far zoomed out.
             val reads = ts * k / si + 2 * tilesHalo + 2
             if (reads > level.tilesize) {
                 failed = true
@@ -2491,15 +2509,15 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         if (failed || images.isEmpty()) return null
         if (!chain.reserve(
                 images.map { ImageFilterChain.Wanted(it.image, it.rect) },
-                st.scale,
-                frame
+                frame,
+                recording,
             )
         ) {
             return ImageLevels.Later
         }
 
         val missing = images.sumOf { chain.missing(it.image, it.rect) }
-        if (missing > 0 && !chain.ready(st.scale, images[0].level.format)) return null
+        if (missing > 0 && !chain.ready(images[0].level.format)) return null
         return ImageLevels.Ready(k, images, missing)
     }
 

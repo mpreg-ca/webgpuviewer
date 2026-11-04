@@ -67,7 +67,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {}
     fun samplers() {
         for (name in listOf("catmull_rom.wgsl", "box_downscale.wgsl")) {
             val code = res(name)
-            assertTrue(name, "fn resolve(src_start: vec2<f32>, scale: vec2<f32>)" in code && "//!" !in code)
+            assertTrue(name, "fn resolve(src_start: vec2<f32>, scale: vec2<f32>, b: vec4<i32>)" in code && "//!" !in code)
             fails("a sampler is not a network", code)
         }
     }

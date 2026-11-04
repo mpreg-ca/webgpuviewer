@@ -14,6 +14,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.log2
 import kotlin.math.max
@@ -694,8 +695,10 @@ class Image private constructor(
         val height = min(mipmap.height - quad.y, 2 * mipmap.tilesize)
         val whole = Placement.whole(
             dst,
-            (0.5f / scale + adjustedX) * mipmap.scale + (quad.x - 0.5f * mipmap.width) / dst.width,
-            (0.5f / scale + adjustedY) * mipmap.scale + (quad.y - 0.5f * mipmap.height) / dst.height,
+            (0.5f / scale + adjustedX) * mipmap.scale +
+                (quad.x - 0.5f * mipmap.width) / dst.width,
+            (0.5f / scale + adjustedY) * mipmap.scale +
+                (quad.y - 0.5f * mipmap.height) / dst.height,
             levelScale,
             width,
             height,
@@ -718,11 +721,20 @@ class Image private constructor(
         )
     }
 
-    /** One physical tile, already placed for a single draw call - see [prepareTilesForRender]. */
+    /**
+     * One physical tile, already placed for a single draw call - see [prepareTilesForRender].
+     * [read] is the texels its reads clamp to, in tile texels: left, top, right, bottom. Reads
+     * past its far edges take [right], [down] and [corner]; at the level's edge, the tile itself,
+     * never read there.
+     */
     class TileForDraw(
         val texture: GPUTexture,
         val view: GPUTextureView,
         val placement: Placement,
+        val read: FloatArray,
+        val right: GPUTextureView,
+        val down: GPUTextureView,
+        val corner: GPUTextureView,
     )
 
     /**
@@ -732,16 +744,24 @@ class Image private constructor(
      * guard is needed here since any viewport is just whichever tiles it happens to overlap.
      *
      * [src], in this image's pixels, crops the draw: each tile draws only its part inside, in
-     * place. By default, [cropRect].
+     * place. By default, [cropRect]. [source] is drawn instead of this image's own level, placed by
+     * its [Mipmap.scale]. [read], in this image's pixels, is what its reads may reach: past it they
+     * clamp, as they do at a tile's edge.
      */
     fun prepareTilesForRender(
-        dst: GPUTexture, x: Float, y: Float, scale: Float, src: RectF? = null
+        dst: GPUTexture,
+        x: Float,
+        y: Float,
+        scale: Float,
+        src: RectF? = null,
+        source: Mipmap? = null,
+        read: RectF? = null,
     ): List<TileForDraw> {
         if (isHdr) Hdr.noteHdrDrawn(this, hdrHeadroom)
         if (mipmaps.isEmpty()) return emptyList()
 
         val level = floor(log2(1 / scale)).toInt().coerceIn(0, mipmaps.size - 1)
-        val mipmap = mipmaps[level]
+        val mipmap = source ?: mipmaps[level]
 
         val adjustedX = x + offsetX / dst.width + WebGpuRenderer.offsetX
         val adjustedY = y + offsetY / dst.height + WebGpuRenderer.offsetY
@@ -762,19 +782,27 @@ class Image private constructor(
         val srcB = src?.let { it.bottom * s } ?: mipmap.height.toFloat()
 
         val levelScale = scale / mipmap.scale
+        // Half a texel left and up: a tile draws the first half texel of the ones after it.
         val tiles = mipmap.tilesInRect(
-            max(cx - halfW, srcL),
-            max(cy - halfH, srcT),
+            max(cx - halfW, srcL) - 0.5f,
+            max(cy - halfH, srcT) - 0.5f,
             min(cx + halfW, srcR),
             min(cy + halfH, srcB)
         )
         return tiles.mapNotNull { tile ->
-            // Crop within this tile, in tile texels.
-            val l = max(srcL - tile.x, 0f)
-            val t = max(srcT - tile.y, 0f)
-            val r = min(srcR - tile.x, tile.width.toFloat())
-            val b = min(srcB - tile.y, tile.height.toFloat())
+            val column = tile.x / mipmap.tilesize
+            val row = tile.y / mipmap.tilesize
+            val hasRight = column + 1 < mipmap.tilesCols
+            val hasDown = row + 1 < mipmap.tilesRows
+            // In tile texels, shifted half a texel: a read near a shared edge takes both tiles'
+            // texels, and only the tiles after this one are bound.
+            val l = max(srcL - tile.x, if (column > 0) 0.5f else 0f)
+            val t = max(srcT - tile.y, if (row > 0) 0.5f else 0f)
+            val r = min(srcR - tile.x, tile.width + if (hasRight) 0.5f else 0f)
+            val b = min(srcB - tile.y, tile.height + if (hasDown) 0.5f else 0f)
             if (l >= r || t >= b) return@mapNotNull null
+            val readRight = tile.width + if (hasRight) 1f else 0f
+            val readBottom = tile.height + if (hasDown) 1f else 0f
 
             // The tile's origin in target pixels: prepareForRender's quad.x/quad.y reconstruction,
             // evaluated at this tile's offset.
@@ -791,6 +819,15 @@ class Image private constructor(
                     l, t, r - l, b - t,
                     tile.width.toFloat(), tile.height.toFloat(),
                 ),
+                floatArrayOf(
+                    read?.let { max(floor(it.left * s - tile.x), 0f) } ?: 0f,
+                    read?.let { max(floor(it.top * s - tile.y), 0f) } ?: 0f,
+                    read?.let { min(ceil(it.right * s - tile.x), readRight) } ?: readRight,
+                    read?.let { min(ceil(it.bottom * s - tile.y), readBottom) } ?: readBottom,
+                ),
+                if (hasRight) mipmap.target(column + 1, row).second else tile.view,
+                if (hasDown) mipmap.target(column, row + 1).second else tile.view,
+                if (hasRight && hasDown) mipmap.target(column + 1, row + 1).second else tile.view,
             )
         }
     }

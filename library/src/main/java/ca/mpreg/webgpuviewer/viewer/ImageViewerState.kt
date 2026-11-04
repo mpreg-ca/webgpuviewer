@@ -55,8 +55,8 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
 
     /**
      * Filters over whole images, output kept as a level of each image for the tiles to read - see
-     * [ca.mpreg.webgpuviewer.renderer.ImageFilterChain]. Assigning drops generated tiles. An instance
-     * belongs to one viewer.
+     * [ca.mpreg.webgpuviewer.renderer.ImageFilterChain]. Run as at 100% zoom, so made once for every
+     * zoom. Assigning drops generated tiles. An instance belongs to one viewer.
      */
     var imageFilters: List<ImageFilter>
         get() = tiles.imageFilters
@@ -429,32 +429,37 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
             // Captured here, drawn on the GPU thread below - see this function's doc.
             val snapshot = captureRenderState() ?: continue
             drawing = launch(dispatcher) {
-                if (holdUntilFinal && held(snapshot)) return@launch
-                when (renderer.render { encoder, texture ->
-                    renderSnapshot(encoder, texture, snapshot)
-                }) {
-                    FrameResult.Drawn -> {
-                        reportedUnavailable = false
-                        retries = 0
-                    }
+                try {
+                    if (holdUntilFinal && held(snapshot)) return@launch
+                    when (renderer.render { encoder, texture ->
+                        renderSnapshot(encoder, texture, snapshot)
+                    }) {
+                        FrameResult.Drawn -> {
+                            reportedUnavailable = false
+                            retries = 0
+                        }
 
-                    // Past the cap, park until something else invalidates.
-                    FrameResult.Retry -> {
-                        shown = null
-                        if (++retries <= MAX_RETRIES) invalidate()
-                    }
+                        // Past the cap, park until something else invalidates.
+                        FrameResult.Retry -> {
+                            shown = null
+                            if (++retries <= MAX_RETRIES) invalidate()
+                        }
 
-                    // No invalidate: leaving [dirty] clear parks the loop on [renderWake] rather
-                    // than spinning the frame clock, and a later resize still wakes it.
-                    FrameResult.Unavailable -> {
-                        shown = null
-                        if (!reportedUnavailable) {
-                            reportedUnavailable = true
-                            val reason = WebGpuRenderer.unavailableReason ?: "no render surface"
-                            Log.e("ImageViewerState", "Nothing can be drawn: $reason")
-                            onRenderUnavailable?.runCatching { invoke(reason) }
+                        // No invalidate: leaving [dirty] clear parks the loop on [renderWake]
+                        // rather than spinning the frame clock, and a later resize still wakes it.
+                        FrameResult.Unavailable -> {
+                            shown = null
+                            if (!reportedUnavailable) {
+                                reportedUnavailable = true
+                                val reason =
+                                    WebGpuRenderer.unavailableReason ?: "no render surface"
+                                Log.e("ImageViewerState", "Nothing can be drawn: $reason")
+                                onRenderUnavailable?.runCatching { invoke(reason) }
+                            }
                         }
                     }
+                } finally {
+                    tiles.endFrame()
                 }
             }
         }

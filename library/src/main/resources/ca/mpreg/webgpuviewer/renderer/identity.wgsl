@@ -16,7 +16,8 @@
 //                      replaces it for later passes
 //   //!WIDTH expr      size of what the pass writes, by default HOOKED.w and HOOKED.h
 //   //!HEIGHT expr
-//   //!WHEN expr       the pass runs only for tiles where this is not 0
+//   //!WHEN expr       the pass runs only for tiles where this is not 0. As an image filter, whose
+//                      output serves every zoom, it is asked once, as at 100%
 //   //!COMPONENTS n    checked to be 1 to 4, otherwise unused
 //   //!COMPUTE bw bh [tw th]
 //                      output pixels per workgroup, by default @workgroup_size, which also sets

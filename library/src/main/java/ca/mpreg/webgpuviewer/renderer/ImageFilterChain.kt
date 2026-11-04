@@ -115,6 +115,9 @@ private class Level(
 private class Slot(val level: Level, val column: Int, val row: Int, val bytes: Long) {
     /** [TileRenderer]'s frame it was last read in. */
     var used = -1L
+
+    /** The frame the fast path last drew from it in: see [reserve]'s drawing. */
+    var drawn = -1L
 }
 
 internal class BlockGeometry(
@@ -131,7 +134,8 @@ internal class BlockGeometry(
 /**
  * Image filters. Their output is kept as another level of the image, [k] times its size, filled a block
  * at a time as tiles ask: the chain run on that block plus its halo. A block is made once for every
- * scale; tiles read the level like any other, via [TilesFilterChain]'s resolve.
+ * scale; tiles read the level like any other, via [TilesFilterChain]'s resolve, and the fast path
+ * draws its made blocks.
  *
  * Level tiles get textures when first wanted ([reserve]) and are evicted LRU within [BUDGET_BYTES],
  * never one read this frame. A level is dropped when its image's content, the running filters, or its
@@ -170,39 +174,39 @@ internal class ImageFilterChain(private val onChange: () -> Unit) {
 
     val isActive: Boolean get() = !broken && filters.any { it.supported }
 
-    private fun running(pageScale: Float): List<ImageFilter> =
-        if (broken) emptyList() else filters.filter { it.supported && it.applies(pageScale) }
+    private fun running(): List<ImageFilter> =
+        if (broken) emptyList() else filters.filter { it.supported && it.applies(BASE_SCALE) }
 
-    fun runsAt(pageScale: Float) = running(pageScale).isNotEmpty()
+    fun runsAt() = running().isNotEmpty()
 
-    fun names(pageScale: Float) = running(pageScale).map { it.name }
+    fun names() = running().map { it.name }
 
-    /** Keys what the chain made at [pageScale]: the running filters, in order, and each one's passes. */
-    fun signature(pageScale: Float) =
-        running(pageScale).joinToString("|") { it.signature(pageScale) }
+    /** Keys what the chain makes: the running filters, in order, and each one's passes. */
+    fun signature() =
+        running().joinToString("|") { it.signature(BASE_SCALE) }
 
-    private fun scale(pageScale: Float) =
-        running(pageScale).fold(1f) { product, f -> product * f.scale(pageScale) }
+    private fun scale() =
+        running().fold(1f) { product, f -> product * f.scale(BASE_SCALE) }
 
     /**
-     * Image pixels needed around a block at [pageScale], from the last filter back: each one's
+     * Image pixels needed around a block, from the last filter back: each one's
      * halo plus what later ones need, in its input pixels.
      */
-    private fun halo(pageScale: Float): Int {
+    private fun halo(): Int {
         var margin = 0
-        for (f in running(pageScale).asReversed()) {
-            margin = f.halo(pageScale) + ceil(margin / f.scale(pageScale)).toInt()
+        for (f in running().asReversed()) {
+            margin = f.halo(BASE_SCALE) + ceil(margin / f.scale(BASE_SCALE)).toInt()
         }
         return margin
     }
 
-    private fun fitsInput(size: Int, pageScale: Float): Boolean {
+    private fun fitsInput(size: Int): Boolean {
         if (size > WebGpuRenderer.maxTextureDimension2D) return false
         var side = size
         return try {
-            for (f in running(pageScale)) {
-                if (!f.fits(side, pageScale)) return false
-                side = f.outputSize(side, pageScale)
+            for (f in running()) {
+                if (!f.fits(side, BASE_SCALE)) return false
+                side = f.outputSize(side, BASE_SCALE)
             }
             true
         } catch (e: IllegalArgumentException) {
@@ -210,28 +214,25 @@ internal class ImageFilterChain(private val onChange: () -> Unit) {
         }
     }
 
-    private fun outputSide(size: Int, pageScale: Float) =
-        running(pageScale).fold(size) { side, f -> f.outputSize(side, pageScale) }
+    private fun outputSide(size: Int) =
+        running().fold(size) { side, f -> f.outputSize(side, BASE_SCALE) }
 
     /**
      * Null where nothing runs. Throws if the chain can't run on [blockSize] blocks: such filters go in
      * [TilesFilterChain].
      */
-    fun geometry(pageScale: Float, blockSize: Int = this.blockSize): BlockGeometry? {
-        if (!runsAt(pageScale)) return null
-        val names = names(pageScale).joinToString(", ")
-        val scale = scale(pageScale)
+    fun geometry(blockSize: Int = this.blockSize): BlockGeometry? {
+        if (!runsAt()) return null
+        val names = names().joinToString(", ")
+        val scale = scale()
         val k = scale.toInt()
         check(k >= 1 && k.toFloat() == scale) { "ImageFilterChain [$names]: scale $scale is not a whole number" }
-        val halo = halo(pageScale)
+        val halo = halo()
         val side = blockSize + 2 * halo
         check(
-            fitsInput(
-                side,
-                pageScale
-            )
+            fitsInput(side)
         ) { "ImageFilterChain [$names]: cannot run on a ${side}px block" }
-        val out = outputSide(side, pageScale)
+        val out = outputSide(side)
         check(out == k * side) { "ImageFilterChain [$names]: a ${side}px block gives ${out}px, not ${k * side}px" }
         return BlockGeometry(k, halo, side, blockSize)
     }
@@ -251,11 +252,11 @@ internal class ImageFilterChain(private val onChange: () -> Unit) {
      * Created empty if missing; null where nothing runs. Holds no GPU memory until [reserve].
      * Throws if it can't be made (see [geometry]).
      */
-    fun level(image: Image, pageScale: Float): Mipmap? {
+    fun level(image: Image): Mipmap? {
         forgetReplacedDevice()
-        val geometry = geometry(pageScale) ?: return null
+        val geometry = geometry() ?: return null
         val base = image.mipmaps.firstOrNull() ?: return null
-        val signature = signature(pageScale)
+        val signature = signature()
 
         var entry = levels[image]
         if (entry != null && (entry.signature != signature || entry.version != image.contentVersion ||
@@ -273,7 +274,7 @@ internal class ImageFilterChain(private val onChange: () -> Unit) {
             val most = min(WebGpuRenderer.maxTextureDimension2D, max(MAX_LEVEL_TILE, blockTexels))
             val tilesize = most / blockTexels * blockTexels
             check(tilesize >= blockTexels) {
-                "ImageFilterChain [${names(pageScale).joinToString(", ")}]: a ${blockTexels}px block exceeds the texture limit"
+                "ImageFilterChain [${names().joinToString(", ")}]: a ${blockTexels}px block exceeds the texture limit"
             }
             entry = Level(
                 image, signature, image.contentVersion, k, blockSize,
@@ -296,10 +297,11 @@ internal class ImageFilterChain(private val onChange: () -> Unit) {
     class Wanted(val image: Image, val rect: ImageRect)
 
     /**
-     * Allocates every level tile under [wanted], after [level], evicting tiles not read in [frame].
+     * Allocates every level tile under [wanted], after [level], evicting tiles not read in [frame],
+     * nor drawn in it while [drawing]: a frame still recording reads what it drew at submit.
      * Throws if [wanted] alone exceeds the budget; false if it fits, but not beside this frame's.
      */
-    fun reserve(wanted: List<Wanted>, pageScale: Float, frame: Long): Boolean {
+    fun reserve(wanted: List<Wanted>, frame: Long, drawing: Boolean): Boolean {
         val need = LinkedHashSet<Slot>()
         val fresh = ArrayList<Slot>()
         var needBytes = 0L
@@ -326,7 +328,7 @@ internal class ImageFilterChain(private val onChange: () -> Unit) {
 
         val budget = budget
         check(needBytes <= budget) {
-            "ImageFilterChain [${names(pageScale).joinToString(", ")}]: a tile reads ${needBytes shr 20}MB " +
+            "ImageFilterChain [${names().joinToString(", ")}]: a tile reads ${needBytes shr 20}MB " +
                     "of filtered level, past the ${budget shr 20}MB budget"
         }
         val freshBytes = fresh.sumOf { it.bytes }
@@ -336,7 +338,9 @@ internal class ImageFilterChain(private val onChange: () -> Unit) {
             if (totalBytes + freshBytes <= budget) break
             // Gone already if an earlier release dropped its level.
             if (slot !in slots) continue
-            if (slot.used != frame && slot !in need) release(slot, slot.level !in wantedLevels)
+            if (slot.used == frame || slot in need) continue
+            if (drawing && slot.drawn == frame) continue
+            release(slot, slot.level !in wantedLevels)
         }
         if (totalBytes + freshBytes > budget) return false
 
@@ -415,6 +419,133 @@ internal class ImageFilterChain(private val onChange: () -> Unit) {
         return blocks
     }
 
+    /**
+     * [image]'s level, null before it is made, and, as rows of whole blocks in image pixels, its
+     * made and unmade parts.
+     */
+    class Regions(val level: Mipmap?, val made: List<Made>, val unmade: List<ImageRect>)
+
+    /**
+     * Made blocks, and [read], what drawing them may read: a texel past [rect] where the blocks
+     * there are made too, so neighbouring parts blend; none where they aren't, whose texels hold
+     * nothing. Parts never overlap: a translucent page would blend twice.
+     */
+    class Made(val rect: ImageRect, val read: ImageRect)
+
+    /**
+     * [image]'s level and parts; without a current level, all of [image] unmade. Marks the level
+     * tiles the made parts read as drawn in [frame], so none is evicted under this frame's draw.
+     */
+    fun regions(image: Image, frame: Long): Regions {
+        forgetReplacedDevice()
+        val entry = levels[image]
+        if (entry == null || entry.version != image.contentVersion ||
+            entry.signature != signature()
+        ) {
+            val whole = ImageRect(0f, 0f, image.width.toFloat(), image.height.toFloat())
+            return Regions(null, emptyList(), listOf(whole))
+        }
+        val size = entry.blockSize
+        val per = entry.blocksPerTile
+        val texel = 1f / entry.k
+        val columns = entry.columns
+        val filled = entry.filled
+        // Half a texel, in image pixels: how far from an edge bilinear reads past it.
+        val half = 0.5f * texel
+        fun isMade(r: Int, c: Int) =
+            r in 0 until entry.rows && c in 0 until columns && filled[r * columns + c]
+        // A made run splits where the blocks above or below change, so each part reads past its
+        // top and bottom alike.
+        fun keyAt(r: Int, c: Int) = if (!isMade(r, c)) 0 else {
+            1 + (if (isMade(r - 1, c)) 2 else 0) + (if (isMade(r + 1, c)) 4 else 0)
+        }
+        val made = ArrayList<Made>()
+        val unmade = ArrayList<ImageRect>()
+        // A part extends the one ending where it starts with the same sides, so a page drawn
+        // whole is one part, not one a block row.
+        val madeEnds = HashMap<List<Float>, Int>()
+        val unmadeEnds = HashMap<List<Float>, Int>()
+        fun addMade(rect: ImageRect, read: ImageRect) {
+            val sides = listOf(rect.left, rect.right, read.left, read.right)
+            val i = madeEnds.remove(sides + rect.top)
+            if (i == null) {
+                made.add(Made(rect, read))
+            } else {
+                val above = made[i]
+                made[i] = Made(
+                    ImageRect(rect.left, above.rect.top, rect.right, rect.bottom),
+                    ImageRect(read.left, above.read.top, read.right, read.bottom),
+                )
+            }
+            madeEnds[sides + rect.bottom] = i ?: made.lastIndex
+        }
+        for (r in 0 until entry.rows) {
+            var c = 0
+            while (c < columns) {
+                val key = keyAt(r, c)
+                var end = c
+                while (end + 1 < columns && keyAt(r, end + 1) == key) end++
+                val rect = ImageRect(
+                    (c * size).toFloat(),
+                    (r * size).toFloat(),
+                    min((end + 1) * size, image.width).toFloat(),
+                    min((r + 1) * size, image.height).toFloat(),
+                )
+                if (key == 0) {
+                    val sides = listOf(rect.left, rect.right)
+                    val i = unmadeEnds.remove(sides + rect.top)
+                    if (i == null) {
+                        unmade.add(rect)
+                    } else {
+                        unmade[i] = ImageRect(rect.left, unmade[i].top, rect.right, rect.bottom)
+                    }
+                    unmadeEnds[sides + rect.bottom] = i ?: unmade.lastIndex
+                } else {
+                    val top = key and 2 != 0
+                    val bottom = key and 4 != 0
+                    val left = isMade(r, c - 1)
+                    val right = isMade(r, end + 1)
+                    // Within half a texel of a corner a read also takes the diagonal block: where
+                    // that is unmade, the band there doesn't read past that side.
+                    val tl = top && left && !isMade(r - 1, c - 1)
+                    val tr = top && right && !isMade(r - 1, end + 1)
+                    val bl = bottom && left && !isMade(r + 1, c - 1)
+                    val br = bottom && right && !isMade(r + 1, end + 1)
+                    fun part(t: Float, b: Float) {
+                        if (b <= t) return
+                        val nearTop = t < rect.top + half
+                        val nearBottom = b > rect.bottom - half
+                        val l = left && !(nearTop && tl) && !(nearBottom && bl)
+                        val rr = right && !(nearTop && tr) && !(nearBottom && br)
+                        val read = ImageRect(
+                            if (l) rect.left - texel else rect.left,
+                            if (top) rect.top - texel else rect.top,
+                            if (rr) rect.right + texel else rect.right,
+                            if (bottom) rect.bottom + texel else rect.bottom,
+                        )
+                        addMade(ImageRect(rect.left, t, rect.right, b), read)
+                    }
+                    val y0 = if (tl || tr) min(rect.top + half, rect.bottom) else rect.top
+                    val y1 = if (bl || br) max(rect.bottom - half, y0) else rect.bottom
+                    part(rect.top, y0)
+                    part(y0, y1)
+                    part(y1, rect.bottom)
+                    // One tile around too: a tile's draw binds its neighbours, read or not, and the
+                    // half-texel shift draws from the one before it.
+                    val cols = entry.mipmap.tilesCols
+                    val tileRow = r / per
+                    for (sr in max(tileRow - 1, 0)..min(tileRow + 1, entry.mipmap.tilesRows - 1)) {
+                        for (sc in max(c / per - 1, 0)..min(end / per + 1, cols - 1)) {
+                            entry.slots[sr * cols + sc]?.drawn = frame
+                        }
+                    }
+                }
+                c = end + 1
+            }
+        }
+        return Regions(entry.mipmap, made, unmade)
+    }
+
     /** Unmade blocks under [rect]. Call after [level]. */
     fun missing(image: Image, rect: ImageRect): Int {
         val entry = levels[image] ?: return 0
@@ -452,12 +583,11 @@ internal class ImageFilterChain(private val onChange: () -> Unit) {
      * nothing runs, or a filter can't be built, which sets [broken] unless [probing].
      */
     fun ready(
-        pageScale: Float,
         format: Int,
         blockSize: Int = this.blockSize,
         probing: Boolean = false
     ): Boolean {
-        val geometry = geometry(pageScale, blockSize) ?: return false
+        val geometry = geometry(blockSize) ?: return false
         prepared = null
         return try {
             forgetReplacedDevice()
@@ -484,14 +614,14 @@ internal class ImageFilterChain(private val onChange: () -> Unit) {
             var view = inputView!!
             var side = size
             var out: FilterOutput? = null
-            for (f in running(pageScale)) {
-                out = if (probing) f.prepareProbe(view, side, pageScale) else f.prepare(
-                    view,
-                    side,
-                    pageScale
-                )
+            for (f in running()) {
+                out = if (probing) {
+                    f.prepareProbe(view, side, BASE_SCALE)
+                } else {
+                    f.prepare(view, side, BASE_SCALE)
+                }
                 view = out.view
-                side = f.outputSize(side, pageScale)
+                side = f.outputSize(side, BASE_SCALE)
             }
             prepared = out
             out != null
@@ -518,13 +648,12 @@ internal class ImageFilterChain(private val onChange: () -> Unit) {
     fun fill(
         encoder: GPUCommandEncoder,
         image: Image,
-        pageScale: Float,
         rect: ImageRect,
         timestamps: GPUPassTimestampWrites?,
         limit: Int = Int.MAX_VALUE,
     ): Filled {
         val entry = levels[image]
-        val geometry = geometry(pageScale)
+        val geometry = geometry()
         val output = prepared
         val input = inputTexture
         val inputView = inputView
@@ -544,7 +673,7 @@ internal class ImageFilterChain(private val onChange: () -> Unit) {
             val py = i / entry.columns * blockTexels
             entry.mipmap.isAllocated(px / tilesize, py / tilesize)
         }.take(limit)
-        val running = running(pageScale)
+        val running = running()
 
         Hdr.cuttingTiles = true
         try {
@@ -659,17 +788,16 @@ internal class ImageFilterChain(private val onChange: () -> Unit) {
     fun probe(
         encoder: GPUCommandEncoder,
         image: Image,
-        pageScale: Float,
         blockSize: Int,
         timestamps: GPUPassTimestampWrites,
     ): Boolean {
         val base = image.mipmaps.firstOrNull() ?: return false
         val geometry = try {
-            geometry(pageScale, blockSize)
+            geometry(blockSize)
         } catch (e: IllegalStateException) {
             null
         } ?: return false
-        if (!ready(pageScale, base.format, blockSize, probing = true)) return false
+        if (!ready(base.format, blockSize, probing = true)) return false
         val output = prepared ?: return false
         Hdr.cuttingTiles = true
         try {
@@ -677,7 +805,7 @@ internal class ImageFilterChain(private val onChange: () -> Unit) {
         } finally {
             Hdr.cuttingTiles = false
         }
-        for (f in running(pageScale)) f.encode(encoder)
+        for (f in running()) f.encode(encoder)
         // A real block's write too, or a probed size reads as cheaper than the one in use.
         val texels = geometry.k * blockSize
         val target = probeTarget(texels, base.format)
@@ -782,6 +910,9 @@ internal class ImageFilterChain(private val onChange: () -> Unit) {
     }
 
     private companion object {
+        /** What the filters are run at: the base image, so a level never depends on zoom. */
+        const val BASE_SCALE = 1f
+
         const val TAG = "ImageFilterChain"
 
         // Shared by every chain, so never closed.

@@ -491,9 +491,10 @@ class Mipmap(
         if (l >= r || t >= b) return emptyList()
 
         val c0 = (l / tilesize).toInt().coerceIn(0, tilesCols - 1)
-        val c1 = ((r - 1f) / tilesize).toInt().coerceIn(0, tilesCols - 1)
+        // Last texel touched: a right edge past a tile's start reaches into it.
+        val c1 = ((ceil(r) - 1f) / tilesize).toInt().coerceIn(0, tilesCols - 1)
         val row0 = (t / tilesize).toInt().coerceIn(0, tilesRows - 1)
-        val row1 = ((b - 1f) / tilesize).toInt().coerceIn(0, tilesRows - 1)
+        val row1 = ((ceil(b) - 1f) / tilesize).toInt().coerceIn(0, tilesRows - 1)
 
         val result = ArrayList<TileRect>((c1 - c0 + 1) * (row1 - row0 + 1))
         for (row in row0..row1) {

@@ -745,10 +745,12 @@ open class ImagePage {
             if (!linear || !masked) {
                 drawPageBackground(pass, dst, scale, maskedBackground = masked)
             }
+            val tiles = parent?.tiles
             forEachPlacedImage(dst, x, y, scale) { image, _, placeX, placeY, placeScale ->
-                for (tile in image.prepareTilesForRender(dst, placeX, placeY, placeScale)) {
-                    RenderPage.drawTile(pass, dst, tile, variant, image.useImageLut)
-                }
+                RenderPage.renderImageTiled(
+                    pass, image, dst, placeX, placeY, placeScale, variant,
+                    filtered = tiles?.filteredRegions(image),
+                )
             }
         }
 

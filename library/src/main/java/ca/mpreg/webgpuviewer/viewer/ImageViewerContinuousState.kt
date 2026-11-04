@@ -904,6 +904,7 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
                                         sideScale
                                     )
                                 },
+                                filtered = tiles.filteredRegions(image),
                             )
                         }
                     }

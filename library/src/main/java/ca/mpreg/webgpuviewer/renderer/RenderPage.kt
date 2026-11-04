@@ -68,7 +68,7 @@ object RenderPage {
         ByteBuffer.allocateDirect(PLACEMENT_BYTES + 16).order(ByteOrder.nativeOrder())
     }
     private val tileBytes = ThreadLocal.withInitial {
-        ByteBuffer.allocateDirect(PLACEMENT_BYTES).order(ByteOrder.nativeOrder())
+        ByteBuffer.allocateDirect(PLACEMENT_BYTES + 16).order(ByteOrder.nativeOrder())
     }
 
     /** dst_rect, src_rect, content, dst_size - the part [HEADER] and [TILE_HEADER] share. */
@@ -354,11 +354,6 @@ struct VertexOutput {
     @location(0) uv: vec2<f32>,
 };
 
-/** Image texels in the 2x2 window, padding excluded - what every read is clamped to. */
-fn contentSize() -> vec2<u32> {
-    return vec2<u32>(transform.content);
-}
-
 /** The window position, in texels, that [uv] across the destination maps to. */
 fn src_at(uv: vec2<f32>) -> vec2<f32> {
     return mix(transform.src_rect.xy, transform.src_rect.zw, uv);
@@ -368,25 +363,6 @@ fn src_at(uv: vec2<f32>) -> vec2<f32> {
 fn src_per_dst() -> vec2<f32> {
     return (transform.src_rect.zw - transform.src_rect.xy) /
         (transform.dst_rect.zw - transform.dst_rect.xy);
-}
-
-// Shared by both fragment variants: the fast path also filters in linear light now, so both need
-// the same sRGB<->linear conversion.
-// Odd-symmetric as scRGB defines, so extended-sRGB negatives survive instead of being clamped.
-fn to_linear_exact(srgb: vec4<f32>) -> vec4<f32> {
-    let c = abs(srgb.rgb);
-    let lower = c / vec3<f32>(12.92);
-    let higher = pow((c + vec3<f32>(0.055)) / vec3<f32>(1.055), vec3<f32>(2.4));
-    let cond = c <= vec3<f32>(0.04045);
-    return vec4(sign(srgb.rgb) * select(higher, lower, cond), srgb.a);
-}
-
-fn to_srgb_exact(linear_rgb: vec4<f32>) -> vec4<f32> {
-    let c = abs(linear_rgb.rgb);
-    let lower = c * vec3<f32>(12.92);
-    let higher = vec3<f32>(1.055) * pow(c, vec3<f32>(1.0 / 2.4)) - vec3<f32>(0.055);
-    let cond = c <= vec3<f32>(0.0031308);
-    return vec4(sign(linear_rgb.rgb) * select(higher, lower, cond), linear_rgb.a);
 }
 
 fn tileLoad(i: i32, pos: vec2<i32>) -> vec4<f32> {
@@ -399,7 +375,7 @@ fn tileLoad(i: i32, pos: vec2<i32>) -> vec4<f32> {
 // Fetch by position across the whole quad, picking the tile the position falls in. This is what
 // makes filtering work at a tile boundary: the four slots are separate textures, so anything
 // that resolves within one tile has no access to its neighbour's edge texels.
-fn totalLoad(pos: vec2<i32>) -> vec4<f32> {
+fn load(pos: vec2<i32>) -> vec4<f32> {
     let ts = i32(transform.tile_size);
     let tile_x = select(0, 1, pos.x >= ts);
     let tile_y = select(0, 1, pos.y >= ts);
@@ -438,10 +414,10 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 """
 
     /**
-     * Immediates, single-texture binding and vertex stage shared by [renderFast] and
-     * [ImagePage.ImageSingle.renderPage]'s per-tile draws - one tile a draw, so no window
-     * bookkeeping. As [HEADER], [dst_rect] and [src_rect] place it and [content] is the tile's
-     * image texels, padding excluded.
+     * Immediates, bindings and vertex stage shared by [renderFast] and
+     * [ImagePage.ImageSingle.renderPage]'s per-tile draws - one tile a draw, with the tiles right
+     * of and below it for reads past its far edges. As [HEADER], [dst_rect] and [src_rect] place
+     * it and [content] is the tile's image texels, padding excluded.
      */
     private const val TILE_HEADER = """
 struct TileUniforms {
@@ -449,10 +425,30 @@ struct TileUniforms {
     src_rect: vec4<f32>,
     content: vec2<f32>,
     dst_size: vec2<f32>,
+    // Texels reads clamp to: min.xy, max.zw, exclusive.
+    read_rect: vec4<f32>,
 }
 
 var<immediate> transform: TileUniforms;
 @group(0) @binding(1) var src_tex: texture_2d<f32>;
+@group(0) @binding(4) var src_right: texture_2d<f32>;
+@group(0) @binding(5) var src_down: texture_2d<f32>;
+@group(0) @binding(6) var src_corner: texture_2d<f32>;
+
+fn tile_load(p: vec2<i32>) -> vec4<f32> {
+    let size = vec2<i32>(transform.content);
+    let past = p >= size;
+    if (past.x && past.y) {
+        return textureLoad(src_corner, p - size, 0);
+    }
+    if (past.x) {
+        return textureLoad(src_right, vec2<i32>(p.x - size.x, p.y), 0);
+    }
+    if (past.y) {
+        return textureLoad(src_down, vec2<i32>(p.x, p.y - size.y), 0);
+    }
+    return textureLoad(src_tex, p, 0);
+}
 
 struct TileVertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -511,15 +507,16 @@ fn fs_main(in: TileVertexOutput) -> @location(0) vec4<f32> {
     let p = pos - 0.5;
     let base = floor(p);
 
-    let max_coord = vec2<i32>(transform.content) - 1;
-    let i0 = clamp(vec2<i32>(base), vec2<i32>(0), max_coord);
-    let i1 = clamp(vec2<i32>(base) + 1, vec2<i32>(0), max_coord);
+    let min_coord = vec2<i32>(transform.read_rect.xy);
+    let max_coord = vec2<i32>(transform.read_rect.zw) - 1;
+    let i0 = clamp(vec2<i32>(base), min_coord, max_coord);
+    let i1 = clamp(vec2<i32>(base) + 1, min_coord, max_coord);
     let f = p - base;
 
-    let c00 = tile_to_linear(textureLoad(src_tex, vec2<i32>(i0.x, i0.y), 0));
-    let c10 = tile_to_linear(textureLoad(src_tex, vec2<i32>(i1.x, i0.y), 0));
-    let c01 = tile_to_linear(textureLoad(src_tex, vec2<i32>(i0.x, i1.y), 0));
-    let c11 = tile_to_linear(textureLoad(src_tex, vec2<i32>(i1.x, i1.y), 0));
+    let c00 = tile_to_linear(tile_load(vec2<i32>(i0.x, i0.y)));
+    let c10 = tile_to_linear(tile_load(vec2<i32>(i1.x, i0.y)));
+    let c01 = tile_to_linear(tile_load(vec2<i32>(i0.x, i1.y)));
+    let c11 = tile_to_linear(tile_load(vec2<i32>(i1.x, i1.y)));
 
     let linear_col = mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
     let col = tile_to_srgb(linear_col);
@@ -538,15 +535,16 @@ fn fs_main(in: TileVertexOutput) -> @location(0) vec4<f32> {
     let p = pos - 0.5;
     let base = floor(p);
 
-    let max_coord = vec2<i32>(transform.content) - 1;
-    let i0 = clamp(vec2<i32>(base), vec2<i32>(0), max_coord);
-    let i1 = clamp(vec2<i32>(base) + 1, vec2<i32>(0), max_coord);
+    let min_coord = vec2<i32>(transform.read_rect.xy);
+    let max_coord = vec2<i32>(transform.read_rect.zw) - 1;
+    let i0 = clamp(vec2<i32>(base), min_coord, max_coord);
+    let i1 = clamp(vec2<i32>(base) + 1, min_coord, max_coord);
     let f = p - base;
 
-    let c00 = textureLoad(src_tex, vec2<i32>(i0.x, i0.y), 0);
-    let c10 = textureLoad(src_tex, vec2<i32>(i1.x, i0.y), 0);
-    let c01 = textureLoad(src_tex, vec2<i32>(i0.x, i1.y), 0);
-    let c11 = textureLoad(src_tex, vec2<i32>(i1.x, i1.y), 0);
+    let c00 = tile_load(vec2<i32>(i0.x, i0.y));
+    let c10 = tile_load(vec2<i32>(i1.x, i0.y));
+    let c01 = tile_load(vec2<i32>(i0.x, i1.y));
+    let c11 = tile_load(vec2<i32>(i1.x, i1.y));
 
     let col = mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
     return vec4<f32>(apply_lut(col.rgb) * col.a, col.a);
@@ -554,17 +552,19 @@ fn fs_main(in: TileVertexOutput) -> @location(0) vec4<f32> {
 """
 
     /**
-     * Fragment stage for a [Sampler]'s `resolve`, plus the premultiply every draw here ends with.
-     * `resolve` gets the pixel's footprint in source texels (start, and size = texels per pixel), not
-     * whether it enlarges or shrinks: the sampler decides.
+     * [Sampler] host for the window, with [HEADER]'s `load`: the bounds over its image texels,
+     * padding excluded, and a fragment stage drawing `resolve`'s colour premultiplied.
      */
     private const val RESOLVE_MAIN = """
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // The pixel centre maps to the footprint's middle, so the start is half a footprint back.
     let size = src_per_dst();
-    let col = resolve(src_at(in.uv) - 0.5 * size, size);
-    return vec4<f32>(col.rgb * col.a, col.a);
+    let bounds = vec4<i32>(vec2<i32>(0), vec2<i32>(transform.content) - 1);
+    let c = resolve(src_at(in.uv) - 0.5 * size, size, bounds);
+    // Colour unclamped: an HDR tile's is legitimately outside [0,1].
+    let a = clamp(c.a, 0.0, 1.0);
+    return vec4<f32>(c.rgb * a, a);
 }
 """
 
@@ -621,10 +621,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         masked: Boolean = true,
         /** Only this part of [image], in its pixels, in place - see [Image.prepareTilesForRender]. */
         src: RectF? = null,
-    ) = renderImageTiled(pass, image, dst, x, y, scale, variantFor(linear, masked), src)
+        filtered: ImageFilterChain.Regions? = null,
+    ) = renderImageTiled(pass, image, dst, x, y, scale, variantFor(linear, masked), src, filtered)
 
-    /** As [render], for [renderFast]/[ImagePage.ImageSingle.renderPage] - draws every tile separately. */
-    private fun renderImageTiled(
+    /**
+     * As [render], for [renderFast]/[ImagePage.ImageSingle.renderPage] - draws every tile
+     * separately. [filtered]'s made parts come from its level, the rest from [image],
+     * each once: drawn over each other, a translucent page would blend twice.
+     */
+    internal fun renderImageTiled(
         pass: GPURenderPassEncoder,
         image: Image,
         dst: GPUTexture,
@@ -633,10 +638,26 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         scale: Float,
         variant: Variant,
         src: RectF? = null,
+        filtered: ImageFilterChain.Regions? = null,
     ) {
-        for (tile in image.prepareTilesForRender(dst, x, y, scale, src)) {
-            drawTile(pass, dst, tile, variant, image.useImageLut)
+        val regions = filtered
+        if (regions == null) {
+            for (tile in image.prepareTilesForRender(dst, x, y, scale, src)) {
+                drawTile(pass, dst, tile, variant, image.useImageLut)
+            }
+            return
         }
+        val crop = src ?: image.cropRect?.let(::RectF)
+        fun part(rect: ImageRect, source: Mipmap?, read: ImageRect?) {
+            val r = RectF(rect.left, rect.top, rect.right, rect.bottom)
+            if (crop != null && !r.intersect(crop)) return
+            val limit = read?.let { RectF(it.left, it.top, it.right, it.bottom) }
+            for (tile in image.prepareTilesForRender(dst, x, y, scale, r, source, limit)) {
+                drawTile(pass, dst, tile, variant, image.useImageLut)
+            }
+        }
+        regions.unmade.forEach { part(it, null, null) }
+        regions.level?.let { level -> regions.made.forEach { part(it.rect, level, it.read) } }
     }
 
     private fun draw(
@@ -680,6 +701,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         val byteBuffer = tileBytes.get()
         byteBuffer.clear()
         putPlacement(byteBuffer, tile.placement, dst)
+        tile.read.forEach { byteBuffer.putFloat(it) }
         byteBuffer.flip()
 
         val pipeline = variant.pipeline(dst.format, lut != null)
@@ -688,11 +710,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // samplerVariant's stencil test reads against 1 - see [TileRenderer.blitPipelineStencilWrite],
         // the only thing that ever writes this attachment.
         if (variant === samplerVariant) pass.setStencilReference(1)
+        val tiles = arrayOf(
+            GPUBindGroupEntry(1, textureView = tile.view),
+            GPUBindGroupEntry(4, textureView = tile.right),
+            GPUBindGroupEntry(5, textureView = tile.down),
+            GPUBindGroupEntry(6, textureView = tile.corner),
+        )
         val entries = if (lut == null) {
-            arrayOf(GPUBindGroupEntry(1, textureView = tile.view))
+            tiles
         } else {
-            arrayOf(
-                GPUBindGroupEntry(1, textureView = tile.view),
+            tiles + arrayOf(
                 GPUBindGroupEntry(2, textureView = lut.view!!),
                 GPUBindGroupEntry(3, sampler = lut.sampler),
             )
