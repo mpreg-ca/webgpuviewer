@@ -324,6 +324,14 @@ open class ImagePage {
          */
         open var highQuality: Boolean = true
 
+        /**
+         * What tile filters read as `page_seed`, for noise that differs between pages but not
+         * between a page's tiles. By default this page's identity hash: set one derived from the
+         * page's source to keep it across reloads. A change re-cuts the page's tiles.
+         */
+        @Volatile
+        var filterSeed: Int = System.identityHashCode(this)
+
         override val width: Int
             get() = image?.shownWidth ?: 0
         override val height: Int

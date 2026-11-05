@@ -46,6 +46,19 @@
 //                      The network needs the most of the passes that run. An expression as above,
 //                      but of numbers and //!PARAM names, rounded up: 0 to 256
 //
+// Also not in mpv: a pass declaring `var<immediate> name: HookInfo;` reads where the filter's
+// input lies on its page. The struct is added to every pass, so none may define its own, and a
+// pass may declare no other var<immediate>:
+//   origin: vec2<f32>      the input's texel (0, 0) top-left, from the page's
+//   page_size: vec2<f32>   the page's size
+//   page_scale: f32        the scale the filter runs at
+//   input_scale: f32       input pixels per page pixel
+//   output_size: f32       the side, in pixels, the chain's result is cut to: the tile on screen
+//   page_seed: u32         fixed per page, for noise that matches across its tiles
+// origin and page_size are in the network's input pixels: a pass reading a resized texture
+// scales them itself. As an image filter, the page is the image, page_scale is 1, output_size is
+// the block as kept in the image's level, and page_seed is 0, as that serves every page.
+//
 // A network has no resolve of its own: the tile chain resizes its output.
 //
 // A `sampler` binding gets a linear clamp sampler. Textures are reused once their last reader

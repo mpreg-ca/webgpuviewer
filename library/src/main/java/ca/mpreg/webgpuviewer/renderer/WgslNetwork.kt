@@ -39,6 +39,8 @@ internal class WgslNetwork(
         val blockY: Int,
         /** Indices in [params] of those it declares as `override`s. */
         val params: List<Int>,
+        /** Whether it declares a `var<immediate>`, which can only be a `HookInfo`. */
+        val readsHook: Boolean,
     )
 
     /** A texture as a pass sees it. The tile itself has no [format]. */
@@ -226,6 +228,9 @@ internal class WgslNetwork(
         private val COMPUTE = Regex("""@compute[^{]*?\bfn\s+main\s*\(""")
         private val WORKGROUP = Regex("""@workgroup_size\(\s*(\d+)\s*(?:,\s*(\d+))?""")
         private val INTEGER = Regex("""[+-]?\d+""")
+        private val COMMENT = Regex("""//[^\r\n]*|/\*[\s\S]*?\*/""")
+        private val IMMEDIATE = Regex("""\bvar\s*<\s*immediate\s*>\s*\w+\s*:\s*(\w+)""")
+        private val HOOK_STRUCT = Regex("""\bstruct\s+HookInfo\b""")
 
         private val FORMATS = mapOf(
             "rgba16float" to TextureFormat.RGBA16Float,
@@ -436,6 +441,14 @@ internal class WgslNetwork(
                     { variable: String -> variable.startsWith("HOOKED.") || variable.startsWith("OUTPUT.") }
                 val save = d.save.takeIf { it != "HOOKED" }
                 require(save != "OUTPUT") { "$name: //!SAVE OUTPUT is the target's size, not a texture" }
+                val uncommented = COMMENT.replace(code, "")
+                val immediates = IMMEDIATE.findAll(uncommented).toList()
+                require(immediates.all { it.groupValues[1] == "HookInfo" }) {
+                    "$name: a var<immediate> must be a HookInfo"
+                }
+                require(!HOOK_STRUCT.containsMatchIn(uncommented)) {
+                    "$name: HookInfo is added to every pass; don't define it"
+                }
                 val stage = Stage(
                     name, code, d.binds, save,
                     SzExpr.parse(d.width ?: "HOOKED.w", sizes),
@@ -443,7 +456,7 @@ internal class WgslNetwork(
                     d.`when`?.let { SzExpr.parse(it, nominal) },
                     d.halo?.let(::halo),
                     found.map { it.binding }.sortedBy { it.index },
-                    format, blockX, blockY, declared[i],
+                    format, blockX, blockY, declared[i], immediates.isNotEmpty(),
                 )
                 if (save != null) saved.add(save)
                 stage

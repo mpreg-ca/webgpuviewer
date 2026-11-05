@@ -111,6 +111,18 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {}
         fails("bad width", pass.replace("//!COMPUTE", "//!WIDTH HOOKED.w +\n//!COMPUTE"))
     }
 
+    @Test
+    fun hookInfo() {
+        fun readsHook(src: String) = WgslNetwork.parse(src).stages.single().readsHook
+        val hooked = pass.replace("@compute", "var<immediate> hook: HookInfo;\n@compute")
+        assertTrue(readsHook(hooked))
+        assertTrue(!readsHook(pass))
+        assertTrue(!readsHook(pass.replace("@compute", "// var<immediate> hook: HookInfo;\n@compute")))
+        assertTrue(!readsHook(pass.replace("@compute", "/* var<immediate> h: HookInfo; */\n@compute")))
+        fails("other immediate", hooked.replace("HookInfo", "vec4<f32>"))
+        fails("own HookInfo", pass.replace("@compute", "struct HookInfo { a: f32 }\n@compute"))
+    }
+
     private val param = "//!PARAM g\n//!DESC grain\n//!DEFAULT 4.5\n//!MINIMUM 0\n//!MAXIMUM 10\n\n"
 
     private fun declares(vararg overrides: String) =

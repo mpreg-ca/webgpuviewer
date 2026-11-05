@@ -684,7 +684,7 @@ internal class ImageFilterChain(private val onChange: () -> Unit) {
                     encoder, image, column, row, geometry, input, inputView,
                     if (n == 0) timestamps else null,
                 )
-                for (f in running) f.encode(encoder)
+                encodeFilters(encoder, running, image, column, row, geometry)
 
                 val px = column * blockTexels
                 val py = row * blockTexels
@@ -732,6 +732,31 @@ internal class ImageFilterChain(private val onChange: () -> Unit) {
     }
 
     /** Block ([column], [row]) plus halo at 1:1, edges extended so the network sees no blank. */
+    private fun encodeFilters(
+        encoder: GPUCommandEncoder,
+        running: List<ImageFilter>,
+        image: Image,
+        column: Int,
+        row: Int,
+        geometry: BlockGeometry,
+    ) {
+        val base = image.mipmaps[0]
+        var placement = FilterPlacement(
+            (column * geometry.blockSize - geometry.halo).toFloat(),
+            (row * geometry.blockSize - geometry.halo).toFloat(),
+            base.width.toFloat(),
+            base.height.toFloat(),
+            BASE_SCALE,
+            1f,
+            (geometry.k * geometry.blockSize).toFloat(),
+            0,
+        )
+        for (f in running) {
+            f.encode(encoder, placement)
+            placement = placement.scaled(f.scale(BASE_SCALE))
+        }
+    }
+
     private fun drawBlock(
         encoder: GPUCommandEncoder,
         image: Image,
@@ -805,7 +830,7 @@ internal class ImageFilterChain(private val onChange: () -> Unit) {
         } finally {
             Hdr.cuttingTiles = false
         }
-        for (f in running()) f.encode(encoder)
+        encodeFilters(encoder, running(), image, 0, 0, geometry)
         // A real block's write too, or a probed size reads as cheaper than the one in use.
         val texels = geometry.k * blockSize
         val target = probeTarget(texels, base.format)

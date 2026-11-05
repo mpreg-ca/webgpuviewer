@@ -9,6 +9,30 @@ import androidx.webgpu.GPUTextureView
 class FilterOutput(val texture: GPUTexture, val view: GPUTextureView)
 
 /**
+ * A filter's input on its page. In input pixels: [originX]/[originY], texel (0, 0) from the page's
+ * top-left, and [width]/[height], the page. [inputScale] is input pixels per page pixel,
+ * [outputSize] the side the result is cut to, [seed] the page's
+ * [ca.mpreg.webgpuviewer.viewer.ImagePage.ImageSingle.filterSeed].
+ *
+ * An [ImageFilterChain]'s page is the image, at scale 1, with seed 0: its level serves every page.
+ */
+class FilterPlacement(
+    val originX: Float,
+    val originY: Float,
+    val width: Float,
+    val height: Float,
+    val pageScale: Float,
+    val inputScale: Float,
+    val outputSize: Float,
+    val seed: Int,
+) {
+    /** For the next filter, whose input is [k] times this one's. */
+    fun scaled(k: Float) = if (k == 1f) this else FilterPlacement(
+        originX * k, originY * k, width * k, height * k, pageScale, inputScale * k, outputSize, seed
+    )
+}
+
+/**
  * One step of [ImageFilterChain], run a block at a time as tiles ask; its result is kept as a level
  * of the image. May change resolution by [scale].
  *
@@ -62,8 +86,12 @@ abstract class ImageFilter {
     open fun prepareProbe(input: GPUTextureView, size: Int, pageScale: Float): FilterOutput =
         prepare(input, size, pageScale)
 
-    /** Runs on [prepare]'s input, in a compute pass writing [timestampWrites]. */
-    abstract fun encode(encoder: GPUCommandEncoder, timestampWrites: GPUPassTimestampWrites? = null)
+    /** Runs on [prepare]'s input, at [placement], in a compute pass writing [timestampWrites]. */
+    abstract fun encode(
+        encoder: GPUCommandEncoder,
+        placement: FilterPlacement,
+        timestampWrites: GPUPassTimestampWrites? = null,
+    )
 
     open fun cleanup() {}
 }

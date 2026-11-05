@@ -237,20 +237,28 @@ internal class TilesFilterChain(private val onChange: () -> Unit) {
     val view: GPUTextureView? get() = inputView
 
     /**
-     * Encode the running filters over [input]'s current contents. With [queries], the first
-     * [PROFILED_FILTERS] write the timestamps [filterQueries] gives.
+     * Encode the running filters over [input]'s current contents, placed at [placement]. With
+     * [queries], the first [PROFILED_FILTERS] write the timestamps [filterQueries] gives.
      */
-    fun encode(encoder: GPUCommandEncoder, pageScale: Float, queries: GPUQuerySet? = null) {
+    fun encode(
+        encoder: GPUCommandEncoder,
+        pageScale: Float,
+        placement: FilterPlacement,
+        queries: GPUQuerySet? = null,
+    ) {
+        var k = 1f
         running(pageScale).forEachIndexed { i, f ->
             val (begin, end) = filterQueries(i)
             f.encode(
                 encoder,
+                placement.scaled(k),
                 if (queries != null && i < PROFILED_FILTERS) GPUPassTimestampWrites(
                     queries,
                     begin,
                     end
                 ) else null
             )
+            k *= f.scale(pageScale)
         }
     }
 

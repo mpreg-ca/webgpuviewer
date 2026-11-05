@@ -26,6 +26,8 @@ import androidx.webgpu.TextureFormat
 import androidx.webgpu.TextureUsage
 import ca.mpreg.webgpuviewer.renderer.ImageFilterWgsl.Companion.TEST_SIDE
 import kotlinx.coroutines.withContext
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import kotlin.coroutines.EmptyCoroutineContext
 
 /**
@@ -163,7 +165,9 @@ class ImageFilterWgsl(source: String, private val label: String = "Wgsl") : Imag
             val view = input.createView().also { view -> owned.add { view.close() } }
             val textures = Textures(plan, view, values, owned)
             val encoder = device.createCommandEncoder()
-            dispatch(encoder, textures, null)
+            val side = TEST_SIDE.toFloat()
+            val placement = FilterPlacement(0f, 0f, side, side, pageScale, 1f, side * pageScale, 0)
+            dispatch(encoder, textures, placement, null)
             device.queue.submitAndRelease(encoder)
         } catch (e: IllegalArgumentException) {
             error = e.message
@@ -309,21 +313,37 @@ class ImageFilterWgsl(source: String, private val label: String = "Wgsl") : Imag
 
     override val name: String get() = label
 
-    override fun encode(encoder: GPUCommandEncoder, timestampWrites: GPUPassTimestampWrites?) {
+    override fun encode(
+        encoder: GPUCommandEncoder,
+        placement: FilterPlacement,
+        timestampWrites: GPUPassTimestampWrites?,
+    ) {
         val t = textures ?: return
         if (failed) return
         try {
-            dispatch(encoder, t, timestampWrites)
+            dispatch(encoder, t, placement, timestampWrites)
         } catch (e: Exception) {
             fail(e)
         }
     }
 
+    // Exactly HookInfo's size: setImmediates sends the whole capacity.
+    private val hookBytes =
+        ByteBuffer.allocateDirect(HOOK_INFO_BYTES).order(ByteOrder.nativeOrder())
+
     private fun dispatch(
         encoder: GPUCommandEncoder,
         t: Textures,
+        placement: FilterPlacement,
         timestampWrites: GPUPassTimestampWrites?
     ) {
+        val bytes = hookBytes
+        bytes.clear()
+        bytes.putFloat(placement.originX).putFloat(placement.originY)
+        bytes.putFloat(placement.width).putFloat(placement.height)
+        bytes.putFloat(placement.pageScale).putFloat(placement.inputScale)
+        bytes.putFloat(placement.outputSize).putInt(placement.seed)
+        bytes.flip()
         // One pass: WebGPU orders dispatches and inserts barriers within it, and a begin/end
         // per stage per tile is real work on a tiler.
         val compute = encoder.beginComputePass(
@@ -332,6 +352,8 @@ class ImageFilterWgsl(source: String, private val label: String = "Wgsl") : Imag
         try {
             for (p in t.dispatches) {
                 compute.setPipeline(p.pipeline)
+                // Only a pass declaring them: its layout has room for nothing else.
+                if (p.readsHook) compute.setImmediates(0, bytes)
                 compute.setBindGroup(0, p.bindGroup)
                 compute.dispatchWorkgroups(p.groupsX, p.groupsY)
             }
@@ -404,7 +426,8 @@ class ImageFilterWgsl(source: String, private val label: String = "Wgsl") : Imag
         val module = device.createShaderModule(
             GPUShaderModuleDescriptor(
                 label = stage.name,
-                shaderSourceWGSL = GPUShaderSourceWGSL(stage.code)
+                // After, so the device's line numbers stay the file's.
+                shaderSourceWGSL = GPUShaderSourceWGSL(stage.code + HOOK_INFO)
             )
         )
         // The pipeline keeps its own reference to the module.
@@ -443,7 +466,8 @@ class ImageFilterWgsl(source: String, private val label: String = "Wgsl") : Imag
         val pipeline: GPUComputePipeline,
         val bindGroup: GPUBindGroup,
         val groupsX: Int,
-        val groupsY: Int
+        val groupsY: Int,
+        val readsHook: Boolean,
     )
 
     /**
@@ -592,6 +616,7 @@ class ImageFilterWgsl(source: String, private val label: String = "Wgsl") : Imag
                     pipeline, group,
                     (step.width + step.stage.blockX - 1) / step.stage.blockX,
                     (step.height + step.stage.blockY - 1) / step.stage.blockY,
+                    step.stage.readsHook,
                 )
             }
             output = slotOutputs[plan.result.slot]
@@ -616,6 +641,20 @@ class ImageFilterWgsl(source: String, private val label: String = "Wgsl") : Imag
         private val TEST_SCALES = floatArrayOf(1f, 2f, 0.5f)
 
         private const val TEST_SIDE = 16
+
+        /** Field order is [dispatch]'s write order. */
+        private const val HOOK_INFO = """
+
+struct HookInfo {
+    origin: vec2<f32>,
+    page_size: vec2<f32>,
+    page_scale: f32,
+    input_scale: f32,
+    output_size: f32,
+    page_seed: u32,
+}
+"""
+        private const val HOOK_INFO_BYTES = 32
 
         /** The filter in the library's WGSL resource [file]. */
         fun load(file: String, label: String = file) =

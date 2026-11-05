@@ -96,6 +96,13 @@ import kotlin.math.sqrt
 import kotlin.time.Duration.Companion.milliseconds
 
 /**
+ * What a tile's content depends on besides placement: [ImagePage.ImageSingle.contentVersion] and
+ * [ImagePage.ImageSingle.filterSeed].
+ */
+private fun versionOf(page: ImagePage.ImageSingle): Long =
+    (page.contentVersion.toLong() shl 32) or (page.filterSeed.toLong() and 0xFFFFFFFFL)
+
+/**
  * Solve the (x, y) [RenderPage.render]/[RenderPage.renderFast] need so [image] lands centred at
  * screen position ([targetX], [targetY]) - inverts [Image.prepareForRender]'s placement math for
  * an arbitrary target.
@@ -1263,8 +1270,8 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         /** Cut at this size until the grid is wiped, which is when it adopts a new preferred one. */
         var tileSize: Int,
     ) {
-        /** [ImagePage.ImageSingle.contentVersion] the tiles were cut from. */
-        var contentVersion = page.contentVersion
+        /** [versionOf] the page the tiles were cut from. */
+        var contentVersion = versionOf(page)
 
         val tiles = HashMap<Long, Tile>()
         val pending = HashSet<Long>()
@@ -1716,7 +1723,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
 
         val st = pages[page] ?: return null
         val a = pagedAnchor(page, dst.width, dst.height, 0f, 0f, 1f)
-        if (st.contentVersion != page.contentVersion || st.scale != a.pageScale ||
+        if (st.contentVersion != versionOf(page) || st.scale != a.pageScale ||
             st.tileSize != preferredTileSize
         ) return emptySet()
         val gp = gridPlacement(
@@ -1754,7 +1761,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         val a = pagedAnchor(page, dst.width, dst.height, 0f, 0f, 1f)
         val st = pages.getOrPut(page) { newGrid(page, a.pageScale) }
 
-        val version = page.contentVersion
+        val version = versionOf(page)
         if (st.scale != a.pageScale || st.tileSize != preferredTileSize ||
             st.contentVersion != version
         ) {
@@ -1990,7 +1997,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             }
         }
 
-        val version = page.contentVersion
+        val version = versionOf(page)
         if (st.scale != pageScale || st.centerYOffset != centerYOffset ||
             st.tileSize != preferredTileSize || st.contentVersion != version
         ) {
@@ -2525,7 +2532,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     private fun generate(req: Request, measurementScope: CoroutineScope): Generated? {
         val st = req.state
         if (st.destroyed || !st.stable) return null
-        if (st.contentVersion != st.page.contentVersion) return null
+        if (st.contentVersion != versionOf(st.page)) return null
         return generateTileNow(st, req.tx, req.ty, measurementScope, req.onScreen, blocksPerStep())
     }
 
@@ -2676,6 +2683,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
                     tiles.encode(
                         encoder,
                         st.scale,
+                        filterPlacement(st, sourceScale, originX - halo, originY - halo),
                         if (run != null && mode.detailed) timestamps?.querySet else null
                     )
                 } else {
@@ -3333,6 +3341,28 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         st.clipT = clipT
         st.clipR = clipR
         st.clipB = clipB
+    }
+
+    /**
+     * [st]'s page as [TilesFilterChain]'s input sees it, at [sourceScale] tile pixels per input
+     * pixel; [x]/[y] is the input's first pixel from the grid's anchor.
+     */
+    private fun filterPlacement(
+        st: PageTiles, sourceScale: Float, x: Float, y: Float
+    ): FilterPlacement {
+        val (left, right) = pageHorizontalExtent(st.page, st.scale)
+        val height = st.scale * st.page.height
+        val top = st.centerYOffset - height / 2f
+        return FilterPlacement(
+            x + left / sourceScale,
+            y - top / sourceScale,
+            (left + right) / sourceScale,
+            height / sourceScale,
+            st.scale,
+            st.scale / sourceScale,
+            st.tileSize.toFloat(),
+            st.page.filterSeed,
+        )
     }
 
     /** What the budgeted tiles come to - the area every tile size is held to, whatever its own. */
