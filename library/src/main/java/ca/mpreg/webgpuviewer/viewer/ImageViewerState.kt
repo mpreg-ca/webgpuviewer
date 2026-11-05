@@ -75,7 +75,7 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
         }
 
     /**
-     * Resolves a high-quality tile that magnifies the page in one step - see [Sampler]. Assigning
+     * Resolves a high-quality tile that magnifies the page - see [Sampler]. Assigning
      * drops generated tiles.
      */
     var upscaler: Sampler
@@ -84,7 +84,7 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
             tiles.upscaler = value
         }
 
-    /** Resolves a high-quality tile that shrinks the page in one step; usually [Sampler.box]. */
+    /** Resolves a high-quality tile that shrinks the page; usually [Sampler.box]. */
     var downscaler: Sampler
         get() = tiles.downscaler
         set(value) {

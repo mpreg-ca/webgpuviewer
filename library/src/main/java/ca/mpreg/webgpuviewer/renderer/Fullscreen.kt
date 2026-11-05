@@ -65,17 +65,22 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
         val module = device.createShaderModule(
             GPUShaderModuleDescriptor(shaderSourceWGSL = GPUShaderSourceWGSL(VERTEX + code))
         )
-        return device.createRenderPipeline(
-            GPURenderPipelineDescriptor(
-                label = label,
-                vertex = GPUVertexState(module, entryPoint = "vs_main"),
-                fragment = GPUFragmentState(
-                    module, entryPoint = "fs_main",
-                    targets = arrayOf(GPUColorTargetState(format = format))
-                ),
-                primitive = GPUPrimitiveState(topology = TriangleList),
+        // The pipeline keeps its own reference to the module.
+        try {
+            return device.createRenderPipeline(
+                GPURenderPipelineDescriptor(
+                    label = label,
+                    vertex = GPUVertexState(module, entryPoint = "vs_main"),
+                    fragment = GPUFragmentState(
+                        module, entryPoint = "fs_main",
+                        targets = arrayOf(GPUColorTargetState(format = format))
+                    ),
+                    primitive = GPUPrimitiveState(topology = TriangleList),
+                )
             )
-        )
+        } finally {
+            module.close()
+        }
     }
 
     /** A pass over the whole of [dst]. Clears, since the triangle covers every pixel anyway. */

@@ -35,7 +35,7 @@ internal const val PROFILE_QUERY_COUNT = RESIZE_BEGIN_QUERY + 1
  * them - the same [ImageFilter]s an [ImageFilterChain] runs, but per tile and living only as long as it -
  * the source is drawn at its own resolution into [input] with the chain's halo, each filter applying at
  * the tile's page scale runs on the previous one's output, and [resolve] resizes the last to the tile
- * (box average to shrink, Catmull-Rom to enlarge).
+ * through [downscaler] to shrink or [upscaler] to enlarge.
  *
  * Held by [TileRenderer]; everything but the samplers on the render thread. Changing a sampler, or a
  * filter failing, calls [onChange]: tiles cut before are wrong.
@@ -43,9 +43,9 @@ internal const val PROFILE_QUERY_COUNT = RESIZE_BEGIN_QUERY + 1
 internal class TilesFilterChain(private val onChange: () -> Unit) {
     private val device get() = WebGpuRenderer.device
 
-    // ---- the one-step resolve ----
+    // ---- the samplers ----
 
-    /** Used where a tile enlarges in one step. Safe from any thread. */
+    /** Used where a tile enlarges. Safe from any thread. */
     @Volatile
     var upscaler: Sampler = Sampler.catmullRom()
         set(value) {
@@ -54,7 +54,7 @@ internal class TilesFilterChain(private val onChange: () -> Unit) {
             onChange()
         }
 
-    /** Used where a tile shrinks in one step. Safe from any thread. */
+    /** Used where a tile shrinks. Safe from any thread. */
     @Volatile
     var downscaler: Sampler = Sampler.box()
         set(value) {
@@ -272,7 +272,11 @@ internal class TilesFilterChain(private val onChange: () -> Unit) {
         val out = prepared ?: return
         val k = this.scale(pageScale)
         val halo = halo(pageScale)
-        resize.draw(pass, format, out.view, k * (halo + fracX), k * (halo + fracY), k / scale)
+        val ratio = k / scale
+        resize.draw(
+            pass, format, out.view, k * (halo + fracX), k * (halo + fracY), ratio,
+            if (ratio > 1f) downscaler else upscaler,
+        )
     }
 
     /** Rebuilt on the next [input]. */

@@ -4,7 +4,8 @@ import androidx.webgpu.ErrorFilter
 import kotlinx.coroutines.withContext
 
 /**
- * The WGSL [TileRenderer] resolves a high-quality tile with in one step, through [RenderPage.render].
+ * The WGSL [TileRenderer] resolves a high-quality tile with: in one step through [RenderPage.render],
+ * or after tile filters through [TileResize].
  *
  * [code] defines `resolve(src_start, scale, bounds) -> vec4<f32>`: the top-left of one destination
  * pixel's footprint in source texels, its size in texels (under 1 per axis enlarges), and the first
@@ -21,7 +22,7 @@ import kotlinx.coroutines.withContext
  */
 class Sampler(val code: String, val name: String) {
     /**
-     * Compiles [code] against the host, so a shader the device rejects fails here, not on first
+     * Compiles [code] against both hosts, so a shader the device rejects fails here, not on first
      * use. Does nothing without WebGPU.
      *
      * @throws IllegalArgumentException with the device's message.
@@ -33,6 +34,7 @@ class Sampler(val code: String, val name: String) {
             device.pushErrorScope(ErrorFilter.Validation)
             val built = try {
                 RenderPage.buildResolve(code)
+                TileResize.buildResolve(code)
                 null
             } catch (e: Exception) {
                 e.message ?: e.toString()
