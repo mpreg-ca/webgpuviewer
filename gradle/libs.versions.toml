@@ -14,12 +14,10 @@ kotlin-compose-compiler = { id = "org.jetbrains.kotlin.plugin.compose", version.
 [libraries]
 androidx-annotation = { module = "androidx.annotation:annotation", version = "1.11.0" }
 androidx-window = { module = "androidx.window:window", version = "1.5.1" }
-androidx-annotation-experimental = { module = "androidx.annotation:annotation-experimental", version = "1.6.0" }
-kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version = "1.11.0" }
 androidx-appcompat = { module = "androidx.appcompat:appcompat", version = "1.8.0" }
 androidx-viewpager = { module = "androidx.viewpager:viewpager", version = "1.1.0" }
 
-androidx-webgpu = { module = "androidx.webgpu:webgpu", version = "1.0.0-dev06" }
+androidx-webgpu = { module = "androidx.webgpu:webgpu", version = "1.0.0-alpha06" }
 androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version = "1.13.0" }
 androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version = "2026.09.00" }
 androidx-compose-ui = { group = "androidx.compose.ui", name = "ui" }
