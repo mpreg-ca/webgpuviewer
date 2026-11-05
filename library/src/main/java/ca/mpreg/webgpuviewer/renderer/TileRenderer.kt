@@ -36,6 +36,7 @@ import androidx.webgpu.GPURenderPassDescriptor
 import androidx.webgpu.GPURenderPassEncoder
 import androidx.webgpu.GPURenderPipeline
 import androidx.webgpu.GPURenderPipelineDescriptor
+import androidx.webgpu.GPUSampler
 import androidx.webgpu.GPUSamplerBindingLayout
 import androidx.webgpu.GPUSamplerDescriptor
 import androidx.webgpu.GPUShaderModuleDescriptor
@@ -134,7 +135,7 @@ internal fun solveImagePlacement(
  * Tiles live in content space: tile (tx, ty) holds the square tile-size pixels right/down of
  * the grid's anchor, so panning survives untouched. Changing scale (or a document position shift
  * in the continuous viewer) invalidates the whole grid, which regenerates once scale has held
- * stable for two frames.
+ * stable for two frames. Until then its old tiles draw scaled beneath - see [StaleTiles].
  *
  * The whole grid snaps to the nearest screen pixel so every blit is an exact 1:1 texel copy. A
  * grid's bind group and instances are kept between frames, so a blit is one instanced draw, its
@@ -190,7 +191,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         /** How much cheaper per pixel another size must look before the grids are re-cut. */
         private const val TILE_SIZE_MARGIN = 1.15
 
-        /** FrameParams: snap, dst_size, clip, ts and the atlas's side, padded. */
+        /** FrameParams: snap, dst_size, clip, ts, the atlas's side, texel_ts and shift. */
         private const val FRAME_IMMEDIATE_BYTES = 48
 
         /** What one [TILE_SIZE] tile costs, and the range the derived cache is held to. */
@@ -223,6 +224,18 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
                 )
             )
         }
+
+        private val staleSampler by lazy {
+            device.createSampler(
+                GPUSamplerDescriptor(
+                    magFilter = FilterMode.Linear,
+                    minFilter = FilterMode.Linear,
+                )
+            )
+        }
+
+        /** Float error at a tile edge shared by two grids, in pixels: not overlap. */
+        private const val EDGE_EPSILON = 0.01f
 
         // Explicit (not auto-inferred) so it can be shared across
         // blitPipeline/blitPipelineStencilWrite - an implicit/auto pipeline layout is unique to the
@@ -376,6 +389,29 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         }
         private val blitLutPipelinesStencilWrite = FormatKeyed { format ->
             buildBlitPipeline(format, stencilWriteState, true)
+        }
+
+        // Only where the grid's tiles didn't draw; marks it, so overlapping stale quads and the
+        // fast path skip it.
+        private val staleStencilState = GPUDepthStencilState(
+            format = TextureFormat.Stencil8,
+            depthWriteEnabled = OptionalBool.False,
+            depthCompare = CompareFunction.Always,
+            stencilFront = GPUStencilFaceState(
+                compare = CompareFunction.NotEqual, passOp = StencilOperation.Replace
+            ),
+            stencilBack = GPUStencilFaceState(
+                compare = CompareFunction.NotEqual, passOp = StencilOperation.Replace
+            ),
+            stencilReadMask = 0xFF,
+            stencilWriteMask = 0xFF,
+        )
+
+        private val blitPipelinesStale = FormatKeyed { format ->
+            buildBlitPipeline(format, staleStencilState)
+        }
+        private val blitLutPipelinesStale = FormatKeyed { format ->
+            buildBlitPipeline(format, staleStencilState, true)
         }
     }
 
@@ -851,6 +887,49 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     }
 
     /**
+     * A grid's tiles from before its scale, tile size or document position changed, drawn scaled
+     * under its new ones until covered, in the atlas slots they hold - see [acquireSlot].
+     * [scale], [tileSize] and [centerYOffset] are the grid's when they were cut.
+     */
+    private class StaleTiles(
+        val tiles: HashMap<Long, Tile>,
+        val scale: Float,
+        val tileSize: Int,
+        val centerYOffset: Float,
+    ) {
+        /** Drawn no more; released once no recorded pass can read them - see [evict]. */
+        val retiring = ArrayList<Tile>()
+
+        var instances: GPUBuffer? = null
+        var instanceCapacity = 0
+        var instanceCount = 0
+        var instancesDirty = true
+
+        // Its sampler is linear, unlike the grid's.
+        var bindGroup: GPUBindGroup? = null
+
+        fun retire(tile: Tile) {
+            retiring.add(tile)
+            instancesDirty = true
+        }
+
+        fun releaseSlots(atlas: TileAtlas?) {
+            tiles.values.forEach { atlas?.release(tileSize, it.atlasOrigin) }
+            retiring.forEach { atlas?.release(tileSize, it.atlasOrigin) }
+            tiles.clear()
+            retiring.clear()
+        }
+
+        fun destroy(atlas: TileAtlas?) {
+            releaseSlots(atlas)
+            instances?.destroyAndRelease()
+            instances = null
+            bindGroup?.close()
+            bindGroup = null
+        }
+    }
+
+    /**
      * How [generateTile] cuts a tile. [opens]: `prepare` opens a pass to carry the opening
      * timestamp - when it makes blocks of the image filters' level, or the tiles filters run.
      * [detailed]: the profile can split its time, which it can for the tiles filters alone.
@@ -1020,20 +1099,154 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
      */
     private fun freeColdestGrid(keep: PageTiles) {
         val victim = pages.values.firstOrNull {
-            it !== keep && it.tiles.isNotEmpty() && !it.page.isOnScreen &&
-                    it.tiles.values.none { t -> t.lastUsed >= frame - 1 }
+            it !== keep && (it.tiles.isNotEmpty() || it.stale != null) && !it.page.isOnScreen &&
+                    !drawnLately(it)
         } ?: return
         releaseTiles(victim)
         victim.pending.clear()
     }
 
-    /** Hand [st]'s tiles back to the atlas - it keeps none of its own state about them. */
+    /** Whether a pass this frame or last may read any of [st]'s slots - see [evict]. */
+    private fun drawnLately(st: PageTiles): Boolean {
+        val since = frame - 1
+        if (st.tiles.values.any { it.lastUsed >= since }) return true
+        val stale = st.stale ?: return false
+        return stale.tiles.values.any { it.lastUsed >= since } ||
+                stale.retiring.any { it.lastUsed >= since }
+    }
+
+    /** Hand [st]'s tiles, stale ones too, back to the atlas - it keeps no state about them. */
     private fun releaseTiles(st: PageTiles) {
         val pool = atlasOrNull
         if (pool != null) st.tiles.values.forEach { pool.release(st.tileSize, it.atlasOrigin) }
         st.tiles.clear()
         st.instancesDirty = true
         st.sweptRange = null
+        st.stale?.destroy(pool)
+        st.stale = null
+    }
+
+    /**
+     * As [releaseTiles], but [st]'s tiles become its [StaleTiles], at its scale before the caller
+     * changes it. A grid with none, as mid-pinch, keeps the stale ones it has.
+     */
+    private fun retireTiles(st: PageTiles) {
+        st.sweptRange = null
+        val old = st.stale
+        if (st.tiles.isEmpty()) return
+        val stale = StaleTiles(HashMap(st.tiles), st.scale, st.tileSize, st.centerYOffset)
+        if (old != null) {
+            old.releaseSlots(atlasOrNull)
+            stale.instances = old.instances
+            stale.instanceCapacity = old.instanceCapacity
+            stale.bindGroup = old.bindGroup
+        }
+        st.stale = stale
+        st.tiles.clear()
+        st.instancesDirty = true
+    }
+
+    /** [stale]'s tiles over [st]'s scale: screen pixels per stale texel. */
+    private fun staleZoom(st: PageTiles, stale: StaleTiles) = st.scale / stale.scale
+
+    /**
+     * Screen pixels from [st]'s snap down to [stale]'s tile row 0.
+     */
+    private fun staleShift(
+        st: PageTiles, stale: StaleTiles, zoom: Float = staleZoom(st, stale)
+    ) = st.centerYOffset - stale.centerYOffset * zoom
+
+    /** The (tx, ty) range of [st]'s grid that [stale]'s tile [staleKey] overlaps. */
+    private fun overlapped(st: PageTiles, stale: StaleTiles, staleKey: Long): GridRange {
+        val side = stale.tileSize * staleZoom(st, stale)
+        val x0 = (staleKey shr 32).toInt() * side
+        val y0 = staleShift(st, stale) + staleKey.toInt() * side
+        val ts = st.tileSize.toFloat()
+        return GridRange(
+            floor((x0 + EDGE_EPSILON) / ts).toInt(),
+            ceil((x0 + side - EDGE_EPSILON) / ts).toInt() - 1,
+            floor((y0 + EDGE_EPSILON) / ts).toInt(),
+            ceil((y0 + side - EDGE_EPSILON) / ts).toInt() - 1,
+        )
+    }
+
+    /** Stops drawing [stale]'s tiles that [st]'s cover, or that lie outside [wanted]. */
+    private fun retireCovered(st: PageTiles, stale: StaleTiles, wanted: GridRange) {
+        retireWhere(stale) { k ->
+            val r = overlapped(st, stale, k)
+            for (ty in max(r.ty0, wanted.ty0)..min(r.ty1, wanted.ty1)) {
+                for (tx in max(r.tx0, wanted.tx0)..min(r.tx1, wanted.tx1)) {
+                    if (!st.tiles.containsKey(key(tx, ty))) return@retireWhere false
+                }
+            }
+            true
+        }
+    }
+
+    /** Releases retiring stale tiles no recorded pass can read - see [evict]. */
+    private fun releaseRetired(st: PageTiles) {
+        val stale = st.stale ?: return
+        val pool = atlasOrNull
+        stale.retiring.removeAll { t ->
+            (t.lastUsed < frame - 1).also { if (it) pool?.release(stale.tileSize, t.atlasOrigin) }
+        }
+        if (stale.tiles.isEmpty() && stale.retiring.isEmpty()) {
+            stale.destroy(pool)
+            st.stale = null
+        }
+    }
+
+    /**
+     * A slot for [st]'s tile ([tx], [ty]), or -1 for a later frame to retry. Stale tiles give
+     * theirs up before another grid is freed.
+     */
+    private fun acquireSlot(pool: TileAtlas, st: PageTiles, tx: Int, ty: Int): Int {
+        var origin = pool.acquire(st.tileSize)
+        if (origin >= 0) return origin
+
+        pages.values.forEach { releaseRetired(it) }
+        origin = pool.acquire(st.tileSize)
+        if (origin >= 0) return origin
+        // The frames that free them requeue this tile.
+        if (pages.values.any { it.stale?.retiring?.isNotEmpty() == true }) {
+            invalidate()
+            return -1
+        }
+
+        // Slabs belong to one size at a time, so a just-changed size can find them all spoken
+        // for while the budget says there is room.
+        freeColdestGrid(st)
+        origin = pool.acquire(st.tileSize)
+        if (origin >= 0) return origin
+
+        // A stale tile's slot fits only its own size, so the ones under this tile help only when
+        // they match; else every stale tile goes, as nothing less is sure to free a slab.
+        val target = key(tx, ty)
+        val own = st.stale?.takeIf { it.tileSize == st.tileSize }
+        var retired = own != null && retireWhere(own) { overlapped(st, own, it).holds(target) }
+        if (!retired) {
+            for (other in pages.values) {
+                val stale = other.stale ?: continue
+                if (retireWhere(stale) { true }) retired = true
+            }
+        }
+        // Their slots come back two frames on.
+        if (retired) invalidate()
+        return -1
+    }
+
+    private inline fun retireWhere(stale: StaleTiles, predicate: (Long) -> Boolean): Boolean {
+        var retired = false
+        val it = stale.tiles.entries.iterator()
+        while (it.hasNext()) {
+            val (k, t) = it.next()
+            if (predicate(k)) {
+                stale.retire(t)
+                it.remove()
+                retired = true
+            }
+        }
+        return retired
     }
 
     /** Packed atlas position - both halves are well inside 16 bits at any sane atlas size. */
@@ -1055,6 +1268,8 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
 
         val tiles = HashMap<Long, Tile>()
         val pending = HashSet<Long>()
+
+        var stale: StaleTiles? = null
 
         // Set by [placeGrid], sent by [setBlitPipeline].
         var snapX = 0f
@@ -1106,6 +1321,8 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         fun destroyAll(atlas: TileAtlas?) {
             tiles.values.forEach { atlas?.release(tileSize, it.atlasOrigin) }
             tiles.clear()
+            stale?.destroy(atlas)
+            stale = null
             pending.clear()
             instances?.destroyAndRelease()
             instances = null
@@ -1131,13 +1348,22 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     private val frameBytes =
         ByteBuffer.allocateDirect(FRAME_IMMEDIATE_BYTES).order(ByteOrder.nativeOrder())
 
+    /** [StaleTiles] placed at [at], at [pageScale] rather than their own. */
+    private class StaleDraw(val tiles: StaleTiles, val at: GridPlacement, val pageScale: Float)
+
+    /** [stale]: draw those, through [blitPipelinesStale], instead of [st]'s own. */
     private fun setBlitPipeline(
-        pass: GPURenderPassEncoder, format: Int, st: PageTiles, stencilWrite: Boolean
+        pass: GPURenderPassEncoder,
+        format: Int,
+        st: PageTiles,
+        stencilWrite: Boolean,
+        stale: StaleDraw? = null,
     ) {
         var useLut = true
         st.page.forEachImage { image, _, _ -> if (!image.useImageLut) useLut = false }
         val lut = if (useLut) RenderPage.lut else null
         val pipelines = when {
+            stale != null -> if (lut == null) blitPipelinesStale else blitLutPipelinesStale
             lut == null && stencilWrite -> blitPipelinesStencilWrite
             lut == null -> blitPipelines
             stencilWrite -> blitLutPipelinesStencilWrite
@@ -1146,12 +1372,18 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         pass.setPipeline(pipelines[format])
         val bytes = frameBytes
         bytes.clear()
-        bytes.putFloat(st.snapX).putFloat(st.snapY)
+        val at = stale?.at
+        bytes.putFloat(at?.snapX ?: st.snapX).putFloat(at?.snapY ?: st.snapY)
         bytes.putFloat(st.dstW).putFloat(st.dstH)
-        bytes.putFloat(st.clipL).putFloat(st.clipT).putFloat(st.clipR).putFloat(st.clipB)
-        bytes.putFloat(st.tileSize.toFloat()).putFloat(atlas.side.toFloat())
-        // Struct padding.
-        bytes.putFloat(0f).putFloat(0f)
+        if (at == null) {
+            bytes.putFloat(st.clipL).putFloat(st.clipT).putFloat(st.clipR).putFloat(st.clipB)
+        } else {
+            bytes.putFloat(at.clipL).putFloat(at.clipT).putFloat(at.clipR).putFloat(at.clipB)
+        }
+        val texels = (stale?.tiles?.tileSize ?: st.tileSize).toFloat()
+        val zoom = if (stale != null) stale.pageScale / stale.tiles.scale else 1f
+        bytes.putFloat(texels * zoom).putFloat(atlas.side.toFloat())
+        bytes.putFloat(texels).putFloat(if (stale != null) staleShift(st, stale.tiles, zoom) else 0f)
         bytes.flip()
         pass.setImmediates(0, bytes)
         if (lut == null) return
@@ -1283,10 +1515,17 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     /**
      * [pageScale]/[anchorX]/[anchorY] a paged overload resolves its (x, y, scale) placement to.
      * [pinned] when that placement is the home animation's target rather than where the page
-     * actually is this frame - tiles then can't stand in for a live draw of it.
+     * actually is this frame - tiles then can't stand in for a live draw of it. [livePageScale],
+     * [liveAnchorX] and [liveAnchorY] are where it is, pinned or not.
      */
     private class PagedAnchor(
-        val pageScale: Float, val anchorX: Float, val anchorY: Float, val pinned: Boolean
+        val pageScale: Float,
+        val anchorX: Float,
+        val anchorY: Float,
+        val pinned: Boolean,
+        val livePageScale: Float,
+        val liveAnchorX: Float,
+        val liveAnchorY: Float,
     )
 
     private fun pagedAnchor(
@@ -1305,7 +1544,15 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             dstWidth / 2f + pageScale * ((effectivePageX + x + WebGpuRenderer.offsetX) * dstWidth)
         val anchorY =
             dstHeight / 2f + pageScale * ((effectivePageY + y + WebGpuRenderer.offsetY) * dstHeight)
-        return PagedAnchor(pageScale, anchorX, anchorY, goingHome)
+        if (!goingHome) {
+            return PagedAnchor(pageScale, anchorX, anchorY, false, pageScale, anchorX, anchorY)
+        }
+        val liveScale = page.scale * scale
+        return PagedAnchor(
+            pageScale, anchorX, anchorY, true, liveScale,
+            dstWidth / 2f + liveScale * ((page.x + x + WebGpuRenderer.offsetX) * dstWidth),
+            dstHeight / 2f + liveScale * ((page.y + y + WebGpuRenderer.offsetY) * dstHeight),
+        )
     }
 
     /**
@@ -1608,7 +1855,10 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             a.pageScale,
             page.isScaleAnimating,
             applyRetainWindow = true,
-            useStencilMask = true
+            useStencilMask = true,
+            liveAnchorX = a.liveAnchorX,
+            liveAnchorY = a.liveAnchorY,
+            livePageScale = a.livePageScale,
         )
         // Never "covered" off a pinned grid: it sits at the animation's target, so the live draw
         // is the only thing showing the page where it is mid-animation.
@@ -1713,6 +1963,9 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         applyRetainWindow: Boolean,
         useStencilMask: Boolean = false,
         crop: Rect? = null,
+        liveAnchorX: Float = anchorX,
+        liveAnchorY: Float = anchorY,
+        livePageScale: Float = pageScale,
     ): Boolean {
         if (page.destroyed || !page.highQuality || !enabled) return false
         if (!page.hasUploadedImage) return false
@@ -1744,7 +1997,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             // A changed centerYOffset at fixed scale means a placeholder corrected its guessed
             // height - invalidate the same way a scale change does. A changed preferred size
             // rides the same path: this is the one moment a grid can be re-cut for free.
-            releaseTiles(st)
+            if (st.contentVersion == version) retireTiles(st) else releaseTiles(st)
             st.pending.clear()
             st.scale = pageScale
             st.tileSize = preferredTileSize
@@ -1804,7 +2057,25 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             }
         }
 
-        if (pass != null) drawInstanced(pass, format, st, useStencilMask)
+        st.stale?.let { stale ->
+            retireCovered(st, stale, wanted)
+            releaseRetired(st)
+        }
+
+        if (pass != null) {
+            drawInstanced(pass, format, st, useStencilMask)
+            // Their stencil test needs the attachment. At the live placement, not a pinned grid's:
+            // nothing else draws the page where it is.
+            if (useStencilMask) {
+                val live = if (livePageScale == pageScale && liveAnchorX == anchorX &&
+                    liveAnchorY == anchorY
+                ) gp else gridPlacement(
+                    page, dstWidth, dstHeight, liveAnchorX, liveAnchorY, centerYOffset,
+                    livePageScale, st.tileSize, crop
+                )
+                if (live != null) drawStale(pass, format, st, live, livePageScale)
+            }
+        }
 
         // Drop what fell outside the wanted range, else a page scrolling past keeps accumulating
         // tiles. Only when the range moved - a scroll crosses a tile boundary every tile-size
@@ -1841,9 +2112,41 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
 
         setBlitPipeline(pass, format, st, useStencilMask)
         if (useStencilMask) pass.setStencilReference(1)
-        pass.setBindGroup(0, st.bindGroup ?: gridBindGroup(st).also { st.bindGroup = it })
+        pass.setBindGroup(0, st.bindGroup ?: gridBindGroup().also { st.bindGroup = it })
         pass.setVertexBuffer(0, instances)
         pass.draw(6, st.instanceCount)
+    }
+
+    /**
+     * Blit [st]'s [StaleTiles] at [at], scaled to [pageScale], where none of its own tiles drew -
+     * after [drawInstanced], in a pass with the stencil attachment.
+     */
+    private fun drawStale(
+        pass: GPURenderPassEncoder, format: Int, st: PageTiles, at: GridPlacement, pageScale: Float
+    ) {
+        val stale = st.stale ?: return
+        if (stale.instancesDirty) {
+            stale.instancesDirty = false
+            stale.instanceCount = stale.tiles.size
+            if (stale.instanceCount > 0 && stale.instanceCapacity < stale.instanceCount) {
+                stale.instances?.destroyAndRelease()
+                stale.instanceCapacity = instanceCapacityFor(stale.instanceCount)
+                stale.instances = createInstanceBuffer(stale.instanceCapacity)
+            }
+            if (stale.instanceCount > 0) writeInstances(stale.tiles, stale.instances!!)
+        }
+        val instances = stale.instances ?: return
+        if (stale.instanceCount == 0) return
+        for (t in stale.tiles.values) t.lastUsed = frame
+
+        setBlitPipeline(pass, format, st, true, StaleDraw(stale, at, pageScale))
+        pass.setStencilReference(1)
+        pass.setBindGroup(
+            0,
+            stale.bindGroup ?: gridBindGroup(staleSampler).also { stale.bindGroup = it }
+        )
+        pass.setVertexBuffer(0, instances)
+        pass.draw(6, stale.instanceCount)
     }
 
     /**
@@ -1880,7 +2183,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         device.queue.writeBuffer(instances, 0, bytes.slice())
 
         setBlitPipeline(pass, format, st, false)
-        pass.setBindGroup(0, st.bindGroup ?: gridBindGroup(st).also { st.bindGroup = it })
+        pass.setBindGroup(0, st.bindGroup ?: gridBindGroup().also { st.bindGroup = it })
         pass.setVertexBuffer(0, instances)
         pass.draw(6, count)
         instances.destroyAndRelease()
@@ -1899,14 +2202,15 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         return scratchBytes
     }
 
-    private fun gridBindGroup(st: PageTiles): GPUBindGroup = device.createBindGroup(
-        GPUBindGroupDescriptor(
-            layout = blitBindGroupLayout, entries = arrayOf(
-                GPUBindGroupEntry(1, textureView = atlas.view),
-                GPUBindGroupEntry(2, sampler = blitSampler),
+    private fun gridBindGroup(sampler: GPUSampler = blitSampler): GPUBindGroup =
+        device.createBindGroup(
+            GPUBindGroupDescriptor(
+                layout = blitBindGroupLayout, entries = arrayOf(
+                    GPUBindGroupEntry(1, textureView = atlas.view),
+                    GPUBindGroupEntry(2, sampler = sampler),
+                )
             )
         )
-    )
 
     /**
      * Rewrite [st]'s instance data - grid coordinate and atlas position per tile. Called from the
@@ -1918,27 +2222,33 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         if (st.instanceCount == 0) return
 
         if (st.instanceCapacity < st.instanceCount) {
-            // Rounded up so filling in tile by tile doesn't reallocate on every one.
-            val capacity = (st.instanceCount + 63) / 64 * 64
             st.instances?.destroyAndRelease()
-            st.instances = device.createBuffer(
-                GPUBufferDescriptor(
-                    size = capacity * INSTANCE_BYTES,
-                    usage = BufferUsage.Vertex or BufferUsage.CopyDst
-                )
-            )
-            st.instanceCapacity = capacity
+            st.instanceCapacity = instanceCapacityFor(st.instanceCount)
+            st.instances = createInstanceBuffer(st.instanceCapacity)
         }
+        writeInstances(st.tiles, st.instances!!)
+    }
 
-        val bytes = scratch(st.instanceCount * INSTANCE_BYTES.toInt())
-        for ((tkey, tile) in st.tiles) {
+    // Rounded up so filling in tile by tile doesn't reallocate on every one.
+    private fun instanceCapacityFor(count: Int) = (count + 63) / 64 * 64
+
+    private fun createInstanceBuffer(capacity: Int): GPUBuffer = device.createBuffer(
+        GPUBufferDescriptor(
+            size = capacity * INSTANCE_BYTES,
+            usage = BufferUsage.Vertex or BufferUsage.CopyDst
+        )
+    )
+
+    private fun writeInstances(tiles: Map<Long, Tile>, buffer: GPUBuffer) {
+        val bytes = scratch(tiles.size * INSTANCE_BYTES.toInt())
+        for ((tkey, tile) in tiles) {
             bytes.putFloat((tkey shr 32).toInt().toFloat())
             bytes.putFloat(tkey.toInt().toFloat())
             bytes.putFloat(unpackX(tile.atlasOrigin).toFloat())
             bytes.putFloat(unpackY(tile.atlasOrigin).toFloat())
         }
         bytes.flip()
-        device.queue.writeBuffer(st.instances!!, 0, bytes.slice())
+        device.queue.writeBuffer(buffer, 0, bytes.slice())
     }
 
     /**
@@ -2762,14 +3072,8 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         evict()
 
         val pool = atlas
-        // Slabs belong to one size at a time, so a just-changed size can find them all spoken
-        // for while the budget says there is room - free a grid and try once more.
-        var origin = pool.acquire(st.tileSize)
-        if (origin < 0) {
-            freeColdestGrid(st)
-            origin = pool.acquire(st.tileSize)
-        }
-        // Still nothing - the worker comes back to this tile.
+        val origin = acquireSlot(pool, st, tx, ty)
+        // Nothing - a frame requeues this tile.
         if (origin < 0) return null
 
         try {
@@ -3120,9 +3424,13 @@ struct FrameParams {
     dst_size: vec2<f32>,
     // The grid's rect in screen pixels that blits are clipped to - see the class doc.
     clip: vec4<f32>,
-    // This grid's tile size and the atlas's - per grid, so neither can be a constant.
+    // This grid's tile size on screen and the atlas's - per grid, so neither can be a constant.
     ts: f32,
     atlas_size: f32,
+    // A tile's side in the atlas: [ts] but for stale tiles, drawn scaled.
+    texel_ts: f32,
+    // Row 0's offset below the snap: 0 but for stale tiles - see TileRenderer.staleShift.
+    shift: f32,
 }
 
 var<immediate> frame_params: FrameParams;
@@ -3132,6 +3440,8 @@ var<immediate> frame_params: FrameParams;
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
+    // The tile's texel centres in the atlas, (min, max): a filtered read stays inside its slot.
+    @location(1) slot: vec4<f32>,
 }
 
 // Per instance: grid coordinate, then position in the atlas.
@@ -3151,7 +3461,7 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32, @location(0) tile: vec4<f32
 
     // Clamping the corners to the clip rect shrinks the quad and its uv window in step, so
     // whatever survives is still a 1:1 texel copy. Offscreen overhang is left to NDC clipping.
-    let origin = frame_params.snap + tile.xy * ts;
+    let origin = frame_params.snap + vec2<f32>(0.0, frame_params.shift) + tile.xy * ts;
     let p = clamp(origin + pos * ts, frame_params.clip.xy, frame_params.clip.zw);
 
     var out: VertexOutput;
@@ -3161,7 +3471,9 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32, @location(0) tile: vec4<f32
         0.0, 1.0
     );
     // Into the atlas: this tile's slot plus whatever of the tile survived the clamp.
-    out.uv = (tile.zw + (p - origin)) / frame_params.atlas_size;
+    out.uv = (tile.zw + (p - origin) * (frame_params.texel_ts / ts)) / frame_params.atlas_size;
+    out.slot = vec4<f32>(tile.zw + 0.5, tile.zw + frame_params.texel_ts - 0.5) /
+        frame_params.atlas_size;
     return out;
 }
 
@@ -3171,15 +3483,15 @@ private const val BLIT_FS = """
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // 1:1 at integer positions with a nearest sampler: an exact copy of the tile's texels,
-    // already premultiplied by RenderPage.
-    return textureSample(src_tex, src_sampler, in.uv);
+    // already premultiplied by RenderPage. The clamp only bites on scaled stale tiles.
+    return textureSample(src_tex, src_sampler, clamp(in.uv, in.slot.xy, in.slot.zw));
 }
 """
 
 private const val BLIT_LUT_FS = """
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let texel = textureSample(src_tex, src_sampler, in.uv);
+    let texel = textureSample(src_tex, src_sampler, clamp(in.uv, in.slot.xy, in.slot.zw));
     if (texel.a <= 0.0) {
         return texel;
     }
